@@ -22,6 +22,48 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         width = int(scene.render.resolution_x * scale)
         height = int(scene.render.resolution_y * scale)
 
+        # シーン情報をコンソールに出力
+        print("\n=== DIY Renderer: Scene Info ===")
+        
+        # カメラ情報
+        camera = scene.camera
+        if camera:
+            print(f"Camera: {camera.name}")
+            print(f"  Location: {camera.matrix_world.translation}")
+            print(f"  Lens: {camera.data.lens}mm")
+        
+        # オブジェクト情報
+        mesh_count = 0
+        light_count = 0
+        for obj_instance in depsgraph.object_instances:
+            obj = obj_instance.object
+            
+            if obj.type == 'MESH':
+                mesh_count += 1
+                mesh = obj.evaluated_get(depsgraph).data
+                print(f"Mesh: {obj.name}")
+                print(f"  Vertices: {len(mesh.vertices)}")
+                print(f"  Polygons: {len(mesh.polygons)}")
+                print(f"  Location: {obj_instance.matrix_world.translation}")
+                print(f"  Materials: {len(obj.material_slots)}")
+                
+            elif obj.type == 'LIGHT':
+                light_count += 1
+                light = obj.data
+                print(f"Light: {obj.name}")
+                print(f"  Type: {light.type}")
+                print(f"  Energy: {light.energy}")
+                print(f"  Color: {light.color}")
+                print(f"  Location: {obj_instance.matrix_world.translation}")
+        
+        print(f"\nTotal: {mesh_count} meshes, {light_count} lights")
+        
+        # ワールド設定
+        if scene.world:
+            print(f"World background: {scene.world.color}")
+        
+        print("=== End Scene Info ===\n")
+
         # 結果バッファ開始
         result = self.begin_result(0, 0, width, height)
         rlayer = result.layers[0]
