@@ -76,6 +76,9 @@ def export_scene_to_file(depsgraph):
         base_dir = tempfile.gettempdir()
     fd, path = tempfile.mkstemp(prefix="diy_scene_", suffix=".txt", dir=base_dir)
     os.close(fd)
+    print(f"[DIYRenderer] Exporting scene to: {path}")
+    mesh_count = 0
+    tri_count = 0
     try:
         with open(path, 'w', encoding='utf-8') as f:
             for obj_instance in depsgraph.object_instances:
@@ -105,7 +108,14 @@ def export_scene_to_file(depsgraph):
                 for (a,b,c) in tris:
                     f.write(f"t {a} {b} {c}\n")
                 eval_obj.to_mesh_clear()
+                mesh_count += 1
+                tri_count += len(tris)
+                if mesh_count <= 2:  # Print first 2 meshes for debugging
+                    print(f"[DIYRenderer] Exported mesh '{obj.name}': {len(verts_world)} verts, {len(tris)} tris")
+                    if len(verts_world) > 0:
+                        print(f"[DIYRenderer]   First vertex: ({verts_world[0].x:.3f}, {verts_world[0].y:.3f}, {verts_world[0].z:.3f})")
             f.write("(end)\n")
+        print(f"[DIYRenderer] Export complete: {mesh_count} meshes, {tri_count} total triangles")
     except Exception as e:
         print("[DIYRenderer] Scene export failed:", e)
         return None
@@ -114,6 +124,7 @@ def export_scene_to_file(depsgraph):
 def compute_camera_params(scene, width, height):
     cam = scene.camera
     if not cam:
+        print("[DIYRenderer] WARNING: No camera in scene!")
         return None
     cam_matrix = cam.matrix_world
     pos = cam_matrix.translation
@@ -125,6 +136,9 @@ def compute_camera_params(scene, width, height):
     lens = cam.data.lens
     fov_rad = 2.0 * math.atan(sensor_w / (2.0 * lens))
     fov_deg = math.degrees(fov_rad)
+    print(f"[DIYRenderer] Camera: pos=({pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f}), "
+          f"dir=({forward.x:.3f}, {forward.y:.3f}, {forward.z:.3f}), "
+          f"up=({up.x:.3f}, {up.y:.3f}, {up.z:.3f}), fov={fov_deg:.1f}")
     return {
         'pos': pos,
         'dir': forward,
@@ -144,9 +158,14 @@ def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, f
            '--campos', str(cam_params['pos'].x), str(cam_params['pos'].y), str(cam_params['pos'].z),
            '--camdir', str(cam_params['dir'].x), str(cam_params['dir'].y), str(cam_params['dir'].z),
            '--camup', str(cam_params['up'].x), str(cam_params['up'].y), str(cam_params['up'].z),
-           '--fov', str(cam_params['fov'])]
+           '--fov', str(cam_params['fov']),
+           '--debug',
+           '--disable-aabb']  # Temporarily disable AABB to test raw triangle intersections
+    print(f"[DIYRenderer] Calling external renderer: {' '.join(cmd)}")
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        if proc.stderr:
+            print(f"[DIYRenderer] External renderer stderr:\n{proc.stderr[:2000]}")
     except Exception as e:
         print('[DIYRenderer] External renderer invocation failed:', e)
         return None
@@ -214,6 +233,9 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 pass
             self.texture = None
         self.viewport_pixels_cache = None
+        # Reset progressive rendering state
+        self.viewport_last_update = 0
+        self.viewport_resolution_level = 0  # Start from lowest resolution
 
     def view_draw(self, context, depsgraph):
         region = context.region
@@ -221,16 +243,58 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         height = region.height
         import gpu
         from gpu_extras.presets import draw_texture_2d  # used for drawing texture
+        import time
+        
         if not hasattr(self, 'frame_counter'):
             self.frame_counter = 0
+        if not hasattr(self, 'viewport_last_update'):
+            self.viewport_last_update = 0
+        if not hasattr(self, 'viewport_resolution_level'):
+            self.viewport_resolution_level = 0
+            
         self.frame_counter += 1
-        render_width = max(80, width // 8)
-        render_height = max(60, height // 8)
+        current_time = time.time()
+        time_since_update = current_time - self.viewport_last_update
+        
+        # Progressive resolution: start low, increase when idle
+        # Level 0: 1/16 (very fast, update every frame)
+        # Level 1: 1/8 (fast, update every 5 frames or 0.5s idle)
+        # Level 2: 1/4 (medium, 1s idle)
+        # Level 3: 1/2 (high, 2s idle)
+        resolution_configs = [
+            {'scale': 16, 'update_frames': 1, 'idle_time': 0.0},
+            {'scale': 8, 'update_frames': 3, 'idle_time': 0.3},
+            {'scale': 4, 'update_frames': 10, 'idle_time': 1.0},
+            {'scale': 2, 'update_frames': 30, 'idle_time': 2.0},
+        ]
+        
+        # Determine target resolution level based on idle time
+        target_level = 0
+        for i, config in enumerate(resolution_configs):
+            if time_since_update >= config['idle_time']:
+                target_level = i
+        
+        # Progressive upgrade: gradually increase quality
+        if time_since_update > resolution_configs[min(self.viewport_resolution_level + 1, len(resolution_configs) - 1)]['idle_time']:
+            if self.viewport_resolution_level < len(resolution_configs) - 1:
+                self.viewport_resolution_level += 1
+                target_level = self.viewport_resolution_level
+        
+        # Reset to lowest resolution on camera move (detected by frequent updates)
+        if time_since_update < 0.1:  # Moving
+            target_level = 0
+            self.viewport_resolution_level = 0
+        
+        config = resolution_configs[target_level]
+        render_width = max(40, width // config['scale'])
+        render_height = max(30, height // config['scale'])
+        
         needs_update = (
             not hasattr(self, 'texture') or self.texture is None or
             not hasattr(self, 'viewport_pixels_cache') or self.viewport_pixels_cache is None or
             self.texture.width != render_width or self.texture.height != render_height or
-            self.frame_counter % 30 == 0
+            self.frame_counter % config['update_frames'] == 0 or
+            time_since_update > config['idle_time']
         )
         if needs_update:
             pixels = None

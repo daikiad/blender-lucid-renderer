@@ -89,6 +89,30 @@ int main(int argc, char** argv){
             if(i==0){
                 int show = std::min<int>((int)m.vertices.size(),5);
                 for(int v=0; v<show; ++v){ const auto &vv = m.vertices[v]; std::cerr << "[diyrt] v"<<v<<"=("<<vv.x<<","<<vv.y<<","<<vv.z<<")\n"; }
+                // Test AABB intersection manually for first mesh
+                Ray testRay{cam.pos, cam.forward};
+                bool aabbHit = rayAABB(testRay, m.bmin, m.bmax);
+                std::cerr << "[diyrt] AABB test: ray from " << testRay.o.x << "," << testRay.o.y << "," << testRay.o.z 
+                          << " dir " << testRay.d.x << "," << testRay.d.y << "," << testRay.d.z 
+                          << " -> hit=" << (aabbHit ? "YES" : "NO") << "\n";
+                // Manual AABB calculation for Y axis
+                float invY = (testRay.d.y != 0.0f) ? 1.0f / testRay.d.y : 1e30f;
+                float t1y = (m.bmin.y - testRay.o.y) * invY;
+                float t2y = (m.bmax.y - testRay.o.y) * invY;
+                std::cerr << "[diyrt] Y-axis slab: bmin.y=" << m.bmin.y << " bmax.y=" << m.bmax.y 
+                          << " ray.o.y=" << testRay.o.y << " ray.d.y=" << testRay.d.y
+                          << " t1y=" << t1y << " t2y=" << t2y << "\n";
+                // Test first triangle intersection directly
+                if(m.triangles.size() > 0) {
+                    const auto &tri = m.triangles[0];
+                    const Vec3 &a = m.vertices[tri.i0];
+                    const Vec3 &b = m.vertices[tri.i1];
+                    const Vec3 &c = m.vertices[tri.i2];
+                    float t = rayTriangle(testRay, a, b, c);
+                    std::cerr << "[diyrt] Triangle test: tri0 indices=" << tri.i0 << "," << tri.i1 << "," << tri.i2
+                              << " normal=(" << tri.faceNormal.x << "," << tri.faceNormal.y << "," << tri.faceNormal.z << ")"
+                              << " t=" << t << "\n";
+                }
             }
         }
     }
@@ -96,27 +120,37 @@ int main(int argc, char** argv){
         int y = tileY + py;
         for(int px=0; px<tileW; ++px){
             int x = tileX + px;
-            
-            // Test mode: output simple patterns instead of raytracing
-            // Mode 1: Solid red
-            // float r = 1.0f, g = 0.0f, b = 0.0f, a = 1.0f;
-            
-            // Mode 2: Horizontal gradient (left=red, right=green)
-            // float r = (float)x / fullW;
-            // float g = 1.0f - (float)x / fullW;
-            // float b = 0.0f;
-            // float a = 1.0f;
-            
-            // Mode 3: 2D gradient (x=red, y=green)
-            float r = (float)x / fullW;
-            float g = (float)y / fullH;
-            float b = 0.5f;
-            float a = 1.0f;
-            
+            float ndcX = (2.0f * (x + 0.5f) / fullW - 1.0f) * cam.aspect;
+            float ndcY = (2.0f * (y + 0.5f) / fullH - 1.0f);  // Fix: Remove the 1.0f - inversion
+            // Construct ray direction: forward + offset from image plane
+            // Image plane is at distance 1 from camera, with size (2*scale*aspect, 2*scale)
+            Vec3 worldDir = cam.forward + cam.right * (ndcX * scale) + cam.up * (ndcY * scale);
+            worldDir.normalize();
+            Ray ray{cam.pos, worldDir};
+            Vec3 n;
+            if(disableAABB){
+                float closest=1e30f; n={0,0,0};
+                for(const auto &m: scene.meshes){
+                    for(const auto &tri: m.triangles){
+                        const Vec3 &a=m.vertices[tri.i0]; const Vec3 &b=m.vertices[tri.i1]; const Vec3 &c=m.vertices[tri.i2];
+                        float t=rayTriangle(ray,a,b,c); if(t>0.0f && t<closest){ closest=t; n=tri.faceNormal; }
+                    }
+                }
+            } else {
+                n = traceRay(scene, ray);
+            }
+            float r = n.x * 0.5f + 0.5f; float g = n.y * 0.5f + 0.5f; float b = n.z * 0.5f + 0.5f; float a = 1.0f;
             std::cout << r << ' ' << g << ' ' << b << ' ' << a << '\n';
-            
             if(debug && py==0 && px<5){
-                std::cerr << "[diyrt] testMode pixel x="<<x<<" y="<<y<<" rgba=("<<r<<","<<g<<","<<b<<","<<a<<")\n";
+                // Test AABB with actual pixel ray
+                bool pixelAABBHit = false;
+                for(const auto &m: scene.meshes) {
+                    if(rayAABB(ray, m.bmin, m.bmax)) {
+                        pixelAABBHit = true;
+                        break;
+                    }
+                }
+                std::cerr << "[diyrt] sampleRay x="<<x<<" y="<<y<<" dir=("<<worldDir.x<<","<<worldDir.y<<","<<worldDir.z<<") normal=("<<n.x<<","<<n.y<<","<<n.z<<")"<< (disableAABB?" noAABB":" AABB=") << (pixelAABBHit?"HIT":"MISS") <<"\n";
             }
         }
     }

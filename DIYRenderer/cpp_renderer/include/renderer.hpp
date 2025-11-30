@@ -42,6 +42,11 @@ inline void finalizeMeshBounds(Mesh &m){
         m.bmax.y = std::max(m.bmax.y, v.y);
         m.bmax.z = std::max(m.bmax.z, v.z);
     }
+    // Add small epsilon to avoid zero-thickness boxes
+    const float eps = 0.001f;
+    if(m.bmax.x - m.bmin.x < eps) { m.bmin.x -= eps; m.bmax.x += eps; }
+    if(m.bmax.y - m.bmin.y < eps) { m.bmin.y -= eps; m.bmax.y += eps; }
+    if(m.bmax.z - m.bmin.z < eps) { m.bmin.z -= eps; m.bmax.z += eps; }
     for(auto &t : m.triangles){
         const Vec3 &a = m.vertices[t.i0];
         const Vec3 &b = m.vertices[t.i1];
@@ -52,28 +57,43 @@ inline void finalizeMeshBounds(Mesh &m){
 }
 
 inline bool rayAABB(const Ray &r, const Vec3 &bmin, const Vec3 &bmax){
-    // Robust slab test handling near-zero direction components.
-    auto inv = [](float v){ return v != 0.0f ? 1.0f / v : 1e30f; };
-    float invX = inv(r.d.x); float invY = inv(r.d.y); float invZ = inv(r.d.z);
-    float t1 = (bmin.x - r.o.x) * invX; float t2 = (bmax.x - r.o.x) * invX; if(t1 > t2) std::swap(t1, t2);
-    float t3 = (bmin.y - r.o.y) * invY; float t4 = (bmax.y - r.o.y) * invY; if(t3 > t4) std::swap(t3, t4);
-    if(t1 > t4 || t3 > t2) return false; if(t3 > t1) t1 = t3; if(t4 < t2) t2 = t4;
-    float t5 = (bmin.z - r.o.z) * invZ; float t6 = (bmax.z - r.o.z) * invZ; if(t5 > t6) std::swap(t5, t6);
-    if(t1 > t6 || t5 > t2) return false; // intersection exists
-    return true;
+    // Standard slab test with proper interval tracking
+    float tmin = 0.0f;
+    float tmax = 1e30f;
+    
+    for(int i = 0; i < 3; ++i) {
+        float origin = (i == 0) ? r.o.x : (i == 1) ? r.o.y : r.o.z;
+        float dir = (i == 0) ? r.d.x : (i == 1) ? r.d.y : r.d.z;
+        float boxmin = (i == 0) ? bmin.x : (i == 1) ? bmin.y : bmin.z;
+        float boxmax = (i == 0) ? bmax.x : (i == 1) ? bmax.y : bmax.z;
+        
+        if(std::abs(dir) > 1e-8f) {
+            float t1 = (boxmin - origin) / dir;
+            float t2 = (boxmax - origin) / dir;
+            if(t1 > t2) std::swap(t1, t2);
+            tmin = std::max(tmin, t1);
+            tmax = std::min(tmax, t2);
+            if(tmin > tmax) return false;
+        } else {
+            // Ray parallel to slab - check if origin is inside
+            if(origin < boxmin || origin > boxmax) return false;
+        }
+    }
+    return tmax > 0.0f;  // intersection exists in front of ray
 }
 
 inline float rayTriangle(const Ray &r, const Vec3 &v0, const Vec3 &v1, const Vec3 &v2){
-    // Moller-Trumbore
+    // Moller-Trumbore with double-sided test (no backface culling)
     const float EPS = 1e-6f;
     Vec3 e1 = v1 - v0; Vec3 e2 = v2 - v0; Vec3 pvec = Vec3::cross(r.d, e2); float det = Vec3::dot(e1, pvec);
-    if(det > -EPS && det < EPS) return -1.0f;
+    if(det > -EPS && det < EPS) return -1.0f;  // parallel
     float invDet = 1.0f / det;
     Vec3 tvec = r.o - v0;
     float u = Vec3::dot(tvec, pvec) * invDet; if(u < 0.0f || u > 1.0f) return -1.0f;
     Vec3 qvec = Vec3::cross(tvec, e1);
     float v = Vec3::dot(r.d, qvec) * invDet; if(v < 0.0f || u + v > 1.0f) return -1.0f;
-    float t = Vec3::dot(e2, qvec) * invDet; if(t > EPS) return t; return -1.0f;
+    float t = Vec3::dot(e2, qvec) * invDet;
+    return (t > EPS) ? t : -1.0f;  // both sides valid if t > 0
 }
 
 inline Vec3 traceRay(const Scene &scene, const Ray &ray){
@@ -86,7 +106,17 @@ inline Vec3 traceRay(const Scene &scene, const Ray &ray){
             const Vec3 &b = m.vertices[tri.i1];
             const Vec3 &c = m.vertices[tri.i2];
             float t = rayTriangle(ray, a, b, c);
-            if(t > 0.0f && t < closest){ closest = t; normalHit = tri.faceNormal; }
+            if(t > 0.0f && t < closest){
+                closest = t;
+                normalHit = tri.faceNormal;
+                // Flip normal if hitting backface
+                Vec3 e1 = b - a;
+                Vec3 e2 = c - a;
+                Vec3 geomNormal = Vec3::cross(e1, e2);
+                if(Vec3::dot(geomNormal, ray.d) > 0) {
+                    normalHit = normalHit * -1.0f;
+                }
+            }
         }
     }
     if(closest < std::numeric_limits<float>::infinity()) return normalHit; else return Vec3{0,0,0};
