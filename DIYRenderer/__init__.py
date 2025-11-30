@@ -14,6 +14,8 @@ import os
 import tempfile
 import subprocess
 import math
+import threading
+import queue
 
 def _get_prefs_entry():
     return bpy.context.preferences.addons.get(__name__)
@@ -189,6 +191,16 @@ class DIYRenderEngine(bpy.types.RenderEngine):
     bl_use_shading_nodes = True
     # bl_use_shading_nodes_custom = False
 
+    def _init_async_render(self):
+        """Lazy initialization of async rendering infrastructure"""
+        if not hasattr(self, 'render_queue'):
+            self.render_queue = queue.Queue(maxsize=1)
+            self.result_queue = queue.Queue()
+            self.render_thread = None
+            self.stop_thread = False
+            self.rendering_in_progress = False
+            self.high_res_complete = False
+
     def _render_gradient(self, width, height):
         pixels = []
         for y in range(height):
@@ -225,7 +237,44 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             print("[DIYRenderer] External render failed; gradient fallback")
         self.end_result(result)
 
+    def async_render_viewport(self, job_data):
+        """Background thread function to render viewport without blocking UI"""
+        while not self.stop_thread:
+            try:
+                # Get latest job, discard old ones
+                depsgraph, cam_params, render_width, render_height, job_id = job_data
+                scene_file = export_scene_to_file(depsgraph)
+                if scene_file:
+                    ext_pixels = call_external_renderer(
+                        scene_file, 0, 0, render_width, render_height, 
+                        render_width, render_height, cam_params
+                    )
+                    try:
+                        if os.path.isfile(scene_file):
+                            os.remove(scene_file)
+                    except Exception:
+                        pass
+                    # Put result in queue
+                    try:
+                        self.result_queue.put_nowait({
+                            'pixels': ext_pixels,
+                            'width': render_width,
+                            'height': render_height,
+                            'job_id': job_id
+                        })
+                    except queue.Full:
+                        pass  # Discard if queue full
+                # Check for new job
+                try:
+                    job_data = self.render_queue.get(timeout=0.1)
+                except queue.Empty:
+                    break  # No more jobs, exit thread
+            except Exception as e:
+                print(f"[DIYRenderer] Async render error: {e}")
+                break
+    
     def view_update(self, context, depsgraph):
+        self._init_async_render()
         if hasattr(self, 'texture'):
             try:
                 del self.texture
@@ -233,11 +282,19 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 pass
             self.texture = None
         self.viewport_pixels_cache = None
-        # Reset progressive rendering state
-        self.viewport_last_update = 0
-        self.viewport_resolution_level = 0  # Start from lowest resolution
+        # Mark that scene changed - reset to low resolution
+        import time
+        self.viewport_last_change_time = time.time()
+        self.high_res_complete = False  # Need to render high-res again
+        # Cancel any pending render by clearing queue
+        try:
+            while not self.render_queue.empty():
+                self.render_queue.get_nowait()
+        except queue.Empty:
+            pass
 
     def view_draw(self, context, depsgraph):
+        self._init_async_render()
         region = context.region
         width = region.width
         height = region.height
@@ -245,58 +302,42 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         from gpu_extras.presets import draw_texture_2d  # used for drawing texture
         import time
         
+        if not hasattr(self, 'viewport_last_change_time'):
+            self.viewport_last_change_time = time.time()
+        if not hasattr(self, 'last_render_width'):
+            self.last_render_width = 0
+            self.last_render_height = 0
+            
+        current_time = time.time()
+        time_since_change = current_time - self.viewport_last_change_time
+        
+        # Simple two-level system: low res when moving, high res when idle
+        if time_since_change < 1.0:
+            # Moving: use low resolution
+            render_width = max(40, width // 16)
+            render_height = max(30, height // 16)
+            update_interval = 1  # Update every frame when moving
+        else:
+            # Idle for 1+ seconds: use full resolution
+            render_width = max(100, width)
+            render_height = max(100, height)
+            update_interval = 10  # Update every 10 frames when idle
+        
         if not hasattr(self, 'frame_counter'):
             self.frame_counter = 0
-        if not hasattr(self, 'viewport_last_update'):
-            self.viewport_last_update = 0
-        if not hasattr(self, 'viewport_resolution_level'):
-            self.viewport_resolution_level = 0
-            
         self.frame_counter += 1
-        current_time = time.time()
-        time_since_update = current_time - self.viewport_last_update
         
-        # Progressive resolution: start low, increase when idle
-        # Level 0: 1/16 (very fast, update every frame)
-        # Level 1: 1/8 (fast, update every 5 frames or 0.5s idle)
-        # Level 2: 1/4 (medium, 1s idle)
-        # Level 3: 1/2 (high, 2s idle)
-        resolution_configs = [
-            {'scale': 16, 'update_frames': 1, 'idle_time': 0.0},
-            {'scale': 8, 'update_frames': 3, 'idle_time': 0.3},
-            {'scale': 4, 'update_frames': 10, 'idle_time': 1.0},
-            {'scale': 2, 'update_frames': 30, 'idle_time': 2.0},
-        ]
-        
-        # Determine target resolution level based on idle time
-        target_level = 0
-        for i, config in enumerate(resolution_configs):
-            if time_since_update >= config['idle_time']:
-                target_level = i
-        
-        # Progressive upgrade: gradually increase quality
-        if time_since_update > resolution_configs[min(self.viewport_resolution_level + 1, len(resolution_configs) - 1)]['idle_time']:
-            if self.viewport_resolution_level < len(resolution_configs) - 1:
-                self.viewport_resolution_level += 1
-                target_level = self.viewport_resolution_level
-        
-        # Reset to lowest resolution on camera move (detected by frequent updates)
-        if time_since_update < 0.1:  # Moving
-            target_level = 0
-            self.viewport_resolution_level = 0
-        
-        config = resolution_configs[target_level]
-        render_width = max(40, width // config['scale'])
-        render_height = max(30, height // config['scale'])
-        
+        # Check if we need to update
+        resolution_changed = (self.last_render_width != render_width or 
+                             self.last_render_height != render_height)
         needs_update = (
             not hasattr(self, 'texture') or self.texture is None or
-            not hasattr(self, 'viewport_pixels_cache') or self.viewport_pixels_cache is None or
-            self.texture.width != render_width or self.texture.height != render_height or
-            self.frame_counter % config['update_frames'] == 0 or
-            time_since_update > config['idle_time']
+            resolution_changed or
+            self.frame_counter % update_interval == 0
         )
         if needs_update:
+            self.last_render_width = render_width
+            self.last_render_height = render_height
             pixels = None
             region_data = context.region_data
             if region_data is not None:
@@ -306,27 +347,69 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                     'up': (region_data.view_matrix.inverted().to_3x3() @ Vector((0,1,0))).normalized(),
                     'fov': 60.0 if getattr(region_data, 'is_perspective', True) else 5.0
                 }
-                scene_file = export_scene_to_file(depsgraph)
-                if scene_file:
-                    ext_pixels = call_external_renderer(scene_file, 0, 0, render_width, render_height, render_width, render_height, cam_params)
+                # Submit async render job (non-blocking)
+                if not hasattr(self, 'job_counter'):
+                    self.job_counter = 0
+                self.job_counter += 1
+                job_data = (depsgraph, cam_params, render_width, render_height, self.job_counter)
+                
+                # Clear old job and submit new one
+                try:
+                    if not self.render_queue.empty():
+                        self.render_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self.render_queue.put_nowait(job_data)
+                    self.rendering_in_progress = True
+                    # Start thread if not running
+                    if self.render_thread is None or not self.render_thread.is_alive():
+                        self.render_thread = threading.Thread(
+                            target=self.async_render_viewport,
+                            args=(job_data,),
+                            daemon=True
+                        )
+                        self.render_thread.start()
+                except queue.Full:
+                    pass  # Skip if queue full
+        
+        # Check for completed renders (non-blocking)
+        has_new_result = False
+        try:
+            result = self.result_queue.get_nowait()
+            ext_pixels = result['pixels']
+            result_width = result['width']
+            result_height = result['height']
+            if ext_pixels and len(ext_pixels) == result_width * result_height:
+                pixels = ext_pixels
+                render_width = result_width
+                render_height = result_height
+                if pixels is None:
+                    pixels = self._render_gradient(render_width, render_height)
+                self.viewport_pixels_cache = pixels
+                flat = [c for px in pixels for c in px]
+                buffer = gpu.types.Buffer('FLOAT', render_width * render_height * 4, flat)
+                if hasattr(self, 'texture') and self.texture is not None:
                     try:
-                        if os.path.isfile(scene_file):
-                            os.remove(scene_file)
+                        del self.texture
                     except Exception:
                         pass
-                    if ext_pixels and len(ext_pixels) == render_width * render_height:
-                        pixels = ext_pixels
-            if pixels is None:
-                pixels = self._render_gradient(render_width, render_height)
-            self.viewport_pixels_cache = pixels
-            flat = [c for px in pixels for c in px]
-            buffer = gpu.types.Buffer('FLOAT', render_width * render_height * 4, flat)
-            if hasattr(self, 'texture') and self.texture is not None:
-                try:
-                    del self.texture
-                except Exception:
-                    pass
-            self.texture = gpu.types.GPUTexture((render_width, render_height), format='RGBA16F', data=buffer)
+                self.texture = gpu.types.GPUTexture((render_width, render_height), format='RGBA16F', data=buffer)
+                has_new_result = True
+                self.rendering_in_progress = False
+                # Check if this was a high-resolution render
+                if render_width >= width and render_height >= height:
+                    self.high_res_complete = True
+        except queue.Empty:
+            pass  # No result yet, use existing texture
+        
+        # Request redraw if rendering is in progress or just got new result
+        # This keeps the viewport updating until high-res render is complete
+        if self.rendering_in_progress or (has_new_result and not self.high_res_complete):
+            # Tag viewport for redraw to check for updates
+            for area in context.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
         
         # Draw the texture to fill the viewport
         if hasattr(self, 'texture') and self.texture is not None:
