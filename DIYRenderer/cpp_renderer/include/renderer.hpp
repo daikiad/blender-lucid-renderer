@@ -20,32 +20,47 @@ struct Vec3 {
     static Vec3 cross(const Vec3 &a, const Vec3 &b){ return { a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x }; }
 };
 
+// ========== Random Sampling Functions ==========
+// These are used for Monte Carlo path tracing
+
+// Generate random float between 0 and 1
 inline float randf(){ return (float)std::rand() / (float)RAND_MAX; }
+
+// Generate random point inside unit sphere (rejection sampling)
 inline Vec3 randomInUnitSphere(){
     while(true){
         Vec3 p = Vec3(randf()*2.0f-1.0f, randf()*2.0f-1.0f, randf()*2.0f-1.0f);
         if(p.length() < 1.0f) return p;
     }
 }
+
+// Generate random unit vector (uniform on sphere)
 inline Vec3 randomUnitVector(){ 
     Vec3 v = randomInUnitSphere(); 
     v.normalize(); 
     return v; 
 }
+
+// Generate random direction in hemisphere around normal (cosine-weighted)
+// This is importance sampling for Lambertian BRDF
+// PDF = cos(theta) / PI
 inline Vec3 randomCosineDirection(const Vec3 &normal) {
-    // Generate random direction in hemisphere around normal (cosine-weighted)
     Vec3 random_dir = randomUnitVector();
+    // Flip to correct hemisphere if needed
     if (Vec3::dot(random_dir, normal) < 0.0f) {
         random_dir = random_dir * -1.0f;
     }
     return random_dir;
 }
 
+// ========== Material Definition ==========
+// Stores physical material properties from Blender's Principled BSDF
 struct Material {
-    Vec3 albedo;
-    float metallic;
-    float roughness;
-    Vec3 emission;  // Emission color * strength
+    Vec3 albedo;      // Base color (diffuse reflectance)
+    float metallic;   // Metallic factor (0=dielectric, 1=metal) [currently unused]
+    float roughness;  // Surface roughness [currently unused]
+    Vec3 emission;    // Emission color * strength (for light sources)
+    
     Material() : albedo(0.8f, 0.8f, 0.8f), metallic(0.0f), roughness(0.5f), emission(0.0f, 0.0f, 0.0f) {}
     Material(Vec3 a, float m, float r) : albedo(a), metallic(m), roughness(r), emission(0.0f, 0.0f, 0.0f) {}
     Material(Vec3 a, float m, float r, Vec3 e) : albedo(a), metallic(m), roughness(r), emission(e) {}
@@ -64,12 +79,13 @@ struct Mesh {
     Vec3 bmax{ -1e30f, -1e30f, -1e30f };
 };
 
+// ========== Ray-Scene Intersection Result ==========
 struct Hit {
-    bool hit;
-    float t;
-    Vec3 point;
-    Vec3 normal;
-    Material material;
+    bool hit;           // Did the ray hit anything?
+    float t;            // Distance along ray to hit point
+    Vec3 point;         // 3D position of hit point
+    Vec3 normal;        // Surface normal at hit point
+    Material material;  // Material properties of hit surface
     Hit() : hit(false), t(1e30f) {}
 };
 
@@ -190,30 +206,40 @@ inline bool isInShadow(const Scene &scene, const Vec3 &point, const Vec3 &lightD
     return hit.hit && hit.t < lightDist;
 }
 
-// Full path tracing
+// ========== Path Tracing Core ==========
+// Recursively traces a ray through the scene using Monte Carlo integration
+// This implements the rendering equation with importance sampling
 inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = true){
+    // Base case: maximum recursion depth reached
     if(depth <= 0) return Vec3{0,0,0};
     
+    // Test ray against all geometry in scene
     Hit hit = intersectScene(scene, ray, useAABB);
-    if(!hit.hit) return Vec3(0,0,0); // Black background (no environment lighting)
     
-    // If hit emissive surface, return emission
+    // Ray escaped to infinity - return black (no environment lighting)
+    if(!hit.hit) return Vec3(0,0,0);
+    
+    // Check if we hit a light source (emission > 0)
     float emissionMagnitude = hit.material.emission.x + hit.material.emission.y + hit.material.emission.z;
     if(emissionMagnitude > 0.001f) {
+        // Direct hit on light - return its emission
         return hit.material.emission;
     }
     
-    // Russian roulette for path termination (after first few bounces)
+    // Russian roulette path termination (stochastic early exit)
+    // After first few bounces, randomly terminate paths to save computation
+    // Must compensate by dividing by survival probability
     float survivalProbability = 0.9f;
     if(depth < 3 && randf() > survivalProbability) {
-        return Vec3(0,0,0);
+        return Vec3(0,0,0);  // Path terminated
     }
     
-    // Scatter ray in random direction (cosine-weighted around normal)
+    // Scatter ray in random direction using cosine-weighted sampling
+    // This is importance sampling for Lambertian (diffuse) surfaces
     Vec3 scatterDir = randomCosineDirection(hit.normal);
-    Ray scattered{hit.point + hit.normal * 0.001f, scatterDir};
+    Ray scattered{hit.point + hit.normal * 0.001f, scatterDir};  // Offset to avoid self-intersection
     
-    // Recursively trace the scattered ray
+    // Recursively trace the scattered ray to get incoming light
     Vec3 incomingLight = trace(scene, scattered, depth - 1, useAABB);
     
     // Rendering equation with cosine-weighted importance sampling:
@@ -226,7 +252,7 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
     // The cos(theta) and PI terms cancel out!
     Vec3 result = hit.material.albedo * incomingLight;
     
-    // Russian roulette compensation
+    // Russian roulette compensation: divide by survival probability
     if(depth < 3) {
         result = result * (1.0f / survivalProbability);
     }

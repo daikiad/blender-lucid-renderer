@@ -36,6 +36,44 @@ class DIYRendererPreferences(bpy.types.AddonPreferences):
         layout.prop(self, "external_renderer_path")
         layout.prop(self, "scene_export_directory")
 
+class DIYRendererSettings(bpy.types.PropertyGroup):
+    samples: bpy.props.IntProperty(
+        name="Samples",
+        description="Number of samples for path tracing",
+        default=128,
+        min=1,
+        max=10000
+    )
+    viewport_samples: bpy.props.IntProperty(
+        name="Viewport Samples",
+        description="Maximum samples for viewport rendering",
+        default=64,
+        min=1,
+        max=1000
+    )
+
+class DIY_RENDER_PT_sampling(bpy.types.Panel):
+    bl_label = "Sampling"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "render"
+    COMPAT_ENGINES = {'DIY_RENDER_MINIMAL'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.engine in cls.COMPAT_ENGINES
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        
+        diy = context.scene.diy_renderer
+        
+        col = layout.column(align=True)
+        col.prop(diy, "samples")
+        col.prop(diy, "viewport_samples")
+
 def find_external_binary():
     # 1) Explicit preference path
     prefs = _get_prefs()
@@ -346,7 +384,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             self.rendering_in_progress = False
             self.high_res_complete = False
             self.accumulated_samples = {}  # tile_key -> (accumulated_pixels, sample_count)
-            self.target_samples = 64  # Target samples for idle rendering
+            # target_samples will be set from scene settings in view_draw
 
     def _render_gradient(self, width, height):
         pixels = []
@@ -358,11 +396,19 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         return pixels
 
     def render(self, depsgraph):
+        """
+        Main render function for F12 rendering.
+        Implements progressive rendering: starts with low sample counts and gradually increases
+        to reduce wait time for initial preview while achieving high quality final result.
+        """
         scene = depsgraph.scene_eval
         scale = scene.render.resolution_percentage / 100.0
         width = int(scene.render.resolution_x * scale)
         height = int(scene.render.resolution_y * scale)
-        print(f"[DIYRenderer] Starting progressive render ({width} x {height})")
+        
+        # Get target samples from scene settings (user-configurable in UI)
+        target_samples = scene.diy_renderer.samples
+        print(f"[DIYRenderer] Starting progressive render ({width} x {height}, target: {target_samples} samples)")
         cam_params = compute_camera_params(scene, width, height)
         
         if not cam_params:
@@ -383,33 +429,56 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             return
         
         # Progressive rendering: start with low samples, gradually increase
-        sample_iterations = [1, 2, 4, 8, 16, 32, 64]  # Progressive sample counts
+        # Generate sample iterations dynamically to reach target
+        # Strategy: double sample count each iteration (1, 2, 4, 8, ...) until we reach target
+        # This gives fast initial preview while converging to final quality
+        sample_iterations = []
+        current = 1
+        while sum(sample_iterations) < target_samples:
+            sample_iterations.append(current)
+            if sum(sample_iterations) + current * 2 <= target_samples:
+                current *= 2  # Double for next iteration
+            else:
+                # Add final iteration to reach exactly target_samples
+                remaining = target_samples - sum(sample_iterations)
+                if remaining > 0:
+                    sample_iterations.append(remaining)
+                break
+        
         accumulated_pixels = None
         total_samples = 0
+        max_samples = sum(sample_iterations)
         
-        for iteration_samples in sample_iterations:
+        for idx, iteration_samples in enumerate(sample_iterations):
             if self.test_break():
                 print("[DIYRenderer] Render cancelled by user")
                 break
             
+            # Update Blender UI with progress (progress bar and status text)
+            progress = total_samples / max_samples
+            self.update_progress(progress)
+            self.update_stats("", f"Path Tracing: {total_samples}/{max_samples} samples")
+            
             print(f"[DIYRenderer] Rendering iteration with {iteration_samples} samples (total: {total_samples + iteration_samples})")
             
-            # Render this iteration
+            # Render this iteration by calling external C++ renderer
             iteration_pixels = call_external_renderer(
                 scene_file, 0, 0, width, height, width, height, cam_params, 
                 samples=iteration_samples
             )
             
             if not iteration_pixels or len(iteration_pixels) != width * height:
-                print(f"[DIYRenderer] Iteration failed, skipping")
+                print("[DIYRenderer] Iteration failed, skipping")
                 continue
             
-            # Accumulate samples
+            # Accumulate samples: blend new samples with previous iterations
+            # Uses weighted average: (old * old_count + new * new_count) / total_count
             if accumulated_pixels is None:
+                # First iteration - just use the pixels directly
                 accumulated_pixels = iteration_pixels
                 total_samples = iteration_samples
             else:
-                # Blend: (old * old_count + new * new_count) / total_count
+                # Subsequent iterations - blend with accumulated result
                 new_total = total_samples + iteration_samples
                 blended = []
                 for i in range(len(accumulated_pixels)):
@@ -421,12 +490,17 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 accumulated_pixels = blended
                 total_samples = new_total
             
-            # Update the result progressively
+            # Update the render result in Blender's render window
             result = self.begin_result(0, 0, width, height)
             combined = result.layers[0].passes["Combined"]
             combined.rect = accumulated_pixels
             self.end_result(result)
-            self.update_result(result)
+            self.update_result(result)  # This refreshes the render window
+            
+            # Final progress update for this iteration
+            progress = total_samples / max_samples
+            self.update_progress(progress)
+            self.update_stats("", f"Path Tracing: {total_samples}/{max_samples} samples")
             print(f"[DIYRenderer] Updated render with {total_samples} total samples")
         
         # Clean up
@@ -499,10 +573,19 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             pass
 
     def view_draw(self, context, depsgraph):
+        """
+        Viewport rendering function - called continuously while viewport is active.
+        Implements adaptive quality: low resolution while moving, high resolution when idle.
+        Progressively accumulates samples when idle to improve quality over time.
+        """
         self._init_async_render()
         region = context.region
         width = region.width
         height = region.height
+        
+        # Get viewport samples from scene settings (user-configurable in UI)
+        target_samples = context.scene.diy_renderer.viewport_samples
+        
         import gpu
         from gpu_extras.presets import draw_texture_2d  # used for drawing texture
         import time
@@ -516,7 +599,9 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         current_time = time.time()
         time_since_change = current_time - self.viewport_last_change_time
         
-        # Simple two-level system: low res when moving, high res when idle
+        # Adaptive quality system: two-level rendering strategy
+        # - Moving (< 1 second idle): low resolution, 1 sample for fast feedback
+        # - Idle (>= 1 second): full resolution, progressive sampling up to target_samples
         if time_since_change < 1.0:
             # Moving: use low resolution, 1 sample
             render_width = max(40, width // 16)
@@ -534,7 +619,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             self.frame_counter = 0
         self.frame_counter += 1
         
-        # Create tile key for accumulation
+        # Create tile key for accumulation (unique per resolution)
         tile_key = f"{render_width}x{render_height}"
         
         # Check current sample count for this tile
@@ -547,15 +632,19 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         resolution_changed = (self.last_render_width != render_width or 
                              self.last_render_height != render_height)
         
-        # If resolution changed, reset accumulation
+        # If resolution changed, reset accumulation (switching between moving/idle)
         if resolution_changed:
             self.accumulated_samples = {}
             current_sample_count = 0
         
+        # Determine if we need a new render:
+        # - No texture exists yet
+        # - Resolution changed (moving <-> idle transition)
+        # - Time to update AND haven't reached target sample count yet
         needs_update = (
             not hasattr(self, 'texture') or self.texture is None or
             resolution_changed or
-            (self.frame_counter % update_interval == 0 and current_sample_count < self.target_samples)
+            (self.frame_counter % update_interval == 0 and current_sample_count < target_samples)
         )
         
         if needs_update:
@@ -622,12 +711,12 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                         blended.append([r, g, b, a])
                     self.accumulated_samples[result_tile_key] = (blended, new_count)
                     pixels = blended
-                    print(f"[DIYRenderer] Accumulated samples: {new_count}/{self.target_samples}")
+                    print(f"[DIYRenderer] Accumulated samples: {new_count}/{target_samples}")
                 else:
                     # First iteration
                     self.accumulated_samples[result_tile_key] = (ext_pixels, samples_per_iteration)
                     pixels = ext_pixels
-                    print(f"[DIYRenderer] Initial samples: {samples_per_iteration}/{self.target_samples}")
+                    print(f"[DIYRenderer] Initial samples: {samples_per_iteration}/{target_samples}")
                 
                 render_width = result_width
                 render_height = result_height
@@ -665,7 +754,12 @@ class DIYRenderEngine(bpy.types.RenderEngine):
 
 def register():
     bpy.utils.register_class(DIYRendererPreferences)
+    bpy.utils.register_class(DIYRendererSettings)
+    bpy.utils.register_class(DIY_RENDER_PT_sampling)
     bpy.utils.register_class(DIYRenderEngine)
+    
+    # Register property group
+    bpy.types.Scene.diy_renderer = bpy.props.PointerProperty(type=DIYRendererSettings)
     
     # Add our engine to all relevant panel compatibility
     try:
@@ -739,5 +833,10 @@ def unregister():
     except Exception as e:
         print(f"[DIYRenderer] Warning: Could not unregister panels: {e}")
     
+    # Unregister property group
+    del bpy.types.Scene.diy_renderer
+    
     bpy.utils.unregister_class(DIYRenderEngine)
+    bpy.utils.unregister_class(DIY_RENDER_PT_sampling)
+    bpy.utils.unregister_class(DIYRendererSettings)
     bpy.utils.unregister_class(DIYRendererPreferences)
