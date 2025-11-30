@@ -66,6 +66,56 @@ def find_external_binary():
         print('Set Add-on Preferences path or env DIY_RENDERER_BIN.')
     return None
 
+def get_material_properties(obj):
+    """Extract Principled BSDF material properties from object."""
+    if not obj.data or not hasattr(obj.data, 'materials') or not obj.data.materials:
+        return None
+    
+    mat = obj.data.materials[0]  # Use first material slot
+    if not mat or not mat.use_nodes:
+        return None
+    
+    # Find Principled BSDF node
+    principled = None
+    for node in mat.node_tree.nodes:
+        if node.type == 'BSDF_PRINCIPLED':
+            principled = node
+            break
+    
+    if not principled:
+        return None
+    
+    # Extract properties
+    props = {}
+    
+    # Base Color
+    if 'Base Color' in principled.inputs:
+        base_color_input = principled.inputs['Base Color']
+        if base_color_input.is_linked:
+            # If connected, try to get value from connected node
+            props['base_color'] = [0.8, 0.8, 0.8]  # Default if connected
+        else:
+            color = base_color_input.default_value
+            props['base_color'] = [color[0], color[1], color[2]]
+    else:
+        props['base_color'] = [0.8, 0.8, 0.8]
+    
+    # Metallic
+    if 'Metallic' in principled.inputs:
+        metallic_input = principled.inputs['Metallic']
+        props['metallic'] = metallic_input.default_value if not metallic_input.is_linked else 0.0
+    else:
+        props['metallic'] = 0.0
+    
+    # Roughness
+    if 'Roughness' in principled.inputs:
+        roughness_input = principled.inputs['Roughness']
+        props['roughness'] = roughness_input.default_value if not roughness_input.is_linked else 0.5
+    else:
+        props['roughness'] = 0.5
+    
+    return props
+
 def export_scene_to_file(depsgraph):
     """Export evaluated meshes to a temporary scene file matching external renderer format."""
     prefs = _get_prefs()
@@ -91,6 +141,18 @@ def export_scene_to_file(depsgraph):
                 mesh = eval_obj.to_mesh()
                 if not mesh:
                     continue
+                
+                # Get material properties
+                mat_props = get_material_properties(obj)
+                if mat_props:
+                    base_color = mat_props['base_color']
+                    metallic = mat_props['metallic']
+                    roughness = mat_props['roughness']
+                else:
+                    base_color = [0.8, 0.8, 0.8]
+                    metallic = 0.0
+                    roughness = 0.5
+                
                 verts_world = []
                 mw = obj_instance.matrix_world
                 for v in mesh.vertices:
@@ -104,7 +166,10 @@ def export_scene_to_file(depsgraph):
                         continue
                     for i in range(1, len(v_indices) - 1):
                         tris.append((v_indices[0], v_indices[i], v_indices[i+1]))
+                
+                # Write mesh with material properties
                 f.write(f"mesh {obj.name} {len(verts_world)} {len(tris)}\n")
+                f.write(f"material {base_color[0]:.6f} {base_color[1]:.6f} {base_color[2]:.6f} {metallic:.6f} {roughness:.6f}\n")
                 for co in verts_world:
                     f.write(f"v {co.x} {co.y} {co.z}\n")
                 for (a,b,c) in tris:
@@ -114,6 +179,7 @@ def export_scene_to_file(depsgraph):
                 tri_count += len(tris)
                 if mesh_count <= 2:  # Print first 2 meshes for debugging
                     print(f"[DIYRenderer] Exported mesh '{obj.name}': {len(verts_world)} verts, {len(tris)} tris")
+                    print(f"[DIYRenderer]   Material: color=({base_color[0]:.2f}, {base_color[1]:.2f}, {base_color[2]:.2f}), metallic={metallic:.2f}, roughness={roughness:.2f}")
                     if len(verts_world) > 0:
                         print(f"[DIYRenderer]   First vertex: ({verts_world[0].x:.3f}, {verts_world[0].y:.3f}, {verts_world[0].z:.3f})")
             f.write("(end)\n")

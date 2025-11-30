@@ -38,6 +38,22 @@ Scene loadScene(const std::string &path){
         if(tok == "mesh"){
             std::string name; int vcount, tcount; in >> name >> vcount >> tcount;
             Mesh m; m.vertices.reserve(vcount); m.triangles.reserve(tcount);
+            
+            // Check for material line
+            std::streampos pos = in.tellg();
+            std::string next_tok;
+            in >> next_tok;
+            if(next_tok == "material"){
+                // Read material properties: r g b metallic roughness
+                float r, g, b, metallic, roughness;
+                in >> r >> g >> b >> metallic >> roughness;
+                m.material = Material(Vec3(r, g, b), metallic, roughness);
+            } else {
+                // No material line, use default and restore position
+                in.seekg(pos);
+                m.material = Material();
+            }
+            
             for(int i=0;i<vcount;i++){ std::string vt; in >> vt; if(vt != "v"){ std::cerr << "Expected v" << std::endl; return scene; } float x,y,z; in >> x >> y >> z; m.vertices.emplace_back(x,y,z); }
             for(int i=0;i<tcount;i++){ std::string tt; in >> tt; if(tt != "t"){ std::cerr << "Expected t" << std::endl; return scene; } int a,b,c; in >> a >> b >> c; m.triangles.push_back({a,b,c,{}}); }
             finalizeMeshBounds(m); scene.meshes.push_back(std::move(m));
