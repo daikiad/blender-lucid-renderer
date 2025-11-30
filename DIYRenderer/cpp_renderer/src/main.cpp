@@ -62,6 +62,9 @@ Camera makeCamera(float cx,float cy,float cz,float dx,float dy,float dz,float ux
 int main(int argc, char** argv){
     std::string scenePath; int tileX=0,tileY=0,tileW=64,tileH=64, fullW=512, fullH=512; float cx=0,cy=0,cz=5, dx=0,dy=0,dz=-1, ux=0,uy=1,uz=0, fovDeg=60;
     bool debugFlag=false; bool disableAABB=false;
+    std::string mode = "raytrace";  // "debug" or "raytrace"
+    int samples = 1;
+    int maxDepth = 3;
     for(int i=1;i<argc;i++){
         std::string a = argv[i];
         auto need = [&](const char* msg){ if(i+1>=argc){ std::cerr << "Missing value for " << msg << "\n"; std::exit(1);} };
@@ -72,9 +75,13 @@ int main(int argc, char** argv){
         else if(a=="--camdir"){ need("--camdir"); dx = std::atof(argv[++i]); need("--camdir"); dy = std::atof(argv[++i]); need("--camdir"); dz = std::atof(argv[++i]); }
         else if(a=="--camup"){ need("--camup"); ux = std::atof(argv[++i]); need("--camup"); uy = std::atof(argv[++i]); need("--camup"); uz = std::atof(argv[++i]); }
         else if(a=="--fov"){ need("--fov"); fovDeg = std::atof(argv[++i]); }
+        else if(a=="--mode"){ need("--mode"); mode = argv[++i]; }
+        else if(a=="--samples"){ need("--samples"); samples = std::atoi(argv[++i]); }
+        else if(a=="--depth"){ need("--depth"); maxDepth = std::atoi(argv[++i]); }
         else if(a=="--debug"){ debugFlag = true; }
         else if(a=="--disable-aabb"){ disableAABB = true; }
     }
+    std::srand(42);  // Fixed seed for consistent results
     Scene scene = loadScene(scenePath);
     Camera cam = makeCamera(cx,cy,cz,dx,dy,dz,ux,uy,uz,fovDeg, fullW, fullH);
     float fovRad = cam.fovDeg * (float)M_PI / 180.0f;
@@ -127,20 +134,40 @@ int main(int argc, char** argv){
             Vec3 worldDir = cam.forward + cam.right * (ndcX * scale) + cam.up * (ndcY * scale);
             worldDir.normalize();
             Ray ray{cam.pos, worldDir};
-            Vec3 n;
-            if(disableAABB){
-                float closest=1e30f; n={0,0,0};
-                for(const auto &m: scene.meshes){
-                    for(const auto &tri: m.triangles){
-                        const Vec3 &a=m.vertices[tri.i0]; const Vec3 &b=m.vertices[tri.i1]; const Vec3 &c=m.vertices[tri.i2];
-                        float t=rayTriangle(ray,a,b,c); if(t>0.0f && t<closest){ closest=t; n=tri.faceNormal; }
-                    }
-                }
+            Vec3 color{0,0,0};
+            
+            if(mode == "debug"){
+                // Debug mode: show normals
+                Vec3 n = traceNormal(scene, ray, !disableAABB);
+                color.x = n.x * 0.5f + 0.5f;
+                color.y = n.y * 0.5f + 0.5f;
+                color.z = n.z * 0.5f + 0.5f;
             } else {
-                n = traceRay(scene, ray);
+                // Raytrace mode: full path tracing with samples
+                for(int s = 0; s < samples; ++s){
+                    Ray sampleRay = ray;
+                    // Add slight jitter for anti-aliasing if samples > 1
+                    if(samples > 1){
+                        float jitterX = (randf() - 0.5f) / fullW;
+                        float jitterY = (randf() - 0.5f) / fullH;
+                        Vec3 jitteredDir = cam.forward + cam.right * ((ndcX + jitterX) * scale) + cam.up * ((ndcY + jitterY) * scale);
+                        jitteredDir.normalize();
+                        sampleRay.d = jitteredDir;
+                    }
+                    color = color + trace(scene, sampleRay, maxDepth, !disableAABB);
+                }
+                color = color / (float)samples;
             }
-            float r = n.x * 0.5f + 0.5f; float g = n.y * 0.5f + 0.5f; float b = n.z * 0.5f + 0.5f; float a = 1.0f;
-            std::cout << r << ' ' << g << ' ' << b << ' ' << a << '\n';
+            
+            // Clamp and gamma correct
+            color.x = std::min(1.0f, std::max(0.0f, color.x));
+            color.y = std::min(1.0f, std::max(0.0f, color.y));
+            color.z = std::min(1.0f, std::max(0.0f, color.z));
+            color.x = std::sqrt(color.x);  // Simple gamma correction
+            color.y = std::sqrt(color.y);
+            color.z = std::sqrt(color.z);
+            
+            std::cout << color.x << ' ' << color.y << ' ' << color.z << " 1.0\n";
             if(debug && py==0 && px<5){
                 // Test AABB with actual pixel ray
                 bool pixelAABBHit = false;
@@ -150,7 +177,7 @@ int main(int argc, char** argv){
                         break;
                     }
                 }
-                std::cerr << "[diyrt] sampleRay x="<<x<<" y="<<y<<" dir=("<<worldDir.x<<","<<worldDir.y<<","<<worldDir.z<<") normal=("<<n.x<<","<<n.y<<","<<n.z<<")"<< (disableAABB?" noAABB":" AABB=") << (pixelAABBHit?"HIT":"MISS") <<"\n";
+                std::cerr << "[diyrt] sampleRay x="<<x<<" y="<<y<<" dir=("<<worldDir.x<<","<<worldDir.y<<","<<worldDir.z<<") color=("<<color.x<<","<<color.y<<","<<color.z<<")"<< (disableAABB?" noAABB":" AABB=") << (pixelAABBHit?"HIT":"MISS") <<" mode="<<mode<<"\n";
             }
         }
     }

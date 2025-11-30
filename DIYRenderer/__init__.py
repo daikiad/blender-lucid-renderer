@@ -148,7 +148,7 @@ def compute_camera_params(scene, width, height):
         'fov': fov_deg
     }
 
-def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, full_h, cam_params):
+def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, full_h, cam_params, mode='raytrace'):
     binary = find_external_binary()
     if not binary:
         print("[DIYRenderer] External binary not found. Falling back to internal rendering.")
@@ -161,8 +161,7 @@ def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, f
            '--camdir', str(cam_params['dir'].x), str(cam_params['dir'].y), str(cam_params['dir'].z),
            '--camup', str(cam_params['up'].x), str(cam_params['up'].y), str(cam_params['up'].z),
            '--fov', str(cam_params['fov']),
-           '--debug',
-           '--disable-aabb']  # Temporarily disable AABB to test raw triangle intersections
+           '--mode', mode]
     print(f"[DIYRenderer] Calling external renderer: {' '.join(cmd)}")
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, check=True)

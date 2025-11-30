@@ -3,6 +3,7 @@
 #include <string>
 #include <limits>
 #include <cmath>
+#include <cstdlib>
 
 struct Vec3 {
     float x, y, z;
@@ -11,10 +12,22 @@ struct Vec3 {
     Vec3 operator+(const Vec3 &o) const { return {x+o.x, y+o.y, z+o.z}; }
     Vec3 operator-(const Vec3 &o) const { return {x-o.x, y-o.y, z-o.z}; }
     Vec3 operator*(float s) const { return {x*s, y*s, z*s}; }
+    Vec3 operator*(const Vec3 &o) const { return {x*o.x, y*o.y, z*o.z}; }
     Vec3 operator/(float s) const { return {x/s, y/s, z/s}; }
     Vec3& normalize(){ float l = std::sqrt(x*x+y*y+z*z); if(l>0){ x/=l; y/=l; z/=l;} return *this; }
+    float length() const { return std::sqrt(x*x+y*y+z*z); }
     static float dot(const Vec3 &a, const Vec3 &b){ return a.x*b.x + a.y*b.y + a.z*b.z; }
     static Vec3 cross(const Vec3 &a, const Vec3 &b){ return { a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x }; }
+};
+
+inline float randf(){ return (float)std::rand() / (float)RAND_MAX; }
+
+struct Material {
+    Vec3 albedo;
+    float metallic;
+    float roughness;
+    Material() : albedo(0.8f, 0.8f, 0.8f), metallic(0.0f), roughness(0.5f) {}
+    Material(Vec3 a, float m, float r) : albedo(a), metallic(m), roughness(r) {}
 };
 
 struct Ray { Vec3 o; Vec3 d; };
@@ -24,9 +37,19 @@ struct Triangle { int i0, i1, i2; Vec3 faceNormal; };
 struct Mesh {
     std::vector<Vec3> vertices;
     std::vector<Triangle> triangles;
+    Material material;
     // axis-aligned bounding box
     Vec3 bmin{ 1e30f, 1e30f, 1e30f };
     Vec3 bmax{ -1e30f, -1e30f, -1e30f };
+};
+
+struct Hit {
+    bool hit;
+    float t;
+    Vec3 point;
+    Vec3 normal;
+    Material material;
+    Hit() : hit(false), t(1e30f) {}
 };
 
 struct Scene {
@@ -96,28 +119,91 @@ inline float rayTriangle(const Ray &r, const Vec3 &v0, const Vec3 &v1, const Vec
     return (t > EPS) ? t : -1.0f;  // both sides valid if t > 0
 }
 
-inline Vec3 traceRay(const Scene &scene, const Ray &ray){
-    float closest = std::numeric_limits<float>::infinity();
-    Vec3 normalHit{0,0,0};
+inline Hit intersectScene(const Scene &scene, const Ray &ray, bool useAABB = true){
+    Hit result;
+    result.t = 1e30f;
+    result.hit = false;
+    
     for(const auto &m : scene.meshes){
-        if(!rayAABB(ray, m.bmin, m.bmax)) continue;
+        if(useAABB && !rayAABB(ray, m.bmin, m.bmax)) continue;
         for(const auto &tri : m.triangles){
             const Vec3 &a = m.vertices[tri.i0];
             const Vec3 &b = m.vertices[tri.i1];
             const Vec3 &c = m.vertices[tri.i2];
             float t = rayTriangle(ray, a, b, c);
-            if(t > 0.0f && t < closest){
-                closest = t;
-                normalHit = tri.faceNormal;
+            if(t > 0.0001f && t < result.t){
+                result.t = t;
+                result.hit = true;
+                result.point = ray.o + ray.d * t;
+                result.normal = tri.faceNormal;
+                result.material = m.material;
                 // Flip normal if hitting backface
-                Vec3 e1 = b - a;
-                Vec3 e2 = c - a;
-                Vec3 geomNormal = Vec3::cross(e1, e2);
-                if(Vec3::dot(geomNormal, ray.d) > 0) {
-                    normalHit = normalHit * -1.0f;
+                if(Vec3::dot(result.normal, ray.d) > 0) {
+                    result.normal = result.normal * -1.0f;
                 }
             }
         }
     }
-    if(closest < std::numeric_limits<float>::infinity()) return normalHit; else return Vec3{0,0,0};
+    return result;
+}
+
+// Debug mode: return normal as color
+inline Vec3 traceNormal(const Scene &scene, const Ray &ray, bool useAABB = true){
+    Hit hit = intersectScene(scene, ray, useAABB);
+    if(hit.hit){
+        return hit.normal;
+    }
+    return Vec3{0,0,0};
+}
+
+// Sky color for background
+inline Vec3 skyColor(const Ray &ray){
+    float t = 0.5f * (ray.d.y + 1.0f);
+    return Vec3(1.0f, 1.0f, 1.0f) * (1.0f - t) + Vec3(0.5f, 0.7f, 1.0f) * t;
+}
+
+// Shadow test
+inline bool isInShadow(const Scene &scene, const Vec3 &point, const Vec3 &lightDir, float lightDist){
+    Ray shadowRay{point + lightDir * 0.001f, lightDir};
+    Hit hit = intersectScene(scene, shadowRay, true);
+    return hit.hit && hit.t < lightDist;
+}
+
+// Full path tracing
+inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = true){
+    if(depth <= 0) return Vec3{0,0,0};
+    
+    Hit hit = intersectScene(scene, ray, useAABB);
+    if(!hit.hit) return skyColor(ray);
+    
+    // Simple lighting: one directional light
+    Vec3 lightDir = Vec3(0.5f, 1.0f, 0.3f);
+    lightDir.normalize();
+    Vec3 lightColor = Vec3(1.0f, 1.0f, 0.95f) * 1.5f;
+    
+    // Diffuse shading
+    float NdotL = std::max(0.0f, Vec3::dot(hit.normal, lightDir));
+    Vec3 diffuse = hit.material.albedo * NdotL;
+    
+    // Shadow
+    bool inShadow = isInShadow(scene, hit.point, lightDir, 1e30f);
+    if(inShadow) {
+        diffuse = diffuse * 0.3f;  // Ambient only
+    } else {
+        diffuse = diffuse * lightColor;
+    }
+    
+    // Ambient
+    Vec3 ambient = hit.material.albedo * 0.2f;
+    
+    // Reflection for metallic surfaces
+    Vec3 reflection{0,0,0};
+    if(hit.material.metallic > 0.01f && depth > 1){
+        Vec3 reflectDir = ray.d - hit.normal * (2.0f * Vec3::dot(ray.d, hit.normal));
+        reflectDir.normalize();
+        Ray reflectRay{hit.point + hit.normal * 0.001f, reflectDir};
+        reflection = trace(scene, reflectRay, depth - 1, useAABB) * hit.material.metallic;
+    }
+    
+    return ambient + diffuse + reflection;
 }
