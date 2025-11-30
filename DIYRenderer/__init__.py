@@ -24,20 +24,23 @@ class DIYRenderEngine(bpy.types.RenderEngine):
 
         # 結果バッファ開始
         result = self.begin_result(0, 0, width, height)
-
         rlayer = result.layers[0]
         combined = rlayer.passes["Combined"]
 
-        # 真っ赤な RGBA
-        if self.is_preview:
-            color = [1.0, 0.3, 0.3, 1.0]
-        else:
-            color = [1.0, 0.0, 0.0, 1.0]
+        pixels = []
 
-        pixel_count = width * height
-        rect = [color] * pixel_count
+        for y in range(height):
+            fy = y / (height - 1) if height > 1 else 0.0
+            for x in range(width):
+                fx = x / (width - 1) if width > 1 else 0.0
 
-        combined.rect = rect
+                r = fx
+                g = fy
+                b = 0.2
+                a = 1.0
+                pixels.append([r, g, b, a])
+
+        combined.rect = pixels
 
         self.end_result(result)
 
