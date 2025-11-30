@@ -15,6 +15,21 @@ class DIYRenderEngine(bpy.types.RenderEngine):
     bl_idname = "DIY_RENDER_MINIMAL"
     bl_label = "DIY Renderer (Minimal)"
     bl_use_preview = True  # マテリアルプレビューでも使えるように
+    bl_use_shading_nodes_custom = False  # カスタムシェーダーを使わない
+
+    def _render_gradient(self, width, height):
+        """グラデーション画像を生成"""
+        pixels = []
+        for y in range(height):
+            fy = y / (height - 1) if height > 1 else 0.0
+            for x in range(width):
+                fx = x / (width - 1) if width > 1 else 0.0
+                r = fx
+                g = fy
+                b = 0.2
+                a = 1.0
+                pixels.append([r, g, b, a])
+        return pixels
 
     def render(self, depsgraph):
         scene = depsgraph.scene_eval
@@ -85,6 +100,48 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         combined.rect = pixels
 
         self.end_result(result)
+
+    def view_update(self, context, depsgraph):
+        """ビューポートでシーンが更新されたときに呼ばれる"""
+        # テクスチャキャッシュをクリア（シーン変更時）
+        if hasattr(self, 'texture'):
+            del self.texture
+            self.texture = None
+
+    def view_draw(self, context, depsgraph):
+        """ビューポートに描画するときに呼ばれる"""
+        region = context.region
+        width = region.width
+        height = region.height
+        
+        # GPU描画用のバッファを使用
+        import gpu
+        from gpu_extras.presets import draw_texture_2d
+        
+        # テクスチャのサイズが変わった場合のみ再生成
+        if not hasattr(self, 'texture') or self.texture is None or \
+           self.texture.width != width or self.texture.height != height:
+            
+            # グラデーション画像を生成
+            pixels = self._render_gradient(width, height)
+            
+            # 平坦化（バッファに必要な形式）
+            flat_pixels = []
+            for pixel in pixels:
+                flat_pixels.extend(pixel)
+            
+            # Bufferに変換
+            buffer = gpu.types.Buffer('FLOAT', width * height * 4, flat_pixels)
+            
+            # 古いテクスチャを削除
+            if hasattr(self, 'texture') and self.texture is not None:
+                del self.texture
+            
+            # 新しいテクスチャを作成
+            self.texture = gpu.types.GPUTexture((width, height), format='RGBA16F', data=buffer)
+        
+        # テクスチャを描画
+        draw_texture_2d(self.texture, (0, 0), width, height)
 
 
 def register():
