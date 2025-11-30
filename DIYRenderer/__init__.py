@@ -476,6 +476,25 @@ def export_scene_to_file(depsgraph):
         print("[DIYRenderer] Scene export failed:", e)
         return None
 
+def linear_to_srgb(c):
+    """Convert linear color value to sRGB gamma corrected value"""
+    if c <= 0.0031308:
+        return 12.92 * c
+    else:
+        return 1.055 * (c ** (1.0/2.4)) - 0.055
+
+def apply_gamma_correction(pixels):
+    """Apply sRGB gamma correction to linear pixel values"""
+    corrected = []
+    for pixel in pixels:
+        r, g, b, a = pixel
+        # Apply gamma correction to RGB, leave alpha as-is
+        r_srgb = linear_to_srgb(max(0.0, min(1.0, r)))
+        g_srgb = linear_to_srgb(max(0.0, min(1.0, g)))
+        b_srgb = linear_to_srgb(max(0.0, min(1.0, b)))
+        corrected.append([r_srgb, g_srgb, b_srgb, a])
+    return corrected
+
 def compute_camera_params(scene, width, height):
     cam = scene.camera
     if not cam:
@@ -571,6 +590,8 @@ def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, f
         for x in range(tile_w):
             flipped_pixels.append(pixels[y * tile_w + x])
     
+    # Return linear values without gamma correction
+    # Gamma correction will be applied after sample accumulation
     return flipped_pixels
 
 
@@ -701,6 +722,9 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                     blended.append([r, g, b, a])
                 accumulated_pixels = blended
                 total_samples = new_total
+            
+            # Blender expects linear color space, so pass accumulated pixels directly
+            # (Blender handles sRGB conversion internally based on color management settings)
             
             # Update the render result in Blender's render window
             result = self.begin_result(0, 0, width, height)
@@ -936,6 +960,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                     pixels = ext_pixels
                     print(f"[DIYRenderer] Initial samples: {samples_per_iteration}/{target_samples}")
                 
+                # Blender expects linear color space for viewport too
                 render_width = result_width
                 render_height = result_height
                 if pixels is None:
