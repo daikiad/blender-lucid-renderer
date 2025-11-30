@@ -16,6 +16,7 @@ import subprocess
 import math
 import threading
 import queue
+import json
 
 def _get_prefs_entry():
     return bpy.context.preferences.addons.get(__name__)
@@ -116,78 +117,133 @@ def get_material_properties(obj):
     
     return props
 
-def export_scene_to_file(depsgraph):
-    """Export evaluated meshes to a temporary scene file matching external renderer format."""
+def export_scene_to_json(depsgraph):
+    """Export scene to JSON format with full geometry and attribute data."""
     prefs = _get_prefs()
-    base_dir = None
+    base_dir = tempfile.gettempdir()
     if prefs:
         export_dir = getattr(prefs, 'scene_export_directory', '')
         if export_dir and isinstance(export_dir, str) and os.path.isdir(export_dir):
             base_dir = export_dir
-    if base_dir is None:
-        base_dir = tempfile.gettempdir()
-    fd, path = tempfile.mkstemp(prefix="diy_scene_", suffix=".txt", dir=base_dir)
+    
+    fd, path = tempfile.mkstemp(prefix="diy_scene_", suffix=".json", dir=base_dir)
     os.close(fd)
-    print(f"[DIYRenderer] Exporting scene to: {path}")
-    mesh_count = 0
-    tri_count = 0
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            for obj_instance in depsgraph.object_instances:
-                obj = obj_instance.object
-                if obj.type != 'MESH':
-                    continue
-                eval_obj = obj.evaluated_get(depsgraph)
-                mesh = eval_obj.to_mesh()
-                if not mesh:
-                    continue
-                
-                # Get material properties
-                mat_props = get_material_properties(obj)
-                if mat_props:
-                    base_color = mat_props['base_color']
-                    metallic = mat_props['metallic']
-                    roughness = mat_props['roughness']
-                else:
-                    base_color = [0.8, 0.8, 0.8]
-                    metallic = 0.0
-                    roughness = 0.5
-                
-                verts_world = []
-                mw = obj_instance.matrix_world
-                for v in mesh.vertices:
-                    co = mw @ v.co
-                    verts_world.append(co)
-                # Triangulate polygons (fan)
-                tris = []
+    
+    scene_data = {
+        "version": "1.0",
+        "meshes": []
+    }
+    
+    for obj_instance in depsgraph.object_instances:
+        obj = obj_instance.object
+        if obj.type != 'MESH':
+            continue
+        
+        eval_obj = obj.evaluated_get(depsgraph)
+        mesh = eval_obj.to_mesh()
+        if not mesh:
+            continue
+        
+        # Transform vertices to world space
+        mw = obj_instance.matrix_world
+        vertices = []
+        for v in mesh.vertices:
+            co = mw @ v.co
+            vertices.append([co.x, co.y, co.z])
+        
+        # Triangulate and collect face data
+        triangles = []
+        for poly in mesh.polygons:
+            v_indices = list(poly.vertices)
+            if len(v_indices) < 3:
+                continue
+            for i in range(1, len(v_indices) - 1):
+                triangles.append([v_indices[0], v_indices[i], v_indices[i+1]])
+        
+        # Extract material properties
+        mat_props = get_material_properties(obj)
+        material = {
+            "base_color": mat_props['base_color'] if mat_props else [0.8, 0.8, 0.8],
+            "metallic": mat_props['metallic'] if mat_props else 0.0,
+            "roughness": mat_props['roughness'] if mat_props else 0.5
+        }
+        
+        # Extract geometry node attributes
+        attributes = {}
+        
+        # Vertex colors
+        if mesh.vertex_colors:
+            color_layer = mesh.vertex_colors.active
+            if color_layer:
+                vertex_colors = []
                 for poly in mesh.polygons:
-                    v_indices = list(poly.vertices)
-                    if len(v_indices) < 3:
-                        continue
-                    for i in range(1, len(v_indices) - 1):
-                        tris.append((v_indices[0], v_indices[i], v_indices[i+1]))
+                    for loop_idx in poly.loop_indices:
+                        color = color_layer.data[loop_idx].color
+                        vertex_colors.append([color[0], color[1], color[2], color[3]])
+                attributes["vertex_color"] = vertex_colors
+        
+        # UVs
+        if mesh.uv_layers:
+            uv_layer = mesh.uv_layers.active
+            if uv_layer:
+                uvs = []
+                for poly in mesh.polygons:
+                    for loop_idx in poly.loop_indices:
+                        uv = uv_layer.data[loop_idx].uv
+                        uvs.append([uv.x, uv.y])
+                attributes["uv"] = uvs
+        
+        # Custom attributes from Geometry Nodes
+        if hasattr(mesh, 'attributes'):
+            for attr in mesh.attributes:
+                if attr.name.startswith('.'):  # Skip internal attributes
+                    continue
+                attr_name = attr.name
+                attr_data = []
                 
-                # Write mesh with material properties
-                f.write(f"mesh {obj.name} {len(verts_world)} {len(tris)}\n")
-                f.write(f"material {base_color[0]:.6f} {base_color[1]:.6f} {base_color[2]:.6f} {metallic:.6f} {roughness:.6f}\n")
-                for co in verts_world:
-                    f.write(f"v {co.x} {co.y} {co.z}\n")
-                for (a,b,c) in tris:
-                    f.write(f"t {a} {b} {c}\n")
-                eval_obj.to_mesh_clear()
-                mesh_count += 1
-                tri_count += len(tris)
-                if mesh_count <= 2:  # Print first 2 meshes for debugging
-                    print(f"[DIYRenderer] Exported mesh '{obj.name}': {len(verts_world)} verts, {len(tris)} tris")
-                    print(f"[DIYRenderer]   Material: color=({base_color[0]:.2f}, {base_color[1]:.2f}, {base_color[2]:.2f}), metallic={metallic:.2f}, roughness={roughness:.2f}")
-                    if len(verts_world) > 0:
-                        print(f"[DIYRenderer]   First vertex: ({verts_world[0].x:.3f}, {verts_world[0].y:.3f}, {verts_world[0].z:.3f})")
-            f.write("(end)\n")
-        print(f"[DIYRenderer] Export complete: {mesh_count} meshes, {tri_count} total triangles")
+                # Handle different attribute domains and data types
+                if attr.domain == 'POINT':  # Vertex attribute
+                    if attr.data_type == 'FLOAT':
+                        attr_data = [v.value for v in attr.data]
+                    elif attr.data_type == 'FLOAT_VECTOR':
+                        attr_data = [[v.vector[0], v.vector[1], v.vector[2]] for v in attr.data]
+                    elif attr.data_type == 'FLOAT_COLOR':
+                        attr_data = [[v.color[0], v.color[1], v.color[2], v.color[3]] for v in attr.data]
+                    elif attr.data_type == 'INT':
+                        attr_data = [v.value for v in attr.data]
+                
+                if attr_data:
+                    attributes[f"custom_{attr_name}"] = {
+                        "domain": attr.domain,
+                        "data_type": attr.data_type,
+                        "data": attr_data
+                    }
+        
+        mesh_data = {
+            "name": obj.name,
+            "vertices": vertices,
+            "triangles": triangles,
+            "material": material,
+            "attributes": attributes
+        }
+        
+        scene_data["meshes"].append(mesh_data)
+        eval_obj.to_mesh_clear()
+    
+    # Write JSON file
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(scene_data, f, indent=2)
+    
+    print(f"[DIYRenderer] Exported {len(scene_data['meshes'])} meshes to JSON: {path}")
+    return path
+
+def export_scene_to_file(depsgraph):
+    """Export evaluated meshes - delegates to JSON export."""
+    try:
+        return export_scene_to_json(depsgraph)
     except Exception as e:
         print("[DIYRenderer] Scene export failed:", e)
         return None
-    return path
 
 def compute_camera_params(scene, width, height):
     cam = scene.camera

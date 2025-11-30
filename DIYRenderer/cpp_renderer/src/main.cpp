@@ -1,4 +1,6 @@
 #include "renderer.hpp"
+#include "json.hpp"
+using json = nlohmann::json;
 #include <iostream>
 #include <sstream>
 #include <fstream>
@@ -75,6 +77,68 @@ Camera makeCamera(float cx,float cy,float cz,float dx,float dy,float dz,float ux
     return cam;
 }
 
+Scene loadSceneFromJson(const std::string &path) {
+    Scene scene;
+    std::ifstream in(path);
+    if (!in) {
+        std::cerr << "Failed to open JSON scene file: " << path << "\n";
+        return scene;
+    }
+    json j;
+    in >> j;
+    if (!j.contains("meshes")) return scene;
+    for (const auto &meshj : j["meshes"]) {
+        Mesh m;
+        // Vertices
+        if (meshj.contains("vertices")) {
+            for (const auto &v : meshj["vertices"]) {
+                m.vertices.emplace_back(v[0], v[1], v[2]);
+            }
+        }
+        // Triangles
+        if (meshj.contains("triangles")) {
+            for (const auto &t : meshj["triangles"]) {
+                m.triangles.push_back({t[0], t[1], t[2], {}});
+            }
+        }
+        // Material
+        if (meshj.contains("material")) {
+            const auto &mat = meshj["material"];
+            Vec3 albedo = Vec3(0.8f, 0.8f, 0.8f);
+            float metallic = 0.0f, roughness = 0.5f;
+            if (mat.contains("base_color")) {
+                albedo = Vec3(mat["base_color"][0], mat["base_color"][1], mat["base_color"][2]);
+            }
+            if (mat.contains("metallic")) metallic = mat["metallic"];
+            if (mat.contains("roughness")) roughness = mat["roughness"];
+            m.material = Material(albedo, metallic, roughness);
+            
+            // Debug print material
+            std::cerr << "[Mesh: " << meshj["name"] << "] material: "
+                      << "color=(" << albedo.x << "," << albedo.y << "," << albedo.z << "), "
+                      << "metallic=" << metallic << ", roughness=" << roughness << "\n";
+        }
+        // ...attributes (vertex color, uv, custom) can be parsed here as needed...
+        if (meshj.contains("attributes")) {
+            std::cerr << "[Mesh: " << meshj["name"] << "] attributes:\n";
+            for (auto it = meshj["attributes"].begin(); it != meshj["attributes"].end(); ++it) {
+                std::cerr << "  " << it.key() << ": ";
+                if (it.value().is_object()) {
+                    auto obj = it.value();
+                    std::cerr << "domain=" << obj["domain"] << ", type=" << obj["data_type"] << ", data=[..." << obj["data"].size() << "]\n";
+                } else if (it.value().is_array()) {
+                    std::cerr << "array size=" << it.value().size() << "\n";
+                } else {
+                    std::cerr << it.value() << "\n";
+                }
+            }
+        }
+        finalizeMeshBounds(m);
+        scene.meshes.push_back(std::move(m));
+    }
+    return scene;
+}
+
 int main(int argc, char** argv){
     std::string scenePath; int tileX=0,tileY=0,tileW=64,tileH=64, fullW=512, fullH=512; float cx=0,cy=0,cz=5, dx=0,dy=0,dz=-1, ux=0,uy=1,uz=0, fovDeg=60;
     bool debugFlag=false; bool disableAABB=false;
@@ -98,7 +162,13 @@ int main(int argc, char** argv){
         else if(a=="--disable-aabb"){ disableAABB = true; }
     }
     std::srand(42);  // Fixed seed for consistent results
-    Scene scene = loadScene(scenePath);
+    // Scene loading
+    Scene scene;
+    if (scenePath.size() > 5 && scenePath.substr(scenePath.size()-5) == ".json") {
+        scene = loadSceneFromJson(scenePath);
+    } else {
+        scene = loadScene(scenePath);
+    }
     Camera cam = makeCamera(cx,cy,cz,dx,dy,dz,ux,uy,uz,fovDeg, fullW, fullH);
     float fovRad = cam.fovDeg * (float)M_PI / 180.0f;
     float scale = std::tan(fovRad * 0.5f);
