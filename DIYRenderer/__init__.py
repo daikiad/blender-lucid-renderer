@@ -188,7 +188,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
     bl_label = "DIY Renderer (Minimal)"
     bl_use_preview = True
     bl_use_shading_nodes = True
-    # bl_use_shading_nodes_custom = False
+    bl_use_shading_nodes_custom = False  # Use standard Blender nodes
 
     def _init_async_render(self):
         """Lazy initialization of async rendering infrastructure"""
@@ -418,8 +418,78 @@ class DIYRenderEngine(bpy.types.RenderEngine):
 def register():
     bpy.utils.register_class(DIYRendererPreferences)
     bpy.utils.register_class(DIYRenderEngine)
+    
+    # Add our engine to all relevant panel compatibility
+    try:
+        from bl_ui import (
+            properties_material,
+            properties_data_mesh,
+            properties_data_light,
+            properties_data_camera,
+            properties_world,
+            properties_render,
+            properties_output,
+            properties_data_modifier,
+        )
+        
+        modules = [
+            properties_material,
+            properties_data_mesh,
+            properties_data_light,
+            properties_data_camera,
+            properties_world,
+            properties_render,
+            properties_output,
+            properties_data_modifier,
+        ]
+        
+        for module in modules:
+            for panel_name in dir(module):
+                if panel_name.startswith(('MATERIAL_PT_', 'DATA_PT_', 'WORLD_PT_', 
+                                         'RENDER_PT_', 'OUTPUT_PT_', 'EEVEE_', 
+                                         'CYCLES_', 'NODE_')):
+                    panel = getattr(module, panel_name, None)
+                    if panel and hasattr(panel, 'COMPAT_ENGINES'):
+                        panel.COMPAT_ENGINES.add('DIY_RENDER_MINIMAL')
+    except Exception as e:
+        print(f"[DIYRenderer] Warning: Could not register panels: {e}")
 
 
 def unregister():
+    # Remove our engine from panel compatibility
+    try:
+        from bl_ui import (
+            properties_material,
+            properties_data_mesh,
+            properties_data_light,
+            properties_data_camera,
+            properties_world,
+            properties_render,
+            properties_output,
+            properties_data_modifier,
+        )
+        
+        modules = [
+            properties_material,
+            properties_data_mesh,
+            properties_data_light,
+            properties_data_camera,
+            properties_world,
+            properties_render,
+            properties_output,
+            properties_data_modifier,
+        ]
+        
+        for module in modules:
+            for panel_name in dir(module):
+                if panel_name.startswith(('MATERIAL_PT_', 'DATA_PT_', 'WORLD_PT_', 
+                                         'RENDER_PT_', 'OUTPUT_PT_', 'EEVEE_', 
+                                         'CYCLES_', 'NODE_')):
+                    panel = getattr(module, panel_name, None)
+                    if panel and hasattr(panel, 'COMPAT_ENGINES') and 'DIY_RENDER_MINIMAL' in panel.COMPAT_ENGINES:
+                        panel.COMPAT_ENGINES.remove('DIY_RENDER_MINIMAL')
+    except Exception as e:
+        print(f"[DIYRenderer] Warning: Could not unregister panels: {e}")
+    
     bpy.utils.unregister_class(DIYRenderEngine)
     bpy.utils.unregister_class(DIYRendererPreferences)
