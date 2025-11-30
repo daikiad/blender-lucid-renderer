@@ -51,6 +51,17 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
         min=1,
         max=1000
     )
+    debug_mode: bpy.props.EnumProperty(
+        name="Debug Mode",
+        description="Render mode for debugging",
+        items=[
+            ('NONE', "Path Tracing", "Full path tracing with global illumination"),
+            ('normal', "Normals", "Show surface normals as RGB colors"),
+            ('albedo', "Albedo", "Show base colors without lighting"),
+            ('emission', "Emission", "Show emissive surfaces only"),
+        ],
+        default='NONE'
+    )
 
 class DIY_RENDER_PT_sampling(bpy.types.Panel):
     bl_label = "Sampling"
@@ -73,6 +84,9 @@ class DIY_RENDER_PT_sampling(bpy.types.Panel):
         col = layout.column(align=True)
         col.prop(diy, "samples")
         col.prop(diy, "viewport_samples")
+        
+        layout.separator()
+        layout.prop(diy, "debug_mode")
 
 def find_external_binary():
     # 1) Explicit preference path
@@ -654,11 +668,15 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             
             print(f"[DIYRenderer] Rendering iteration with {iteration_samples} samples (total: {total_samples + iteration_samples})")
             
+            # Get debug mode from settings
+            diy = scene.diy_renderer
+            debug_mode = diy.debug_mode if diy.debug_mode != 'NONE' else None
+            
             # Render this iteration by calling external C++ renderer
             iteration_pixels = call_external_renderer(
                 scene_file, 0, 0, width, height, width, height, cam_params, 
                 samples=iteration_samples,
-                debug_mode='albedo'  # DEBUG: Show base color to check materials
+                debug_mode=debug_mode
             )
             
             if not iteration_pixels or len(iteration_pixels) != width * height:
@@ -714,9 +732,15 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 depsgraph, cam_params, render_width, render_height, job_id, samples_per_iteration, tile_key = job_data
                 scene_file = export_scene_to_file(depsgraph)
                 if scene_file:
+                    # Get debug mode from settings
+                    scene = depsgraph.scene
+                    diy = scene.diy_renderer
+                    debug_mode = diy.debug_mode if diy.debug_mode != 'NONE' else None
+                    
                     ext_pixels = call_external_renderer(
                         scene_file, 0, 0, render_width, render_height, 
-                        render_width, render_height, cam_params, samples=samples_per_iteration
+                        render_width, render_height, cam_params, samples=samples_per_iteration,
+                        debug_mode=debug_mode
                     )
                     try:
                         if os.path.isfile(scene_file):
