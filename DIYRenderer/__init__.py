@@ -115,6 +115,28 @@ def get_material_properties(obj):
     else:
         props['roughness'] = 0.5
     
+    # Emission
+    emission_color = [0.0, 0.0, 0.0]
+    emission_strength = 0.0
+    if 'Emission Color' in principled.inputs:
+        emission_input = principled.inputs['Emission Color']
+        if not emission_input.is_linked:
+            color = emission_input.default_value
+            emission_color = [color[0], color[1], color[2]]
+    elif 'Emission' in principled.inputs:  # Older Blender versions
+        emission_input = principled.inputs['Emission']
+        if not emission_input.is_linked:
+            color = emission_input.default_value
+            emission_color = [color[0], color[1], color[2]]
+    
+    if 'Emission Strength' in principled.inputs:
+        strength_input = principled.inputs['Emission Strength']
+        emission_strength = strength_input.default_value if not strength_input.is_linked else 0.0
+    
+    props['emission'] = [emission_color[0] * emission_strength,
+                          emission_color[1] * emission_strength,
+                          emission_color[2] * emission_strength]
+    
     return props
 
 def export_scene_to_json(depsgraph):
@@ -165,7 +187,8 @@ def export_scene_to_json(depsgraph):
         material = {
             "base_color": mat_props['base_color'] if mat_props else [0.8, 0.8, 0.8],
             "metallic": mat_props['metallic'] if mat_props else 0.0,
-            "roughness": mat_props['roughness'] if mat_props else 0.5
+            "roughness": mat_props['roughness'] if mat_props else 0.5,
+            "emission": mat_props['emission'] if mat_props else [0.0, 0.0, 0.0]
         }
         
         # Extract geometry node attributes
@@ -270,7 +293,7 @@ def compute_camera_params(scene, width, height):
         'fov': fov_deg
     }
 
-def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, full_h, cam_params, mode='raytrace'):
+def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, full_h, cam_params, mode='raytrace', samples=1):
     binary = find_external_binary()
     if not binary:
         print("[DIYRenderer] External binary not found. Falling back to internal rendering.")
@@ -283,8 +306,9 @@ def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, f
            '--camdir', str(cam_params['dir'].x), str(cam_params['dir'].y), str(cam_params['dir'].z),
            '--camup', str(cam_params['up'].x), str(cam_params['up'].y), str(cam_params['up'].z),
            '--fov', str(cam_params['fov']),
+           '--samples', str(samples),
            '--mode', mode]
-    print(f"[DIYRenderer] Calling external renderer: {' '.join(cmd)}")
+    print(f"[DIYRenderer] Calling external renderer (samples={samples}): {' '.join(cmd)}")
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
         if proc.stderr:
@@ -321,6 +345,8 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             self.stop_thread = False
             self.rendering_in_progress = False
             self.high_res_complete = False
+            self.accumulated_samples = {}  # tile_key -> (accumulated_pixels, sample_count)
+            self.target_samples = 64  # Target samples for idle rendering
 
     def _render_gradient(self, width, height):
         pixels = []
@@ -336,39 +362,93 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         scale = scene.render.resolution_percentage / 100.0
         width = int(scene.render.resolution_x * scale)
         height = int(scene.render.resolution_y * scale)
-        print(f"[DIYRenderer] Starting render ({width} x {height})")
+        print(f"[DIYRenderer] Starting progressive render ({width} x {height})")
         cam_params = compute_camera_params(scene, width, height)
-        external_pixels = None
-        if cam_params:
-            scene_file = export_scene_to_file(depsgraph)
-            if scene_file:
-                external_pixels = call_external_renderer(scene_file, 0, 0, width, height, width, height, cam_params)
-                try:
-                    if scene_file and os.path.isfile(scene_file):
-                        os.remove(scene_file)
-                except Exception:
-                    pass
-        result = self.begin_result(0, 0, width, height)
-        combined = result.layers[0].passes["Combined"]
-        if external_pixels and len(external_pixels) == width * height:
-            combined.rect = external_pixels
-            print("[DIYRenderer] External render complete")
-        else:
+        
+        if not cam_params:
+            # Fallback to gradient
+            result = self.begin_result(0, 0, width, height)
+            combined = result.layers[0].passes["Combined"]
             combined.rect = self._render_gradient(width, height)
-            print("[DIYRenderer] External render failed; gradient fallback")
-        self.end_result(result)
+            self.end_result(result)
+            return
+        
+        scene_file = export_scene_to_file(depsgraph)
+        if not scene_file:
+            # Fallback to gradient
+            result = self.begin_result(0, 0, width, height)
+            combined = result.layers[0].passes["Combined"]
+            combined.rect = self._render_gradient(width, height)
+            self.end_result(result)
+            return
+        
+        # Progressive rendering: start with low samples, gradually increase
+        sample_iterations = [1, 2, 4, 8, 16, 32, 64]  # Progressive sample counts
+        accumulated_pixels = None
+        total_samples = 0
+        
+        for iteration_samples in sample_iterations:
+            if self.test_break():
+                print("[DIYRenderer] Render cancelled by user")
+                break
+            
+            print(f"[DIYRenderer] Rendering iteration with {iteration_samples} samples (total: {total_samples + iteration_samples})")
+            
+            # Render this iteration
+            iteration_pixels = call_external_renderer(
+                scene_file, 0, 0, width, height, width, height, cam_params, 
+                samples=iteration_samples
+            )
+            
+            if not iteration_pixels or len(iteration_pixels) != width * height:
+                print(f"[DIYRenderer] Iteration failed, skipping")
+                continue
+            
+            # Accumulate samples
+            if accumulated_pixels is None:
+                accumulated_pixels = iteration_pixels
+                total_samples = iteration_samples
+            else:
+                # Blend: (old * old_count + new * new_count) / total_count
+                new_total = total_samples + iteration_samples
+                blended = []
+                for i in range(len(accumulated_pixels)):
+                    r = (accumulated_pixels[i][0] * total_samples + iteration_pixels[i][0] * iteration_samples) / new_total
+                    g = (accumulated_pixels[i][1] * total_samples + iteration_pixels[i][1] * iteration_samples) / new_total
+                    b = (accumulated_pixels[i][2] * total_samples + iteration_pixels[i][2] * iteration_samples) / new_total
+                    a = 1.0
+                    blended.append([r, g, b, a])
+                accumulated_pixels = blended
+                total_samples = new_total
+            
+            # Update the result progressively
+            result = self.begin_result(0, 0, width, height)
+            combined = result.layers[0].passes["Combined"]
+            combined.rect = accumulated_pixels
+            self.end_result(result)
+            self.update_result(result)
+            print(f"[DIYRenderer] Updated render with {total_samples} total samples")
+        
+        # Clean up
+        try:
+            if scene_file and os.path.isfile(scene_file):
+                os.remove(scene_file)
+        except Exception:
+            pass
+        
+        print(f"[DIYRenderer] Progressive render complete ({total_samples} total samples)")
 
     def async_render_viewport(self, job_data):
         """Background thread function to render viewport without blocking UI"""
         while not self.stop_thread:
             try:
                 # Get latest job, discard old ones
-                depsgraph, cam_params, render_width, render_height, job_id = job_data
+                depsgraph, cam_params, render_width, render_height, job_id, samples_per_iteration, tile_key = job_data
                 scene_file = export_scene_to_file(depsgraph)
                 if scene_file:
                     ext_pixels = call_external_renderer(
                         scene_file, 0, 0, render_width, render_height, 
-                        render_width, render_height, cam_params
+                        render_width, render_height, cam_params, samples=samples_per_iteration
                     )
                     try:
                         if os.path.isfile(scene_file):
@@ -381,7 +461,9 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                             'pixels': ext_pixels,
                             'width': render_width,
                             'height': render_height,
-                            'job_id': job_id
+                            'job_id': job_id,
+                            'samples_per_iteration': samples_per_iteration,
+                            'tile_key': tile_key
                         })
                     except queue.Full:
                         pass  # Discard if queue full
@@ -392,6 +474,8 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                     break  # No more jobs, exit thread
             except Exception as e:
                 print(f"[DIYRenderer] Async render error: {e}")
+                import traceback
+                traceback.print_exc()
                 break
     
     def view_update(self, context, depsgraph):
@@ -434,28 +518,46 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         
         # Simple two-level system: low res when moving, high res when idle
         if time_since_change < 1.0:
-            # Moving: use low resolution
+            # Moving: use low resolution, 1 sample
             render_width = max(40, width // 16)
             render_height = max(30, height // 16)
             update_interval = 1  # Update every frame when moving
+            samples_per_iteration = 1
         else:
-            # Idle for 1+ seconds: use full resolution
+            # Idle for 1+ seconds: use full resolution, progressive samples
             render_width = max(100, width)
             render_height = max(100, height)
-            update_interval = 10  # Update every 10 frames when idle
+            update_interval = 5  # Update every 5 frames when idle
+            samples_per_iteration = 4  # Add 4 samples per iteration
         
         if not hasattr(self, 'frame_counter'):
             self.frame_counter = 0
         self.frame_counter += 1
         
+        # Create tile key for accumulation
+        tile_key = f"{render_width}x{render_height}"
+        
+        # Check current sample count for this tile
+        if tile_key in self.accumulated_samples:
+            current_sample_count = self.accumulated_samples[tile_key][1]
+        else:
+            current_sample_count = 0
+        
         # Check if we need to update
         resolution_changed = (self.last_render_width != render_width or 
                              self.last_render_height != render_height)
+        
+        # If resolution changed, reset accumulation
+        if resolution_changed:
+            self.accumulated_samples = {}
+            current_sample_count = 0
+        
         needs_update = (
             not hasattr(self, 'texture') or self.texture is None or
             resolution_changed or
-            self.frame_counter % update_interval == 0
+            (self.frame_counter % update_interval == 0 and current_sample_count < self.target_samples)
         )
+        
         if needs_update:
             self.last_render_width = render_width
             self.last_render_height = render_height
@@ -472,7 +574,8 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 if not hasattr(self, 'job_counter'):
                     self.job_counter = 0
                 self.job_counter += 1
-                job_data = (depsgraph, cam_params, render_width, render_height, self.job_counter)
+                job_data = (depsgraph, cam_params, render_width, render_height, self.job_counter, 
+                           samples_per_iteration, tile_key)
                 
                 # Clear old job and submit new one
                 try:
@@ -501,8 +604,31 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             ext_pixels = result['pixels']
             result_width = result['width']
             result_height = result['height']
+            result_tile_key = result.get('tile_key', '')
+            samples_per_iteration = result.get('samples_per_iteration', 1)
+            
             if ext_pixels and len(ext_pixels) == result_width * result_height:
-                pixels = ext_pixels
+                # Accumulate samples
+                if result_tile_key in self.accumulated_samples:
+                    acc_pixels, prev_count = self.accumulated_samples[result_tile_key]
+                    # Blend new samples with accumulated
+                    new_count = prev_count + samples_per_iteration
+                    blended = []
+                    for i in range(len(acc_pixels)):
+                        r = (acc_pixels[i][0] * prev_count + ext_pixels[i][0] * samples_per_iteration) / new_count
+                        g = (acc_pixels[i][1] * prev_count + ext_pixels[i][1] * samples_per_iteration) / new_count
+                        b = (acc_pixels[i][2] * prev_count + ext_pixels[i][2] * samples_per_iteration) / new_count
+                        a = 1.0
+                        blended.append([r, g, b, a])
+                    self.accumulated_samples[result_tile_key] = (blended, new_count)
+                    pixels = blended
+                    print(f"[DIYRenderer] Accumulated samples: {new_count}/{self.target_samples}")
+                else:
+                    # First iteration
+                    self.accumulated_samples[result_tile_key] = (ext_pixels, samples_per_iteration)
+                    pixels = ext_pixels
+                    print(f"[DIYRenderer] Initial samples: {samples_per_iteration}/{self.target_samples}")
+                
                 render_width = result_width
                 render_height = result_height
                 if pixels is None:

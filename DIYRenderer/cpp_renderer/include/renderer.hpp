@@ -21,13 +21,34 @@ struct Vec3 {
 };
 
 inline float randf(){ return (float)std::rand() / (float)RAND_MAX; }
+inline Vec3 randomInUnitSphere(){
+    while(true){
+        Vec3 p = Vec3(randf()*2.0f-1.0f, randf()*2.0f-1.0f, randf()*2.0f-1.0f);
+        if(p.length() < 1.0f) return p;
+    }
+}
+inline Vec3 randomUnitVector(){ 
+    Vec3 v = randomInUnitSphere(); 
+    v.normalize(); 
+    return v; 
+}
+inline Vec3 randomCosineDirection(const Vec3 &normal) {
+    // Generate random direction in hemisphere around normal (cosine-weighted)
+    Vec3 random_dir = randomUnitVector();
+    if (Vec3::dot(random_dir, normal) < 0.0f) {
+        random_dir = random_dir * -1.0f;
+    }
+    return random_dir;
+}
 
 struct Material {
     Vec3 albedo;
     float metallic;
     float roughness;
-    Material() : albedo(0.8f, 0.8f, 0.8f), metallic(0.0f), roughness(0.5f) {}
-    Material(Vec3 a, float m, float r) : albedo(a), metallic(m), roughness(r) {}
+    Vec3 emission;  // Emission color * strength
+    Material() : albedo(0.8f, 0.8f, 0.8f), metallic(0.0f), roughness(0.5f), emission(0.0f, 0.0f, 0.0f) {}
+    Material(Vec3 a, float m, float r) : albedo(a), metallic(m), roughness(r), emission(0.0f, 0.0f, 0.0f) {}
+    Material(Vec3 a, float m, float r, Vec3 e) : albedo(a), metallic(m), roughness(r), emission(e) {}
 };
 
 struct Ray { Vec3 o; Vec3 d; };
@@ -174,36 +195,41 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
     if(depth <= 0) return Vec3{0,0,0};
     
     Hit hit = intersectScene(scene, ray, useAABB);
-    if(!hit.hit) return skyColor(ray);
+    if(!hit.hit) return Vec3(0,0,0); // Black background (no environment lighting)
     
-    // Simple lighting: one directional light
-    Vec3 lightDir = Vec3(0.5f, 1.0f, 0.3f);
-    lightDir.normalize();
-    Vec3 lightColor = Vec3(1.0f, 1.0f, 0.95f) * 1.5f;
-    
-    // Diffuse shading
-    float NdotL = std::max(0.0f, Vec3::dot(hit.normal, lightDir));
-    Vec3 diffuse = hit.material.albedo * NdotL;
-    
-    // Shadow
-    bool inShadow = isInShadow(scene, hit.point, lightDir, 1e30f);
-    if(inShadow) {
-        diffuse = diffuse * 0.3f;  // Ambient only
-    } else {
-        diffuse = diffuse * lightColor;
+    // If hit emissive surface, return emission
+    float emissionMagnitude = hit.material.emission.x + hit.material.emission.y + hit.material.emission.z;
+    if(emissionMagnitude > 0.001f) {
+        return hit.material.emission;
     }
     
-    // Ambient
-    Vec3 ambient = hit.material.albedo * 0.2f;
-    
-    // Reflection for metallic surfaces
-    Vec3 reflection{0,0,0};
-    if(hit.material.metallic > 0.01f && depth > 1){
-        Vec3 reflectDir = ray.d - hit.normal * (2.0f * Vec3::dot(ray.d, hit.normal));
-        reflectDir.normalize();
-        Ray reflectRay{hit.point + hit.normal * 0.001f, reflectDir};
-        reflection = trace(scene, reflectRay, depth - 1, useAABB) * hit.material.metallic;
+    // Russian roulette for path termination (after first few bounces)
+    float survivalProbability = 0.9f;
+    if(depth < 3 && randf() > survivalProbability) {
+        return Vec3(0,0,0);
     }
     
-    return ambient + diffuse + reflection;
+    // Scatter ray in random direction (cosine-weighted around normal)
+    Vec3 scatterDir = randomCosineDirection(hit.normal);
+    Ray scattered{hit.point + hit.normal * 0.001f, scatterDir};
+    
+    // Recursively trace the scattered ray
+    Vec3 incomingLight = trace(scene, scattered, depth - 1, useAABB);
+    
+    // Rendering equation with cosine-weighted importance sampling:
+    // Lo = integral(BRDF * Li * cos(theta))
+    // BRDF (Lambertian) = albedo / PI
+    // PDF (cosine-weighted) = cos(theta) / PI
+    // Monte Carlo estimator: (BRDF * Li * cos(theta)) / PDF
+    //                       = (albedo/PI * Li * cos(theta)) / (cos(theta)/PI)
+    //                       = albedo * Li
+    // The cos(theta) and PI terms cancel out!
+    Vec3 result = hit.material.albedo * incomingLight;
+    
+    // Russian roulette compensation
+    if(depth < 3) {
+        result = result * (1.0f / survivalProbability);
+    }
+    
+    return result;
 }

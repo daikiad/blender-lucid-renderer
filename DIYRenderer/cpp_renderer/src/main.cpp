@@ -106,17 +106,22 @@ Scene loadSceneFromJson(const std::string &path) {
             const auto &mat = meshj["material"];
             Vec3 albedo = Vec3(0.8f, 0.8f, 0.8f);
             float metallic = 0.0f, roughness = 0.5f;
+            Vec3 emission = Vec3(0.0f, 0.0f, 0.0f);
             if (mat.contains("base_color")) {
                 albedo = Vec3(mat["base_color"][0], mat["base_color"][1], mat["base_color"][2]);
             }
             if (mat.contains("metallic")) metallic = mat["metallic"];
             if (mat.contains("roughness")) roughness = mat["roughness"];
-            m.material = Material(albedo, metallic, roughness);
+            if (mat.contains("emission")) {
+                emission = Vec3(mat["emission"][0], mat["emission"][1], mat["emission"][2]);
+            }
+            m.material = Material(albedo, metallic, roughness, emission);
             
             // Debug print material
             std::cerr << "[Mesh: " << meshj["name"] << "] material: "
                       << "color=(" << albedo.x << "," << albedo.y << "," << albedo.z << "), "
-                      << "metallic=" << metallic << ", roughness=" << roughness << "\n";
+                      << "metallic=" << metallic << ", roughness=" << roughness
+                      << ", emission=(" << emission.x << "," << emission.y << "," << emission.z << ")\n";
         }
         // ...attributes (vertex color, uv, custom) can be parsed here as needed...
         if (meshj.contains("attributes")) {
