@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(diyrt
     src/main.cpp
+    src/node_evaluator.cpp
 )
 
 target_include_directories(diyrt PRIVATE include)
