@@ -7,6 +7,107 @@ using json = nlohmann::json;
 #include <string>
 #include <cstdlib>
 #include <cmath>
+#include <map>
+
+// ========== Node Graph Parsing ==========
+// Parse socket value from JSON
+SocketValue parseSocketValue(const json &j) {
+    if(j.is_number()) {
+        return SocketValue::makeFloat(j.get<float>());
+    } else if(j.is_array()) {
+        if(j.size() == 3) {
+            return SocketValue::makeVec3(j[0], j[1], j[2]);
+        } else if(j.size() == 4) {
+            float x = j[0], y = j[1], z = j[2], w = j[3];
+            static int debugCount = 0;
+            if(++debugCount <= 3) {
+                std::cerr << "[parseSocketValue] VEC4: [" << x << ", " << y << ", " << z << ", " << w << "]\n";
+            }
+            return SocketValue::makeVec4(x, y, z, w);
+        }
+    } else if(j.is_boolean()) {
+        SocketValue sv;
+        sv.type = SocketValue::BOOL;
+        sv.b = j.get<bool>();
+        return sv;
+    } else if(j.is_string()) {
+        SocketValue sv;
+        sv.type = SocketValue::STRING;
+        sv.s = j.get<std::string>();
+        return sv;
+    }
+    return SocketValue();  // NONE
+}
+
+// Parse node graph from JSON
+NodeTree parseNodeTree(const json &nodeTreeJson) {
+    NodeTree tree;
+    
+    if(!nodeTreeJson.contains("nodes") || !nodeTreeJson.is_object()) {
+        return tree;  // Invalid
+    }
+    
+    const auto &nodesArray = nodeTreeJson["nodes"];
+    const auto &linksArray = nodeTreeJson.contains("links") ? nodeTreeJson["links"] : json::array();
+    
+    // Build a map of node connections: (to_node, to_socket) -> (from_node, from_socket)
+    std::map<std::pair<std::string, std::string>, std::pair<std::string, std::string>> connections;
+    for(const auto &link : linksArray) {
+        std::string from_node = link["from_node"];
+        std::string from_socket = link["from_socket"];
+        std::string to_node = link["to_node"];
+        std::string to_socket = link["to_socket"];
+        connections[{to_node, to_socket}] = {from_node, from_socket};
+    }
+    
+    // Parse nodes
+    for(const auto &nodeJson : nodesArray) {
+        MaterialNode node;
+        node.name = nodeJson.value("name", "");
+        node.type = nodeJson.value("type", "");
+        node.label = nodeJson.value("label", "");
+        
+        // Parse inputs
+        if(nodeJson.contains("inputs")) {
+            for(const auto &inp : nodeJson["inputs"]) {
+                NodeSocket socket;
+                socket.name = inp.value("name", "");
+                socket.type = inp.value("type", "");
+                if(inp.contains("default_value")) {
+                    socket.default_value = parseSocketValue(inp["default_value"]);
+                }
+                
+                // Check if this socket is connected
+                auto connKey = std::make_pair(node.name, socket.name);
+                if(connections.find(connKey) != connections.end()) {
+                    socket.is_linked = true;
+                    socket.linked_node = connections[connKey].first;
+                    socket.linked_socket = connections[connKey].second;
+                }
+                
+                node.inputs.push_back(socket);
+            }
+        }
+        
+        // Parse outputs
+        if(nodeJson.contains("outputs")) {
+            for(const auto &outp : nodeJson["outputs"]) {
+                NodeSocket socket;
+                socket.name = outp.value("name", "");
+                socket.type = outp.value("type", "");
+                if(outp.contains("default_value")) {
+                    socket.default_value = parseSocketValue(outp["default_value"]);
+                }
+                node.outputs.push_back(socket);
+            }
+        }
+        
+        tree.nodes.push_back(node);
+    }
+    
+    tree.valid = !tree.nodes.empty();
+    return tree;
+}
 
 /*
 Simple protocol (prototype):
@@ -117,6 +218,16 @@ Scene loadSceneFromJson(const std::string &path) {
             }
             m.material = Material(albedo, metallic, roughness, emission);
             
+            // Parse node tree if present
+            if (mat.contains("node_tree") && !mat["node_tree"].is_null()) {
+                m.material.nodeTree = parseNodeTree(mat["node_tree"]);
+                m.material.useNodes = mat.value("use_nodes", false) && m.material.nodeTree.valid;
+                
+                std::cerr << "[Mesh: " << meshj["name"] << "] node_tree parsed: "
+                          << "nodes=" << m.material.nodeTree.nodes.size()
+                          << ", useNodes=" << (m.material.useNodes ? "true" : "false") << "\n";
+            }
+            
             // Debug print material
             std::cerr << "[Mesh: " << meshj["name"] << "] material: "
                       << "color=(" << albedo.x << "," << albedo.y << "," << albedo.z << "), "
@@ -177,7 +288,7 @@ int main(int argc, char** argv){
     Camera cam = makeCamera(cx,cy,cz,dx,dy,dz,ux,uy,uz,fovDeg, fullW, fullH);
     float fovRad = cam.fovDeg * (float)M_PI / 180.0f;
     float scale = std::tan(fovRad * 0.5f);
-    bool debug = debugFlag || (std::getenv("DIYRT_DEBUG") != nullptr);
+    bool debug = true;  // Always enable debug for now
     if(debug){
         std::cerr << "[diyrt] SCENE meshes=" << scene.meshes.size() << " aspect=" << cam.aspect << " fovDeg=" << cam.fovDeg << "\n";
         std::cerr << "[diyrt] CAMERA pos=(" << cam.pos.x << "," << cam.pos.y << "," << cam.pos.z << ") dir=(" << cam.forward.x << "," << cam.forward.y << "," << cam.forward.z << ") up=(" << cam.up.x << "," << cam.up.y << "," << cam.up.z << ") right=(" << cam.right.x << "," << cam.right.y << "," << cam.right.z << ")\n";
@@ -219,7 +330,7 @@ int main(int argc, char** argv){
         for(int px=0; px<tileW; ++px){
             int x = tileX + px;
             float ndcX = (2.0f * (x + 0.5f) / fullW - 1.0f) * cam.aspect;
-            float ndcY = (2.0f * (y + 0.5f) / fullH - 1.0f);  // Fix: Remove the 1.0f - inversion
+            float ndcY = 1.0f - 2.0f * (y + 0.5f) / fullH;  // Y-axis flip for screen coordinates
             // Construct ray direction: forward + offset from image plane
             // Image plane is at distance 1 from camera, with size (2*scale*aspect, 2*scale)
             Vec3 worldDir = cam.forward + cam.right * (ndcX * scale) + cam.up * (ndcY * scale);
@@ -227,12 +338,29 @@ int main(int argc, char** argv){
             Ray ray{cam.pos, worldDir};
             Vec3 color{0,0,0};
             
-            if(mode == "debug"){
+            if(mode == "debug" || mode == "normal"){
                 // Debug mode: show normals
                 Vec3 n = traceNormal(scene, ray, !disableAABB);
                 color.x = n.x * 0.5f + 0.5f;
                 color.y = n.y * 0.5f + 0.5f;
                 color.z = n.z * 0.5f + 0.5f;
+            } else if(mode == "albedo") {
+                // Debug mode: show base color (albedo)
+                color = traceAlbedo(scene, ray, !disableAABB);
+                if(py < 2 && px < 2) {
+                    Hit hit = intersectScene(scene, ray, !disableAABB);
+                    std::cerr << "[diyrt] albedo x=" << x << " y=" << y 
+                              << " hit=" << (hit.hit ? "YES" : "NO");
+                    if(hit.hit) {
+                        std::cerr << " useNodes=" << hit.material.useNodes
+                                  << " treeValid=" << hit.material.nodeTree.valid
+                                  << " legacyAlbedo=(" << hit.material.albedo.x << "," << hit.material.albedo.y << "," << hit.material.albedo.z << ")";
+                    }
+                    std::cerr << " color=(" << color.x << "," << color.y << "," << color.z << ")\n";
+                }
+            } else if(mode == "emission") {
+                // Debug mode: show emission
+                color = traceEmission(scene, ray, !disableAABB);
             } else {
                 // Raytrace mode: full path tracing with samples
                 for(int s = 0; s < samples; ++s){

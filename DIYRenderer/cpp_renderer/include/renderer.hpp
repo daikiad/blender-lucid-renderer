@@ -4,6 +4,7 @@
 #include <limits>
 #include <cmath>
 #include <cstdlib>
+#include <iostream>
 
 struct Vec3 {
     float x, y, z;
@@ -53,6 +54,79 @@ inline Vec3 randomCosineDirection(const Vec3 &normal) {
     return random_dir;
 }
 
+// ========== Node Graph Structures ==========
+// These structures represent Blender's node-based material system
+
+// Socket value can be a constant or a connection
+struct SocketValue {
+    enum Type { FLOAT, VEC3, VEC4, STRING, BOOL, NONE };
+    Type type;
+    float f;          // For FLOAT
+    Vec3 v3;          // For VEC3
+    Vec3 v4;          // For VEC4 (w component separate)
+    float v4_w;
+    std::string s;    // For STRING
+    bool b;           // For BOOL
+    
+    SocketValue() : type(NONE), f(0), v3(), v4(), v4_w(0), b(false) {}
+    static SocketValue makeFloat(float val) { SocketValue sv; sv.type = FLOAT; sv.f = val; return sv; }
+    static SocketValue makeVec3(float x, float y, float z) { SocketValue sv; sv.type = VEC3; sv.v3 = Vec3(x,y,z); return sv; }
+    static SocketValue makeVec4(float x, float y, float z, float w) { SocketValue sv; sv.type = VEC4; sv.v4 = Vec3(x,y,z); sv.v4_w = w; return sv; }
+};
+
+// Node socket (input or output)
+struct NodeSocket {
+    std::string name;           // Socket name (e.g., "Base Color", "BSDF")
+    std::string type;           // Socket type ("VALUE", "RGBA", "VECTOR", "SHADER")
+    SocketValue default_value;  // Default value when not connected
+    bool is_linked;             // Is this socket connected to another node?
+    std::string linked_node;    // Name of connected node (if is_linked)
+    std::string linked_socket;  // Name of connected socket (if is_linked)
+    
+    NodeSocket() : is_linked(false) {}
+};
+
+// Material node (e.g., Principled BSDF, Mix, Texture)
+struct MaterialNode {
+    std::string name;   // Unique node name
+    std::string type;   // Node type ("ShaderNodeBsdfPrincipled", "ShaderNodeMix", etc.)
+    std::string label;  // User-visible label
+    std::vector<NodeSocket> inputs;   // Input sockets
+    std::vector<NodeSocket> outputs;  // Output sockets
+    
+    // Find input socket by name (returns nullptr if not found)
+    const NodeSocket* findInput(const std::string &name) const {
+        for(const auto &s : inputs) {
+            if(s.name == name) return &s;
+        }
+        return nullptr;
+    }
+};
+
+// Node tree (complete material graph)
+struct NodeTree {
+    std::vector<MaterialNode> nodes;
+    bool valid;  // Is this node tree valid?
+    
+    NodeTree() : valid(false) {}
+    
+    // Find node by name
+    const MaterialNode* findNode(const std::string &name) const {
+        for(const auto &n : nodes) {
+            if(n.name == name) return &n;
+        }
+        return nullptr;
+    }
+    
+    // Find output node (Material Output)
+    const MaterialNode* findOutputNode() const {
+        for(const auto &n : nodes) {
+            if(n.type == "ShaderNodeOutputMaterial") return &n;
+        }
+        return nullptr;
+    }
+};
+
 // ========== Material Definition ==========
 // Stores physical material properties from Blender's Principled BSDF
 struct Material {
@@ -61,9 +135,13 @@ struct Material {
     float roughness;  // Surface roughness [currently unused]
     Vec3 emission;    // Emission color * strength (for light sources)
     
-    Material() : albedo(0.8f, 0.8f, 0.8f), metallic(0.0f), roughness(0.5f), emission(0.0f, 0.0f, 0.0f) {}
-    Material(Vec3 a, float m, float r) : albedo(a), metallic(m), roughness(r), emission(0.0f, 0.0f, 0.0f) {}
-    Material(Vec3 a, float m, float r, Vec3 e) : albedo(a), metallic(m), roughness(r), emission(e) {}
+    // Node-based material system
+    NodeTree nodeTree;  // Full node graph from Blender
+    bool useNodes;      // Should we use node tree or legacy properties?
+    
+    Material() : albedo(0.8f, 0.8f, 0.8f), metallic(0.0f), roughness(0.5f), emission(0.0f, 0.0f, 0.0f), useNodes(false) {}
+    Material(Vec3 a, float m, float r) : albedo(a), metallic(m), roughness(r), emission(0.0f, 0.0f, 0.0f), useNodes(false) {}
+    Material(Vec3 a, float m, float r, Vec3 e) : albedo(a), metallic(m), roughness(r), emission(e), useNodes(false) {}
 };
 
 struct Ray { Vec3 o; Vec3 d; };
@@ -184,11 +262,57 @@ inline Hit intersectScene(const Scene &scene, const Ray &ray, bool useAABB = tru
     return result;
 }
 
+// ========== Node Graph Evaluation (Forward Declarations) ==========
+// These functions are implemented in node_evaluator.cpp
+
+// Evaluate a single node (recursive for connected inputs)
+Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::string &socketName);
+
+// Get albedo from node tree (follows connections from Material Output)
+Vec3 getAlbedoFromNodeTree(const NodeTree &tree);
+
+// Get emission from node tree
+Vec3 getEmissionFromNodeTree(const NodeTree &tree);
+
+// ========== Debug Rendering Functions ==========
+
 // Debug mode: return normal as color
 inline Vec3 traceNormal(const Scene &scene, const Ray &ray, bool useAABB = true){
     Hit hit = intersectScene(scene, ray, useAABB);
     if(hit.hit){
         return hit.normal;
+    }
+    return Vec3{0,0,0};
+}
+
+// Debug mode: return albedo (base color) from material
+inline Vec3 traceAlbedo(const Scene &scene, const Ray &ray, bool useAABB = true){
+    static int hitCount = 0;
+    Hit hit = intersectScene(scene, ray, useAABB);
+    if(hit.hit){
+        if(++hitCount <= 3) {
+            std::cerr << "[traceAlbedo] Hit! useNodes=" << hit.material.useNodes 
+                      << " treeValid=" << hit.material.nodeTree.valid 
+                      << " legacyAlbedo=(" << hit.material.albedo.x << "," << hit.material.albedo.y << "," << hit.material.albedo.z << ")\n";
+        }
+        // Use node tree if available, otherwise legacy properties
+        if(hit.material.useNodes && hit.material.nodeTree.valid) {
+            return getAlbedoFromNodeTree(hit.material.nodeTree);
+        }
+        return hit.material.albedo;
+    }
+    return Vec3{0,0,0};
+}
+
+// Debug mode: return emission from material
+inline Vec3 traceEmission(const Scene &scene, const Ray &ray, bool useAABB = true){
+    Hit hit = intersectScene(scene, ray, useAABB);
+    if(hit.hit){
+        // Use node tree if available, otherwise legacy properties
+        if(hit.material.useNodes && hit.material.nodeTree.valid) {
+            return getEmissionFromNodeTree(hit.material.nodeTree);
+        }
+        return hit.material.emission;
     }
     return Vec3{0,0,0};
 }
@@ -219,19 +343,21 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
     // Ray escaped to infinity - return black (no environment lighting)
     if(!hit.hit) return Vec3(0,0,0);
     
-    // Check if we hit a light source (emission > 0)
-    float emissionMagnitude = hit.material.emission.x + hit.material.emission.y + hit.material.emission.z;
-    if(emissionMagnitude > 0.001f) {
-        // Direct hit on light - return its emission
-        return hit.material.emission;
+    // Evaluate material properties (use node tree if available, fallback to legacy)
+    Vec3 albedo = hit.material.albedo;
+    Vec3 emission = hit.material.emission;
+    
+    if(hit.material.useNodes && hit.material.nodeTree.valid) {
+        // Use node-based material evaluation
+        albedo = getAlbedoFromNodeTree(hit.material.nodeTree);
+        emission = getEmissionFromNodeTree(hit.material.nodeTree);
     }
     
-    // Russian roulette path termination (stochastic early exit)
-    // After first few bounces, randomly terminate paths to save computation
-    // Must compensate by dividing by survival probability
-    float survivalProbability = 0.9f;
-    if(depth < 3 && randf() > survivalProbability) {
-        return Vec3(0,0,0);  // Path terminated
+    // Check if we hit a light source (emission > 0)
+    float emissionMagnitude = emission.x + emission.y + emission.z;
+    if(emissionMagnitude > 0.001f) {
+        // Direct hit on light - return its emission
+        return emission;
     }
     
     // Scatter ray in random direction using cosine-weighted sampling
@@ -250,12 +376,7 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
     //                       = (albedo/PI * Li * cos(theta)) / (cos(theta)/PI)
     //                       = albedo * Li
     // The cos(theta) and PI terms cancel out!
-    Vec3 result = hit.material.albedo * incomingLight;
-    
-    // Russian roulette compensation: divide by survival probability
-    if(depth < 3) {
-        result = result * (1.0f / survivalProbability);
-    }
+    Vec3 result = albedo * incomingLight;
     
     return result;
 }

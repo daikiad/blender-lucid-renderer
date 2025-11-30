@@ -105,77 +105,213 @@ def find_external_binary():
         print('Set Add-on Preferences path or env DIY_RENDERER_BIN.')
     return None
 
+
+def serialize_socket_value(socket):
+    """
+    Serialize a node socket's default value.
+    Handles different socket types: VALUE, RGBA, VECTOR, etc.
+    """
+    if not hasattr(socket, 'default_value'):
+        return None
+    
+    val = socket.default_value
+    
+    # Color/RGBA socket
+    if hasattr(val, '__len__') and len(val) == 4:
+        return list(val)
+    # Vector socket
+    elif hasattr(val, '__len__') and len(val) == 3:
+        return list(val)
+    # Float/Int socket
+    elif isinstance(val, (int, float)):
+        return val
+    # Boolean
+    elif isinstance(val, bool):
+        return val
+    # String
+    elif isinstance(val, str):
+        return val
+    else:
+        return None
+
+
+def serialize_node_tree(node_tree):
+    """
+    Serialize a complete Blender node tree (material nodes) to a dictionary.
+    This captures nodes, sockets, links, and all properties using RNA reflection.
+    
+    Returns a dict with:
+        - nodes: list of node data
+        - links: list of connection data
+    """
+    if not node_tree:
+        return None
+    
+    result = {
+        'nodes': [],
+        'links': []
+    }
+    
+    # Serialize all nodes
+    for node in node_tree.nodes:
+        node_data = {
+            'name': node.name,
+            'type': node.bl_idname,  # e.g., 'ShaderNodeBsdfPrincipled'
+            'label': node.label,
+            'location': [node.location.x, node.location.y],
+            'properties': {},
+            'inputs': [],
+            'outputs': []
+        }
+        
+        # Serialize node properties using RNA reflection
+        for prop in node.bl_rna.properties:
+            if prop.is_readonly or prop.identifier in ('rna_type', 'inputs', 'outputs'):
+                continue
+            try:
+                value = getattr(node, prop.identifier)
+                # Convert Blender types to JSON-serializable types
+                if hasattr(value, '__len__') and not isinstance(value, str):
+                    value = list(value)
+                elif hasattr(value, 'name'):  # Object reference
+                    value = value.name
+                node_data['properties'][prop.identifier] = value
+            except:
+                pass  # Skip properties that can't be serialized
+        
+        # Serialize input sockets
+        for i, socket in enumerate(node.inputs):
+            socket_data = {
+                'index': i,
+                'name': socket.name,
+                'type': socket.type,
+                'default_value': serialize_socket_value(socket),
+                'is_linked': socket.is_linked
+            }
+            # Debug: Print Base Color socket values
+            if socket.name == "Base Color" and node.bl_idname == "ShaderNodeBsdfPrincipled":
+                print(f"[DIYRenderer] Exporting Base Color socket: default_value={socket_data['default_value']}, is_linked={socket.is_linked}")
+            node_data['inputs'].append(socket_data)
+        
+        # Serialize output sockets
+        for i, socket in enumerate(node.outputs):
+            socket_data = {
+                'index': i,
+                'name': socket.name,
+                'type': socket.type,
+                'is_linked': socket.is_linked
+            }
+            node_data['outputs'].append(socket_data)
+        
+        result['nodes'].append(node_data)
+    
+    # Serialize all links (connections between sockets)
+    for link in node_tree.links:
+        link_data = {
+            'from_node': link.from_node.name,
+            'from_socket': link.from_socket.name,
+            'to_node': link.to_node.name,
+            'to_socket': link.to_socket.name
+        }
+        result['links'].append(link_data)
+    
+    return result
+
+
 def get_material_properties(obj):
-    """Extract Principled BSDF material properties from object."""
+    """
+    Extract complete material node tree from object.
+    Returns both legacy simple properties and full node graph.
+    """
     if not obj.data or not hasattr(obj.data, 'materials') or not obj.data.materials:
         return None
     
     mat = obj.data.materials[0]  # Use first material slot
-    if not mat or not mat.use_nodes:
+    if not mat:
         return None
     
-    # Find Principled BSDF node
+    result = {
+        'name': mat.name,
+        'use_nodes': mat.use_nodes,
+        'node_tree': None,
+        'legacy_properties': {}  # Fallback for simple rendering
+    }
+    
+    # If material uses nodes, serialize the complete node tree
+    if mat.use_nodes and mat.node_tree:
+        result['node_tree'] = serialize_node_tree(mat.node_tree)
+    
+    # Also extract legacy simple properties for backward compatibility
+    # Find Principled BSDF node for fallback
     principled = None
-    for node in mat.node_tree.nodes:
-        if node.type == 'BSDF_PRINCIPLED':
-            principled = node
-            break
+    if mat.use_nodes and mat.node_tree:
+        for node in mat.node_tree.nodes:
+            if node.type == 'BSDF_PRINCIPLED':
+                principled = node
+                break
     
-    if not principled:
-        return None
-    
-    # Extract properties
-    props = {}
-    
-    # Base Color
-    if 'Base Color' in principled.inputs:
-        base_color_input = principled.inputs['Base Color']
-        if base_color_input.is_linked:
-            # If connected, try to get value from connected node
-            props['base_color'] = [0.8, 0.8, 0.8]  # Default if connected
+    if principled:
+        # Base Color
+        if 'Base Color' in principled.inputs:
+            base_color_input = principled.inputs['Base Color']
+            if base_color_input.is_linked:
+                result['legacy_properties']['base_color'] = [0.8, 0.8, 0.8]  # Default if connected
+            else:
+                color = base_color_input.default_value
+                result['legacy_properties']['base_color'] = [color[0], color[1], color[2]]
         else:
-            color = base_color_input.default_value
-            props['base_color'] = [color[0], color[1], color[2]]
+            result['legacy_properties']['base_color'] = [0.8, 0.8, 0.8]
+        
+        # Metallic
+        if 'Metallic' in principled.inputs:
+            metallic_input = principled.inputs['Metallic']
+            result['legacy_properties']['metallic'] = metallic_input.default_value if not metallic_input.is_linked else 0.0
+        else:
+            result['legacy_properties']['metallic'] = 0.0
+        
+        # Roughness
+        if 'Roughness' in principled.inputs:
+            roughness_input = principled.inputs['Roughness']
+            result['legacy_properties']['roughness'] = roughness_input.default_value if not roughness_input.is_linked else 0.5
+        else:
+            result['legacy_properties']['roughness'] = 0.5
+        
+        # Emission
+        emission_color = [0.0, 0.0, 0.0]
+        emission_strength = 0.0
+        if 'Emission Color' in principled.inputs:
+            emission_input = principled.inputs['Emission Color']
+            if not emission_input.is_linked:
+                color = emission_input.default_value
+                emission_color = [color[0], color[1], color[2]]
+        elif 'Emission' in principled.inputs:  # Older Blender versions
+            emission_input = principled.inputs['Emission']
+            if not emission_input.is_linked:
+                color = emission_input.default_value
+                emission_color = [color[0], color[1], color[2]]
+        
+        if 'Emission Strength' in principled.inputs:
+            strength_input = principled.inputs['Emission Strength']
+            emission_strength = strength_input.default_value if not strength_input.is_linked else 0.0
+        
+        result['legacy_properties']['emission'] = [
+            emission_color[0] * emission_strength,
+            emission_color[1] * emission_strength,
+            emission_color[2] * emission_strength
+        ]
+        
+        # Debug: print emission values
+        print(f"[DIYRenderer] Material '{mat.name}': emission_color={emission_color}, strength={emission_strength}, final={result['legacy_properties']['emission']}")
     else:
-        props['base_color'] = [0.8, 0.8, 0.8]
+        # No Principled BSDF found - use defaults
+        result['legacy_properties'] = {
+            'base_color': [0.8, 0.8, 0.8],
+            'metallic': 0.0,
+            'roughness': 0.5,
+            'emission': [0.0, 0.0, 0.0]
+        }
     
-    # Metallic
-    if 'Metallic' in principled.inputs:
-        metallic_input = principled.inputs['Metallic']
-        props['metallic'] = metallic_input.default_value if not metallic_input.is_linked else 0.0
-    else:
-        props['metallic'] = 0.0
-    
-    # Roughness
-    if 'Roughness' in principled.inputs:
-        roughness_input = principled.inputs['Roughness']
-        props['roughness'] = roughness_input.default_value if not roughness_input.is_linked else 0.5
-    else:
-        props['roughness'] = 0.5
-    
-    # Emission
-    emission_color = [0.0, 0.0, 0.0]
-    emission_strength = 0.0
-    if 'Emission Color' in principled.inputs:
-        emission_input = principled.inputs['Emission Color']
-        if not emission_input.is_linked:
-            color = emission_input.default_value
-            emission_color = [color[0], color[1], color[2]]
-    elif 'Emission' in principled.inputs:  # Older Blender versions
-        emission_input = principled.inputs['Emission']
-        if not emission_input.is_linked:
-            color = emission_input.default_value
-            emission_color = [color[0], color[1], color[2]]
-    
-    if 'Emission Strength' in principled.inputs:
-        strength_input = principled.inputs['Emission Strength']
-        emission_strength = strength_input.default_value if not strength_input.is_linked else 0.0
-    
-    props['emission'] = [emission_color[0] * emission_strength,
-                          emission_color[1] * emission_strength,
-                          emission_color[2] * emission_strength]
-    
-    return props
+    return result
 
 def export_scene_to_json(depsgraph):
     """Export scene to JSON format with full geometry and attribute data."""
@@ -186,8 +322,9 @@ def export_scene_to_json(depsgraph):
         if export_dir and isinstance(export_dir, str) and os.path.isdir(export_dir):
             base_dir = export_dir
     
-    fd, path = tempfile.mkstemp(prefix="diy_scene_", suffix=".json", dir=base_dir)
-    os.close(fd)
+    # Use fixed path for debugging
+    path = os.path.join(base_dir, "diy_scene_debug.json")
+    print(f"[DIYRenderer] Exporting scene to: {path}")
     
     scene_data = {
         "version": "1.0",
@@ -220,14 +357,33 @@ def export_scene_to_json(depsgraph):
             for i in range(1, len(v_indices) - 1):
                 triangles.append([v_indices[0], v_indices[i], v_indices[i+1]])
         
-        # Extract material properties
+        # Extract material properties (now includes full node tree)
         mat_props = get_material_properties(obj)
-        material = {
-            "base_color": mat_props['base_color'] if mat_props else [0.8, 0.8, 0.8],
-            "metallic": mat_props['metallic'] if mat_props else 0.0,
-            "roughness": mat_props['roughness'] if mat_props else 0.5,
-            "emission": mat_props['emission'] if mat_props else [0.0, 0.0, 0.0]
-        }
+        
+        # Prepare material data with both legacy and full node graph
+        if mat_props:
+            material = {
+                "name": mat_props['name'],
+                "use_nodes": mat_props['use_nodes'],
+                # Legacy properties for simple rendering (backward compatibility)
+                "base_color": mat_props['legacy_properties'].get('base_color', [0.8, 0.8, 0.8]),
+                "metallic": mat_props['legacy_properties'].get('metallic', 0.0),
+                "roughness": mat_props['legacy_properties'].get('roughness', 0.5),
+                "emission": mat_props['legacy_properties'].get('emission', [0.0, 0.0, 0.0]),
+                # Full node tree (for advanced rendering)
+                "node_tree": mat_props['node_tree']
+            }
+            print(f"[DIYRenderer] Mesh '{obj.name}': emission={material['emission']}, base_color={material['base_color']}")
+        else:
+            material = {
+                "name": "default",
+                "use_nodes": False,
+                "base_color": [0.8, 0.8, 0.8],
+                "metallic": 0.0,
+                "roughness": 0.5,
+                "emission": [0.0, 0.0, 0.0],
+                "node_tree": None
+            }
         
         # Extract geometry node attributes
         attributes = {}
@@ -331,11 +487,25 @@ def compute_camera_params(scene, width, height):
         'fov': fov_deg
     }
 
-def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, full_h, cam_params, mode='raytrace', samples=1):
+def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, full_h, cam_params, mode='raytrace', samples=1, debug_mode=None):
+    """
+    Call external C++ renderer.
+    
+    Args:
+        debug_mode: Override render mode for debugging. Options:
+            - None or 'raytrace': Full path tracing
+            - 'normal': Show surface normals
+            - 'albedo': Show base color (Principled BSDF Base Color)
+            - 'emission': Show emission values
+    """
     binary = find_external_binary()
     if not binary:
         print("[DIYRenderer] External binary not found. Falling back to internal rendering.")
         return None
+    
+    # Use debug_mode if specified, otherwise use provided mode
+    render_mode = debug_mode if debug_mode else mode
+    
     cmd = [binary,
            '--scene', scene_file,
            '--tile', str(tile_x), str(tile_y), str(tile_w), str(tile_h),
@@ -345,18 +515,34 @@ def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, f
            '--camup', str(cam_params['up'].x), str(cam_params['up'].y), str(cam_params['up'].z),
            '--fov', str(cam_params['fov']),
            '--samples', str(samples),
-           '--mode', mode]
-    print(f"[DIYRenderer] Calling external renderer (samples={samples}): {' '.join(cmd)}")
+           '--mode', render_mode]
+    print(f"[DIYRenderer] Calling external renderer (mode={render_mode}, samples={samples}): {' '.join(cmd)}")
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        stderr_len = len(proc.stderr) if proc.stderr else 0
+        print(f"[DIYRenderer] External renderer stderr length: {stderr_len} chars")
         if proc.stderr:
-            print(f"[DIYRenderer] External renderer stderr:\n{proc.stderr[:2000]}")
+            # Show last 5000 chars of stderr (where our debug output should be)
+            print(f"[DIYRenderer] External renderer stderr (last 5000 chars):\n{proc.stderr[-5000:]}")
+        
+        # DEBUG: Check stdout
+        stdout_len = len(proc.stdout) if proc.stdout else 0
+        print(f"[DIYRenderer] External renderer stdout length: {stdout_len} chars")
+        if stdout_len == 0:
+            print(f"[DIYRenderer] ERROR: No stdout from renderer! Command: {' '.join(cmd)}")
+            return None
+            
     except Exception as e:
         print('[DIYRenderer] External renderer invocation failed:', e)
         return None
     lines = proc.stdout.strip().splitlines()
+    print(f"[DIYRenderer] Got {len(lines)} lines from renderer (expected {tile_w * tile_h})")
     if len(lines) != tile_w * tile_h:
         print('[DIYRenderer] Unexpected line count from external renderer', len(lines), 'expected', tile_w * tile_h)
+        if len(lines) > 0:
+            print(f"[DIYRenderer] First line: {lines[0]}")
+            print(f"[DIYRenderer] Last line: {lines[-1]}")
+        return None
     pixels = []
     for ln in lines:
         try:
@@ -364,7 +550,14 @@ def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, f
             pixels.append([r,g,b,a])
         except ValueError:
             pixels.append([1.0,0.0,1.0,1.0])  # error magenta
-    return pixels
+    
+    # Flip Y-axis: C++ outputs top-to-bottom, Blender expects bottom-to-top
+    flipped_pixels = []
+    for y in range(tile_h - 1, -1, -1):  # Reverse Y order
+        for x in range(tile_w):
+            flipped_pixels.append(pixels[y * tile_w + x])
+    
+    return flipped_pixels
 
 
 class DIYRenderEngine(bpy.types.RenderEngine):
@@ -464,7 +657,8 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             # Render this iteration by calling external C++ renderer
             iteration_pixels = call_external_renderer(
                 scene_file, 0, 0, width, height, width, height, cam_params, 
-                samples=iteration_samples
+                samples=iteration_samples,
+                debug_mode='albedo'  # DEBUG: Show base color to check materials
             )
             
             if not iteration_pixels or len(iteration_pixels) != width * height:
