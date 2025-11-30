@@ -1,3 +1,23 @@
+"""
+DIY Renderer - Custom Path Tracing Renderer for Blender
+========================================================
+
+This addon integrates a custom C++ path tracer with Blender's rendering system.
+It exports Blender scenes to JSON, renders them using an external C++ executable,
+and displays the results in Blender's render window and viewport.
+
+Architecture:
+- Python (Blender addon): Scene export, UI, result display
+- C++ (external executable): Ray tracing, path tracing, material evaluation
+
+Features:
+- Progressive rendering with sample accumulation
+- Node-based material support (Principled BSDF, Emission)
+- Debug modes: normals, albedo, emission
+- Viewport and F12 rendering
+- Asynchronous viewport updates
+"""
+
 bl_info = {
     "name": "DIY Renderer (Minimal Example)",
     "author": "You",
@@ -19,24 +39,38 @@ import queue
 import json
 
 def _get_prefs_entry():
+    """Get addon preferences entry from Blender"""
     return bpy.context.preferences.addons.get(__name__)
 
 def _get_prefs():
+    """Get addon preferences object"""
     entry = _get_prefs_entry()
     if entry is not None:
         return getattr(entry, 'preferences', None)
     return None
 
 class DIYRendererPreferences(bpy.types.AddonPreferences):
+    """Addon preferences for configuring external renderer path"""
     bl_idname = __name__
-    external_renderer_path = bpy.props.StringProperty(name="External Renderer Path", description="Path to compiled external C++ renderer binary (diyrt)", default="", subtype='FILE_PATH')
-    scene_export_directory = bpy.props.StringProperty(name="Scene Export Temp Dir", description="Directory to write temporary exported scene files", default="", subtype='DIR_PATH')
+    external_renderer_path = bpy.props.StringProperty(
+        name="External Renderer Path", 
+        description="Path to compiled external C++ renderer binary (diyrt)", 
+        default="", 
+        subtype='FILE_PATH'
+    )
+    scene_export_directory = bpy.props.StringProperty(
+        name="Scene Export Temp Dir", 
+        description="Directory to write temporary exported scene files", 
+        default="", 
+        subtype='DIR_PATH'
+    )
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "external_renderer_path")
         layout.prop(self, "scene_export_directory")
 
 class DIYRendererSettings(bpy.types.PropertyGroup):
+    """Per-scene settings for DIY Renderer"""
     samples: bpy.props.IntProperty(
         name="Samples",
         description="Number of samples for path tracing",
@@ -122,27 +156,45 @@ def find_external_binary():
 
 def serialize_socket_value(socket):
     """
-    Serialize a node socket's default value.
-    Handles different socket types: VALUE, RGBA, VECTOR, etc.
+    Serialize a node socket's default value to JSON-compatible format.
+    
+    Handles different socket types found in Blender's node system:
+    - RGBA sockets → [r, g, b, a] (4-element list)
+    - VECTOR sockets → [x, y, z] (3-element list)
+    - VALUE sockets → float or int
+    - BOOLEAN sockets → true/false
+    - STRING sockets → string value
+    
+    Args:
+        socket: Blender NodeSocket object
+        
+    Returns:
+        JSON-compatible value (list, number, boolean, or string)
+        None if socket has no default_value attribute
+        
+    Technical Note:
+    This function is critical for exporting node graph data correctly.
+    The VEC4 vs VEC3 distinction in the JSON must be preserved,
+    as the C++ renderer uses different union fields for each type.
     """
     if not hasattr(socket, 'default_value'):
         return None
     
     val = socket.default_value
     
-    # Color/RGBA socket
+    # Color/RGBA socket (VEC4 in C++)
     if hasattr(val, '__len__') and len(val) == 4:
         return list(val)
-    # Vector socket
+    # Vector socket (VEC3 in C++)
     elif hasattr(val, '__len__') and len(val) == 3:
         return list(val)
-    # Float/Int socket
+    # Float/Int socket (FLOAT in C++)
     elif isinstance(val, (int, float)):
         return val
-    # Boolean
+    # Boolean (BOOL in C++)
     elif isinstance(val, bool):
         return val
-    # String
+    # String (STRING in C++)
     elif isinstance(val, str):
         return val
     else:
@@ -151,12 +203,50 @@ def serialize_socket_value(socket):
 
 def serialize_node_tree(node_tree):
     """
-    Serialize a complete Blender node tree (material nodes) to a dictionary.
-    This captures nodes, sockets, links, and all properties using RNA reflection.
+    Serialize a complete Blender node tree (material shader graph) to JSON.
     
-    Returns a dict with:
-        - nodes: list of node data
-        - links: list of connection data
+    This function captures the entire node graph including:
+    - All nodes (Principled BSDF, Mix, Emission, etc.)
+    - Socket default values (colors, vectors, floats)
+    - Node connections (links between sockets)
+    - Node properties (blend modes, interpolation, etc.)
+    
+    Args:
+        node_tree: Blender NodeTree object (from material.node_tree)
+        
+    Returns:
+        dict: Serialized node tree with 'nodes' and 'links' keys
+        None: If node_tree is None or invalid
+        
+    Structure:
+        {
+            'nodes': [
+                {
+                    'name': 'Principled BSDF',
+                    'type': 'ShaderNodeBsdfPrincipled',
+                    'label': 'Principled BSDF',
+                    'inputs': [...socket data...],
+                    'outputs': [...socket data...],
+                    'properties': {...node properties...}
+                },
+                ...
+            ],
+            'links': [
+                {
+                    'from_node': 'RGB',
+                    'from_socket': 'Color',
+                    'to_node': 'Principled BSDF',
+                    'to_socket': 'Base Color'
+                },
+                ...
+            ]
+        }
+    
+    Technical Note:
+    - Uses RNA reflection to access node properties dynamically
+    - Converts Blender types (Vector, Color) to JSON-serializable lists
+    - Handles object references by storing name strings
+    - Skips read-only and system properties
     """
     if not node_tree:
         return None
@@ -179,6 +269,7 @@ def serialize_node_tree(node_tree):
         }
         
         # Serialize node properties using RNA reflection
+        # This captures blend modes, interpolation settings, etc.
         for prop in node.bl_rna.properties:
             if prop.is_readonly or prop.identifier in ('rna_type', 'inputs', 'outputs'):
                 continue
@@ -190,7 +281,7 @@ def serialize_node_tree(node_tree):
                 elif hasattr(value, 'name'):  # Object reference
                     value = value.name
                 node_data['properties'][prop.identifier] = value
-            except:
+            except Exception:
                 pass  # Skip properties that can't be serialized
         
         # Serialize input sockets
@@ -328,7 +419,33 @@ def get_material_properties(obj):
     return result
 
 def export_scene_to_json(depsgraph):
-    """Export scene to JSON format with full geometry and attribute data."""
+    """
+    Export complete scene to JSON format.
+    
+    Exports the entire scene including:
+    - Mesh geometry (vertices, triangles, normals)
+    - Material node trees (full node graph with connections)
+    - Mesh attributes (vertex colors, UVs, custom attributes)
+    - World transforms (objects positioned in world space)
+    
+    Args:
+        depsgraph: Blender's dependency graph (evaluated scene state)
+        
+    Returns:
+        str: Path to the exported JSON file
+        
+    Technical Details:
+    - Uses depsgraph for evaluated geometry (modifiers applied)
+    - Triangulates all faces for renderer compatibility
+    - Transforms vertices to world space using matrix_world
+    - Exports both legacy properties and full node trees
+    - Custom attributes from Geometry Nodes are preserved
+    
+    File Location:
+    - Default: System temp directory (tempfile.gettempdir())
+    - Configurable: Via addon preferences 'scene_export_directory'
+    - Filename: 'diy_scene_debug.json' (fixed for debugging)
+    """
     prefs = _get_prefs()
     base_dir = tempfile.gettempdir()
     if prefs:
@@ -345,11 +462,13 @@ def export_scene_to_json(depsgraph):
         "meshes": []
     }
     
+    # Iterate through all objects in the evaluated scene
     for obj_instance in depsgraph.object_instances:
         obj = obj_instance.object
         if obj.type != 'MESH':
             continue
         
+        # Get evaluated mesh (with modifiers applied)
         eval_obj = obj.evaluated_get(depsgraph)
         mesh = eval_obj.to_mesh()
         if not mesh:
@@ -359,15 +478,17 @@ def export_scene_to_json(depsgraph):
         mw = obj_instance.matrix_world
         vertices = []
         for v in mesh.vertices:
-            co = mw @ v.co
+            co = mw @ v.co  # Apply world transformation
             vertices.append([co.x, co.y, co.z])
         
         # Triangulate and collect face data
+        # Renderer expects triangles only (no quads/ngons)
         triangles = []
         for poly in mesh.polygons:
             v_indices = list(poly.vertices)
             if len(v_indices) < 3:
                 continue
+            # Fan triangulation: split polygon into triangles
             for i in range(1, len(v_indices) - 1):
                 triangles.append([v_indices[0], v_indices[i], v_indices[i+1]])
         
@@ -477,14 +598,39 @@ def export_scene_to_file(depsgraph):
         return None
 
 def linear_to_srgb(c):
-    """Convert linear color value to sRGB gamma corrected value"""
+    """
+    Convert linear color value to sRGB gamma corrected value.
+    
+    Uses the standard sRGB transfer function:
+    - Linear segment for c <= 0.0031308
+    - Power curve for c > 0.0031308
+    
+    Args:
+        c: Linear color value (0.0-1.0)
+    
+    Returns:
+        float: sRGB gamma corrected value (0.0-1.0)
+    
+    Note: Currently unused - Blender handles color management internally
+    """
     if c <= 0.0031308:
         return 12.92 * c
     else:
         return 1.055 * (c ** (1.0/2.4)) - 0.055
 
 def apply_gamma_correction(pixels):
-    """Apply sRGB gamma correction to linear pixel values"""
+    """
+    Apply sRGB gamma correction to linear pixel values.
+    
+    Args:
+        pixels: List of [r, g, b, a] pixel values in linear space
+        
+    Returns:
+        list: Same pixels with sRGB gamma applied to RGB channels
+        
+    Note: Currently unused - Blender handles color management internally.
+          We render in linear space and Blender converts to sRGB for display.
+    """
     corrected = []
     for pixel in pixels:
         r, g, b, a = pixel
@@ -496,20 +642,58 @@ def apply_gamma_correction(pixels):
     return corrected
 
 def compute_camera_params(scene, width, height):
+    """
+    Compute camera parameters for external renderer.
+    
+    Extracts camera properties from Blender's camera object and converts
+    them to the format expected by the C++ renderer.
+    
+    Args:
+        scene: Blender scene object containing camera
+        width: Render width in pixels
+        height: Render height in pixels
+        
+    Returns:
+        dict: Camera parameters with keys:
+            - 'pos': Camera position [x, y, z]
+            - 'forward': Camera forward direction (normalized)
+            - 'up': Camera up vector (normalized)
+            - 'fov': Field of view in degrees (horizontal)
+        None: If scene has no camera
+        
+    Technical Details:
+    - Extracts position from matrix_world.translation
+    - Computes forward as -Z axis in camera space (Blender convention)
+    - Computes up as +Y axis in camera space
+    - Calculates FOV from sensor width and focal length:
+      fov = 2 * atan(sensor_width / (2 * focal_length))
+    
+    Coordinate System:
+    - Blender uses right-handed Y-up coordinate system
+    - Camera looks down -Z axis
+    - Renderer expects world-space coordinates
+    """
     cam = scene.camera
     if not cam:
         print("[DIYRenderer] WARNING: No camera in scene!")
         return None
+    
+    # Extract camera world transformation
     cam_matrix = cam.matrix_world
     pos = cam_matrix.translation
+    
+    # Camera coordinate system: forward = -Z, up = +Y (in camera space)
     forward = cam_matrix.to_3x3() @ Vector((0,0,-1))
     up = cam_matrix.to_3x3() @ Vector((0,1,0))
     forward.normalize()
     up.normalize()
-    sensor_w = cam.data.sensor_width
-    lens = cam.data.lens
+    
+    # Calculate field of view from sensor and lens properties
+    sensor_w = cam.data.sensor_width  # mm
+    lens = cam.data.lens              # mm (focal length)
     fov_rad = 2.0 * math.atan(sensor_w / (2.0 * lens))
     fov_deg = math.degrees(fov_rad)
+    
     print(f"[DIYRenderer] Camera: pos=({pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f}), "
           f"dir=({forward.x:.3f}, {forward.y:.3f}, {forward.z:.3f}), "
           f"up=({up.x:.3f}, {up.y:.3f}, {up.z:.3f}), fov={fov_deg:.1f}")

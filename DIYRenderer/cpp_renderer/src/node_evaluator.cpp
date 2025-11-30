@@ -1,11 +1,43 @@
 #include "renderer.hpp"
 #include <iostream>
 
-// ========== Node Graph Evaluation ==========
-// This acts as a "shader compiler" for Blender's node system
-// It evaluates node graphs to get material properties
+/**
+ * ========== Node Graph Evaluation ==========
+ * 
+ * This module acts as a "shader compiler" for Blender's node-based materials.
+ * It recursively evaluates node graphs to extract material properties like
+ * albedo (Base Color) and emission.
+ * 
+ * Key Design:
+ * - Nodes are evaluated on-demand during ray tracing
+ * - Socket connections are followed recursively (depth-first traversal)
+ * - Default values are used when sockets are not connected
+ * - Supports: Principled BSDF, Emission, RGB, Mix RGB nodes
+ * 
+ * CRITICAL BUG FIX:
+ * SocketValue union must use correct field for each type:
+ * - VEC4 → use v4 field (RGBA colors)
+ * - VEC3 → use v3 field (RGB colors, vectors)
+ * - FLOAT → use f field (scalars)
+ * 
+ * Previous bug: Code always read v3 field even for VEC4 types,
+ * causing all materials to render black. Fixed by checking type enum.
+ */
 
-// Evaluate a single node output socket (recursive for connected inputs)
+/**
+ * evaluateNode: Recursively evaluate a node's output socket
+ * 
+ * @param tree The node tree containing all nodes
+ * @param nodeName Name of the node to evaluate
+ * @param socketName Name of the output socket to read
+ * @return RGB color value from the socket
+ * 
+ * This function follows socket connections recursively:
+ * 1. Find the requested node by name
+ * 2. Check if the input socket is connected
+ * 3. If connected: recursively evaluate the linked node
+ * 4. If not connected: use the socket's default value
+ */
 Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::string &socketName) {
     const MaterialNode *node = tree.findNode(nodeName);
     if(!node) {
@@ -13,7 +45,7 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
         return Vec3(1.0f, 0.0f, 1.0f);  // Magenta = error
     }
     
-    // Handle different node types
+    // ===== Principled BSDF Node =====
     if(node->type == "ShaderNodeBsdfPrincipled") {
         // Principled BSDF node
         if(socketName == "BSDF") {
@@ -64,48 +96,52 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
             return Vec3(0.8f, 0.8f, 0.8f);
         }
     } else if(node->type == "ShaderNodeEmission") {
-        // Emission node
+        // ===== Emission Node =====
+        // Emission shader: emits light (Color * Strength)
         if(socketName == "Emission") {
             const NodeSocket *colorSocket = node->findInput("Color");
             const NodeSocket *strengthSocket = node->findInput("Strength");
             
-            Vec3 color(1.0f, 1.0f, 1.0f);
-            float strength = 1.0f;
+            Vec3 color(1.0f, 1.0f, 1.0f);  // Default white
+            float strength = 1.0f;          // Default strength
             
+            // Evaluate color (can be connected or constant)
             if(colorSocket) {
                 if(colorSocket->is_linked) {
                     color = evaluateNode(tree, colorSocket->linked_node, colorSocket->linked_socket);
                 } else if(colorSocket->default_value.type == SocketValue::VEC4) {
-                    color = colorSocket->default_value.v4;
+                    color = colorSocket->default_value.v4;  // RGBA → use v4 field
                 } else if(colorSocket->default_value.type == SocketValue::VEC3) {
-                    color = colorSocket->default_value.v3;
+                    color = colorSocket->default_value.v3;  // RGB → use v3 field
                 }
             }
             
+            // Get strength (usually a constant float)
             if(strengthSocket && !strengthSocket->is_linked) {
                 if(strengthSocket->default_value.type == SocketValue::FLOAT) {
                     strength = strengthSocket->default_value.f;
                 }
             }
             
-            return color * strength;
+            return color * strength;  // Multiply color by strength
         }
     } else if(node->type == "ShaderNodeRGB") {
-        // RGB node (constant color)
+        // ===== RGB Node =====
+        // Simple constant color node (like a color picker in Blender)
         for(const auto &output : node->outputs) {
             if(output.name == "Color" && output.default_value.type != SocketValue::NONE) {
                 if(output.default_value.type == SocketValue::VEC4) {
-                    return output.default_value.v4;
+                    return output.default_value.v4;  // RGBA → use v4 field
                 } else if(output.default_value.type == SocketValue::VEC3) {
-                    return output.default_value.v3;
+                    return output.default_value.v3;  // RGB → use v3 field
                 }
             }
         }
-        // Fallback: check properties for 'color' value
-        // (In real implementation, we'd need to store node properties separately)
+        // Fallback: return white if no valid color found
         return Vec3(1.0f, 1.0f, 1.0f);
     } else if(node->type == "ShaderNodeMix" || node->type == "ShaderNodeMixRGB") {
-        // Mix node (blend two inputs)
+        // ===== Mix Node =====
+        // Blends two colors using various blend modes (Mix, Add, Multiply, etc.)
         const NodeSocket *facSocket = node->findInput("Fac");
         const NodeSocket *aSocket = node->findInput("A");
         const NodeSocket *bSocket = node->findInput("B");
@@ -139,21 +175,37 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
             }
         }
         
-        // Linear interpolation
+        // Linear interpolation: lerp(A, B, fac) = A * (1 - fac) + B * fac
         return colorA * (1.0f - fac) + colorB * fac;
     } else if(node->type == "ShaderNodeOutputMaterial") {
-        // Material Output - traverse to Surface input
+        // ===== Material Output Node =====
+        // This is the final output node - traverse to Surface input
         const NodeSocket *surfaceSocket = node->findInput("Surface");
         if(surfaceSocket && surfaceSocket->is_linked) {
             return evaluateNode(tree, surfaceSocket->linked_node, surfaceSocket->linked_socket);
         }
     }
     
+    // Unknown node type - return magenta error color
     std::cerr << "[NodeEval] Unhandled node type: " << node->type << " socket: " << socketName << "\n";
     return Vec3(1.0f, 0.0f, 1.0f);  // Magenta = unimplemented
 }
 
-// Get albedo (base color) from node tree
+/**
+ * getAlbedoFromNodeTree: Extract base color (diffuse albedo) from node graph
+ * 
+ * @param tree The material node tree to evaluate
+ * @return RGB albedo color (diffuse reflectance)
+ * 
+ * Algorithm:
+ * 1. Find Material Output node (the final node)
+ * 2. Follow its Surface input connection
+ * 3. If connected to Principled BSDF, get its Base Color
+ * 4. Recursively evaluate any connections on Base Color
+ * 
+ * This is called once per ray-surface intersection to determine
+ * the surface's diffuse color for path tracing calculations.
+ */
 Vec3 getAlbedoFromNodeTree(const NodeTree &tree) {
     static int callCount = 0;
     if(++callCount <= 3) {
@@ -165,14 +217,14 @@ Vec3 getAlbedoFromNodeTree(const NodeTree &tree) {
         return Vec3(0.8f, 0.8f, 0.8f);  // Default gray
     }
     
-    // Find Material Output node
+    // Find Material Output node (entry point)
     const MaterialNode *outputNode = tree.findOutputNode();
     if(!outputNode) {
         std::cerr << "[NodeEval] No Material Output node found\n";
         return Vec3(0.8f, 0.8f, 0.8f);
     }
     
-    // Get Surface input
+    // Get Surface input (should be connected to a shader like Principled BSDF)
     const NodeSocket *surfaceSocket = outputNode->findInput("Surface");
     if(!surfaceSocket || !surfaceSocket->is_linked) {
         std::cerr << "[NodeEval] Surface socket not connected\n";
@@ -193,7 +245,22 @@ Vec3 getAlbedoFromNodeTree(const NodeTree &tree) {
     return result;
 }
 
-// Get emission from node tree
+/**
+ * getEmissionFromNodeTree: Extract emission (light) from node graph
+ * 
+ * @param tree The material node tree to evaluate
+ * @return RGB emission color (light emitted by surface)
+ * 
+ * Algorithm:
+ * 1. Find Material Output node
+ * 2. Follow its Surface input connection
+ * 3. Check if connected to Emission shader
+ * 4. If Principled BSDF, check for Emission Color socket
+ * 5. Return (0,0,0) if no emission found
+ * 
+ * This determines if a surface emits light (acts as a light source).
+ * Used to implement area lights in path tracing.
+ */
 Vec3 getEmissionFromNodeTree(const NodeTree &tree) {
     if(!tree.valid) {
         return Vec3(0.0f, 0.0f, 0.0f);  // No emission
@@ -217,7 +284,7 @@ Vec3 getEmissionFromNodeTree(const NodeTree &tree) {
         return evaluateNode(tree, surfaceSocket->linked_node, "Emission");
     }
     
-    // Principled BSDF also has emission
+    // Principled BSDF also supports emission (for glowing objects)
     if(shaderNode && shaderNode->type == "ShaderNodeBsdfPrincipled") {
         // Try both "Emission Color" (newer Blender) and "Emission" (older versions)
         const NodeSocket *emissionSocket = shaderNode->findInput("Emission Color");

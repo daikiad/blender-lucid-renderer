@@ -9,8 +9,46 @@ using json = nlohmann::json;
 #include <cmath>
 #include <map>
 
+/**
+ * ========== DIY Ray Tracer - Main Entry Point ==========
+ * 
+ * This is the C++ backend for the Blender DIY Renderer addon.
+ * It receives scene data as JSON, renders using path tracing,
+ * and outputs pixel data to stdout for Python to capture.
+ * 
+ * Data Flow:
+ * 1. Blender Python exports scene → JSON file
+ * 2. C++ reads JSON → constructs Scene data structures
+ * 3. Path tracing renders tiles → accumulates samples
+ * 4. Outputs linear RGB pixels → Python reads stdout
+ * 5. Python Y-flips pixels → passes to Blender display
+ * 
+ * Command Line Arguments:
+ * --scene <path>     : Path to JSON scene file
+ * --tile <x> <y> <w> <h> : Tile region to render
+ * --samples <n>      : Number of samples per pixel
+ * --depth <n>        : Maximum ray bounce depth (default: 8)
+ * --mode <mode>      : Render mode (raytrace/normal/albedo/emission)
+ * 
+ * Output Format:
+ * Pixel data as binary: [r g b r g b ...] (float32, linear color space)
+ */
+
 // ========== Node Graph Parsing ==========
-// Parse socket value from JSON
+
+/**
+ * parseSocketValue: Convert JSON value to SocketValue union
+ * 
+ * Handles multiple types:
+ * - Single number → FLOAT
+ * - Array[3] → VEC3 (RGB or vector)
+ * - Array[4] → VEC4 (RGBA)
+ * - Boolean → BOOL
+ * - String → STRING
+ * 
+ * CRITICAL: VEC4 is stored in v4 field, VEC3 in v3 field.
+ * This distinction was the source of the "all black materials" bug.
+ */
 SocketValue parseSocketValue(const json &j) {
     if(j.is_number()) {
         return SocketValue::makeFloat(j.get<float>());
@@ -39,7 +77,18 @@ SocketValue parseSocketValue(const json &j) {
     return SocketValue();  // NONE
 }
 
-// Parse node graph from JSON
+/**
+ * parseNodeTree: Construct node graph from JSON
+ * 
+ * Builds the material node tree by:
+ * 1. Creating all MaterialNode objects
+ * 2. Parsing input/output sockets for each node
+ * 3. Recording socket connections (linked_node, linked_socket)
+ * 4. Storing default values for unconnected sockets
+ * 
+ * @param nodeTreeJson JSON object containing "nodes" array
+ * @return NodeTree structure ready for evaluation
+ */
 NodeTree parseNodeTree(const json &nodeTreeJson) {
     NodeTree tree;
     
@@ -255,12 +304,23 @@ Scene loadSceneFromJson(const std::string &path) {
     return scene;
 }
 
+/**
+ * ========== Main Entry Point ==========
+ * 
+ * Parses command-line arguments, loads scene from JSON,
+ * and renders the specified tile region.
+ */
 int main(int argc, char** argv){
-    std::string scenePath; int tileX=0,tileY=0,tileW=64,tileH=64, fullW=512, fullH=512; float cx=0,cy=0,cz=5, dx=0,dy=0,dz=-1, ux=0,uy=1,uz=0, fovDeg=60;
+    // Default values
+    std::string scenePath;
+    int tileX=0, tileY=0, tileW=64, tileH=64, fullW=512, fullH=512;
+    float cx=0, cy=0, cz=5, dx=0, dy=0, dz=-1, ux=0, uy=1, uz=0, fovDeg=60;
     bool debugFlag=false; bool disableAABB=false;
-    std::string mode = "raytrace";  // "debug" or "raytrace"
-    int samples = 1;
-    int maxDepth = 8;  // Increased from 3 to allow more light bounces
+    std::string mode = "raytrace";  // Render mode: raytrace/normal/albedo/emission
+    int samples = 1;                 // Samples per pixel
+    int maxDepth = 8;                // Max ray bounce depth (increased from 3 for better quality)
+    
+    // ===== Parse Command-Line Arguments =====
     for(int i=1;i<argc;i++){
         std::string a = argv[i];
         auto need = [&](const char* msg){ if(i+1>=argc){ std::cerr << "Missing value for " << msg << "\n"; std::exit(1);} };
@@ -271,23 +331,29 @@ int main(int argc, char** argv){
         else if(a=="--camdir"){ need("--camdir"); dx = std::atof(argv[++i]); need("--camdir"); dy = std::atof(argv[++i]); need("--camdir"); dz = std::atof(argv[++i]); }
         else if(a=="--camup"){ need("--camup"); ux = std::atof(argv[++i]); need("--camup"); uy = std::atof(argv[++i]); need("--camup"); uz = std::atof(argv[++i]); }
         else if(a=="--fov"){ need("--fov"); fovDeg = std::atof(argv[++i]); }
-        else if(a=="--mode"){ need("--mode"); mode = argv[++i]; }
-        else if(a=="--samples"){ need("--samples"); samples = std::atoi(argv[++i]); }
-        else if(a=="--depth"){ need("--depth"); maxDepth = std::atoi(argv[++i]); }
+        else if(a=="--mode"){ need("--mode"); mode = argv[++i]; }         // Debug or render mode
+        else if(a=="--samples"){ need("--samples"); samples = std::atoi(argv[++i]); }  // Samples per pixel
+        else if(a=="--depth"){ need("--depth"); maxDepth = std::atoi(argv[++i]); }     // Ray bounce limit
         else if(a=="--debug"){ debugFlag = true; }
         else if(a=="--disable-aabb"){ disableAABB = true; }
     }
-    std::srand(42);  // Fixed seed for consistent results
-    // Scene loading
+    
+    std::srand(42);  // Fixed seed for consistent random sampling (reproducible renders)
+    
+    // ===== Load Scene =====
     Scene scene;
     if (scenePath.size() > 5 && scenePath.substr(scenePath.size()-5) == ".json") {
-        scene = loadSceneFromJson(scenePath);
+        scene = loadSceneFromJson(scenePath);  // JSON format with node trees
     } else {
-        scene = loadScene(scenePath);
+        scene = loadScene(scenePath);  // Legacy text format
     }
+    
+    // ===== Setup Camera =====
     Camera cam = makeCamera(cx,cy,cz,dx,dy,dz,ux,uy,uz,fovDeg, fullW, fullH);
     float fovRad = cam.fovDeg * (float)M_PI / 180.0f;
     float scale = std::tan(fovRad * 0.5f);
+    
+    // ===== Debug Output =====
     bool debug = true;  // Always enable debug for now
     if(debug){
         std::cerr << "[diyrt] SCENE meshes=" << scene.meshes.size() << " aspect=" << cam.aspect << " fovDeg=" << cam.fovDeg << "\n";

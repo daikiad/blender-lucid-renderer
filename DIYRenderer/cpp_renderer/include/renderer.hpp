@@ -1,3 +1,25 @@
+/**
+ * renderer.hpp - Core Path Tracing Renderer
+ * ==========================================
+ * 
+ * This file contains the main rendering algorithms and data structures
+ * for the DIY path tracer integrated with Blender.
+ * 
+ * Key Components:
+ * - Vec3: 3D vector math for positions, directions, colors
+ * - Ray: Ray structure for ray tracing
+ * - Material: Surface material properties (albedo, emission, nodes)
+ * - Scene: Collection of geometry and materials
+ * - Intersection: Ray-geometry intersection routines
+ * - Path Tracing: Monte Carlo integration for global illumination
+ * 
+ * Algorithms:
+ * - Cosine-weighted hemisphere sampling (importance sampling)
+ * - Russian Roulette path termination
+ * - Node-based material evaluation (Principled BSDF, Emission)
+ * - Debug visualization modes (normals, albedo, emission)
+ */
+
 #pragma once
 #include <vector>
 #include <string>
@@ -6,6 +28,16 @@
 #include <cstdlib>
 #include <iostream>
 
+// ========== Core Math Structures ==========
+
+/**
+ * Vec3 - 3D Vector for positions, directions, and colors
+ * 
+ * Used throughout the renderer for:
+ * - 3D positions (world space coordinates)
+ * - Direction vectors (normalized)
+ * - RGB colors (linear color space)
+ */
 struct Vec3 {
     float x, y, z;
     Vec3() : x(0), y(0), z(0) {}
@@ -13,7 +45,7 @@ struct Vec3 {
     Vec3 operator+(const Vec3 &o) const { return {x+o.x, y+o.y, z+o.z}; }
     Vec3 operator-(const Vec3 &o) const { return {x-o.x, y-o.y, z-o.z}; }
     Vec3 operator*(float s) const { return {x*s, y*s, z*s}; }
-    Vec3 operator*(const Vec3 &o) const { return {x*o.x, y*o.y, z*o.z}; }
+    Vec3 operator*(const Vec3 &o) const { return {x*o.x, y*o.y, z*o.z}; }  // Component-wise multiply
     Vec3 operator/(float s) const { return {x/s, y/s, z/s}; }
     Vec3& normalize(){ float l = std::sqrt(x*x+y*y+z*z); if(l>0){ x/=l; y/=l; z/=l;} return *this; }
     float length() const { return std::sqrt(x*x+y*y+z*z); }
@@ -22,12 +54,19 @@ struct Vec3 {
 };
 
 // ========== Random Sampling Functions ==========
-// These are used for Monte Carlo path tracing
+/**
+ * Monte Carlo sampling utilities for path tracing
+ * 
+ * These functions generate random directions and points for:
+ * - Hemisphere sampling (diffuse reflection)
+ * - Importance sampling (cosine-weighted)
+ */
 
 // Generate random float between 0 and 1
 inline float randf(){ return (float)std::rand() / (float)RAND_MAX; }
 
 // Generate random point inside unit sphere (rejection sampling)
+// Used for uniform hemisphere sampling
 inline Vec3 randomInUnitSphere(){
     while(true){
         Vec3 p = Vec3(randf()*2.0f-1.0f, randf()*2.0f-1.0f, randf()*2.0f-1.0f);
@@ -56,17 +95,29 @@ inline Vec3 randomCosineDirection(const Vec3 &normal) {
 
 // ========== Node Graph Structures ==========
 // These structures represent Blender's node-based material system
+// Nodes connect via sockets to form a directed acyclic graph (DAG)
 
-// Socket value can be a constant or a connection
+/**
+ * SocketValue: Union type for socket values
+ * 
+ * CRITICAL: Must use correct field for each type to avoid bugs!
+ * - VEC4 type → use v4 and v4_w fields
+ * - VEC3 type → use v3 field  
+ * - FLOAT type → use f field
+ * 
+ * Previous bug: All code was reading v3 field even for VEC4 types,
+ * causing all RGBA colors (Base Color, Emission) to return (0,0,0).
+ * Fixed by checking type and reading correct field.
+ */
 struct SocketValue {
     enum Type { FLOAT, VEC3, VEC4, STRING, BOOL, NONE };
     Type type;
-    float f;          // For FLOAT
-    Vec3 v3;          // For VEC3
-    Vec3 v4;          // For VEC4 (w component separate)
-    float v4_w;
-    std::string s;    // For STRING
-    bool b;           // For BOOL
+    float f;          // For FLOAT - single scalar value
+    Vec3 v3;          // For VEC3 - 3D vector (normals, positions)
+    Vec3 v4;          // For VEC4 - RGB component (colors with alpha)
+    float v4_w;       // For VEC4 - Alpha component
+    std::string s;    // For STRING - texture paths, etc.
+    bool b;           // For BOOL - boolean switches
     
     SocketValue() : type(NONE), f(0), v3(), v4(), v4_w(0), b(false) {}
     static SocketValue makeFloat(float val) { SocketValue sv; sv.type = FLOAT; sv.f = val; return sv; }
@@ -74,7 +125,10 @@ struct SocketValue {
     static SocketValue makeVec4(float x, float y, float z, float w) { SocketValue sv; sv.type = VEC4; sv.v4 = Vec3(x,y,z); sv.v4_w = w; return sv; }
 };
 
-// Node socket (input or output)
+/**
+ * NodeSocket: Input or output socket on a node
+ * Sockets can be connected to other nodes or use default values
+ */
 struct NodeSocket {
     std::string name;           // Socket name (e.g., "Base Color", "BSDF")
     std::string type;           // Socket type ("VALUE", "RGBA", "VECTOR", "SHADER")
@@ -86,9 +140,12 @@ struct NodeSocket {
     NodeSocket() : is_linked(false) {}
 };
 
-// Material node (e.g., Principled BSDF, Mix, Texture)
+/**
+ * MaterialNode: Single node in material graph
+ * Examples: Principled BSDF, Mix RGB, Texture Coordinate, etc.
+ */
 struct MaterialNode {
-    std::string name;   // Unique node name
+    std::string name;   // Unique node name (generated by Blender)
     std::string type;   // Node type ("ShaderNodeBsdfPrincipled", "ShaderNodeMix", etc.)
     std::string label;  // User-visible label
     std::vector<NodeSocket> inputs;   // Input sockets
@@ -103,14 +160,17 @@ struct MaterialNode {
     }
 };
 
-// Node tree (complete material graph)
+/**
+ * NodeTree: Complete material node graph
+ * Represents Blender's Shader Editor node setup
+ */
 struct NodeTree {
     std::vector<MaterialNode> nodes;
     bool valid;  // Is this node tree valid?
     
     NodeTree() : valid(false) {}
     
-    // Find node by name
+    // Find node by name (for following socket connections)
     const MaterialNode* findNode(const std::string &name) const {
         for(const auto &n : nodes) {
             if(n.name == name) return &n;
@@ -118,7 +178,10 @@ struct NodeTree {
         return nullptr;
     }
     
-    // Find output node (Material Output)
+    /**
+     * Find Material Output node (final node in shader graph)
+     * This is the entry point for material evaluation
+     */
     const MaterialNode* findOutputNode() const {
         for(const auto &n : nodes) {
             if(n.type == "ShaderNodeOutputMaterial") return &n;
