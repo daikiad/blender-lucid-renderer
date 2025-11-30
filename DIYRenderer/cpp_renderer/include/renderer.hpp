@@ -337,6 +337,15 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
     // Base case: maximum recursion depth reached
     if(depth <= 0) return Vec3{0,0,0};
     
+    // Russian Roulette: probabilistically terminate paths after depth 3
+    if(depth < 5) {
+        float rrProbability = 0.8f;  // 80% chance to continue
+        if(randf() > rrProbability) {
+            return Vec3{0,0,0};  // Terminate path
+        }
+        // If we continue, compensate by dividing by probability later
+    }
+    
     // Test ray against all geometry in scene
     Hit hit = intersectScene(scene, ray, useAABB);
     
@@ -377,6 +386,11 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
     //                       = albedo * Li
     // The cos(theta) and PI terms cancel out!
     Vec3 result = albedo * incomingLight;
+    
+    // Apply Russian Roulette compensation
+    if(depth < 5) {
+        result = result * (1.0f / 0.8f);  // Divide by continuation probability
+    }
     
     return result;
 }

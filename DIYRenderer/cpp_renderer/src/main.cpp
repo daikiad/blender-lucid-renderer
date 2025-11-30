@@ -260,7 +260,7 @@ int main(int argc, char** argv){
     bool debugFlag=false; bool disableAABB=false;
     std::string mode = "raytrace";  // "debug" or "raytrace"
     int samples = 1;
-    int maxDepth = 3;
+    int maxDepth = 8;  // Increased from 3 to allow more light bounces
     for(int i=1;i<argc;i++){
         std::string a = argv[i];
         auto need = [&](const char* msg){ if(i+1>=argc){ std::cerr << "Missing value for " << msg << "\n"; std::exit(1);} };
