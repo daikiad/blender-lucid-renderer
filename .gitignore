@@ -1,0 +1,3 @@
+.vscode/
+*.pyc
+DIYRenderer/cpp_renderer/build
