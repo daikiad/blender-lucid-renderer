@@ -1,5 +1,12 @@
 #include "renderer.hpp"
 #include "json.hpp"
+
+#include <thread>
+#include <atomic>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 using json = nlohmann::json;
 #include <iostream>
 #include <sstream>
@@ -257,6 +264,7 @@ Scene loadSceneFromJson(const std::string &path) {
             Vec3 albedo = Vec3(0.8f, 0.8f, 0.8f);
             float metallic = 0.0f, roughness = 0.5f;
             Vec3 emission = Vec3(0.0f, 0.0f, 0.0f);
+            float transmission = 0.0f, ior = 1.45f;
             if (mat.contains("base_color")) {
                 albedo = Vec3(mat["base_color"][0], mat["base_color"][1], mat["base_color"][2]);
             }
@@ -265,7 +273,12 @@ Scene loadSceneFromJson(const std::string &path) {
             if (mat.contains("emission")) {
                 emission = Vec3(mat["emission"][0], mat["emission"][1], mat["emission"][2]);
             }
+            if (mat.contains("transmission")) transmission = mat["transmission"];
+            if (mat.contains("ior")) ior = mat["ior"];
+            
             m.material = Material(albedo, metallic, roughness, emission);
+            m.material.transmission = transmission;
+            m.material.ior = ior;
             
             // Parse node tree if present
             if (mat.contains("node_tree") && !mat["node_tree"].is_null()) {
@@ -281,7 +294,8 @@ Scene loadSceneFromJson(const std::string &path) {
             std::cerr << "[Mesh: " << meshj["name"] << "] material: "
                       << "color=(" << albedo.x << "," << albedo.y << "," << albedo.z << "), "
                       << "metallic=" << metallic << ", roughness=" << roughness
-                      << ", emission=(" << emission.x << "," << emission.y << "," << emission.z << ")\n";
+                      << ", emission=(" << emission.x << "," << emission.y << "," << emission.z << ")"
+                      << ", transmission=" << transmission << ", ior=" << ior << "\n";
         }
         // ...attributes (vertex color, uv, custom) can be parsed here as needed...
         if (meshj.contains("attributes")) {
@@ -338,7 +352,8 @@ int main(int argc, char** argv){
         else if(a=="--disable-aabb"){ disableAABB = true; }
     }
     
-    std::srand(42);  // Fixed seed for consistent random sampling (reproducible renders)
+    std::srand(42);  // Legacy seed (kept for compatibility)
+    seed_random(42); // Fast xorshift seed for reproducible renders
     
     // ===== Load Scene =====
     Scene scene;
@@ -391,10 +406,30 @@ int main(int argc, char** argv){
             }
         }
     }
+    
+    // Progress tracking
+    int totalPixels = tileW * tileH;
+    
+    // Allocate output buffer for parallel rendering
+    // Each pixel stores RGBA (4 floats)
+    std::vector<float> pixelBuffer(totalPixels * 4);
+    
+    // Report thread count
+    #ifdef _OPENMP
+    int numThreads = omp_get_max_threads();
+    std::cerr << "[diyrt] OpenMP enabled with " << numThreads << " threads\n";
+    #else
+    std::cerr << "[diyrt] Single-threaded mode\n";
+    #endif
+    
+    // Parallel rendering loop
+    #pragma omp parallel for schedule(dynamic, 16) collapse(2)
     for(int py=0; py<tileH; ++py){
-        int y = tileY + py;
         for(int px=0; px<tileW; ++px){
+            int y = tileY + py;
             int x = tileX + px;
+            int pixelIdx = py * tileW + px;
+            
             float ndcX = (2.0f * (x + 0.5f) / fullW - 1.0f) * cam.aspect;
             float ndcY = 1.0f - 2.0f * (y + 0.5f) / fullH;  // Y-axis flip for screen coordinates
             // Construct ray direction: forward + offset from image plane
@@ -403,6 +438,11 @@ int main(int argc, char** argv){
             worldDir.normalize();
             Ray ray{cam.pos, worldDir};
             Vec3 color{0,0,0};
+            
+            // Seed RNG per-pixel for consistent results across different sample counts
+            // This ensures that increasing samples adds new samples rather than changing existing ones
+            uint32_t pixelSeed = (uint32_t)(y * fullW + x) * 2654435761u + 42u;  // Knuth multiplicative hash
+            seed_random(pixelSeed);
             
             if(mode == "debug" || mode == "normal"){
                 // Debug mode: show normals
@@ -429,6 +469,8 @@ int main(int argc, char** argv){
                 color = traceEmission(scene, ray, !disableAABB);
             } else {
                 // Raytrace mode: full path tracing with samples
+                // Output is SUM of all samples (not averaged)
+                // Python side will accumulate and divide by total samples
                 for(int s = 0; s < samples; ++s){
                     Ray sampleRay = ray;
                     // Add slight jitter for anti-aliasing if samples > 1
@@ -441,30 +483,32 @@ int main(int argc, char** argv){
                     }
                     color = color + trace(scene, sampleRay, maxDepth, !disableAABB);
                 }
-                color = color / (float)samples;
+                // NOTE: Do NOT divide by samples here!
+                // Output is raw sum. Python accumulates sums and divides by total at display time.
             }
             
-            // Clamp and gamma correct
-            color.x = std::min(1.0f, std::max(0.0f, color.x));
-            color.y = std::min(1.0f, std::max(0.0f, color.y));
-            color.z = std::min(1.0f, std::max(0.0f, color.z));
-            color.x = std::sqrt(color.x);  // Simple gamma correction
-            color.y = std::sqrt(color.y);
-            color.z = std::sqrt(color.z);
+            // Store in buffer (clamp negative values only)
+            color.x = std::max(0.0f, color.x);
+            color.y = std::max(0.0f, color.y);
+            color.z = std::max(0.0f, color.z);
             
-            std::cout << color.x << ' ' << color.y << ' ' << color.z << " 1.0\n";
-            if(debug && py==0 && px<5){
-                // Test AABB with actual pixel ray
-                bool pixelAABBHit = false;
-                for(const auto &m: scene.meshes) {
-                    if(rayAABB(ray, m.bmin, m.bmax)) {
-                        pixelAABBHit = true;
-                        break;
-                    }
-                }
-                std::cerr << "[diyrt] sampleRay x="<<x<<" y="<<y<<" dir=("<<worldDir.x<<","<<worldDir.y<<","<<worldDir.z<<") color=("<<color.x<<","<<color.y<<","<<color.z<<")"<< (disableAABB?" noAABB":" AABB=") << (pixelAABBHit?"HIT":"MISS") <<" mode="<<mode<<"\n";
-            }
+            pixelBuffer[pixelIdx * 4 + 0] = color.x;
+            pixelBuffer[pixelIdx * 4 + 1] = color.y;
+            pixelBuffer[pixelIdx * 4 + 2] = color.z;
+            pixelBuffer[pixelIdx * 4 + 3] = 1.0f;
         }
     }
+    
+    // Progress report (after parallel section)
+    std::cerr << "[diyrt] Rendering complete, outputting " << totalPixels << " pixels\n";
+    
+    // Output all pixels in order (sequential, but fast since it's just I/O)
+    for(int i = 0; i < totalPixels; ++i) {
+        std::cout << pixelBuffer[i * 4 + 0] << ' ' 
+                  << pixelBuffer[i * 4 + 1] << ' ' 
+                  << pixelBuffer[i * 4 + 2] << ' ' 
+                  << pixelBuffer[i * 4 + 3] << '\n';
+    }
+    
     return 0;
 }

@@ -26,6 +26,8 @@
 #include <limits>
 #include <cmath>
 #include <cstdlib>
+#include <cstdint>
+#include <algorithm>
 #include <iostream>
 
 // ========== Core Math Structures ==========
@@ -60,10 +62,38 @@ struct Vec3 {
  * These functions generate random directions and points for:
  * - Hemisphere sampling (diffuse reflection)
  * - Importance sampling (cosine-weighted)
+ * 
+ * Uses xorshift32 for fast, high-quality random numbers.
+ * Much faster than std::rand() with better statistical properties.
  */
 
+// Thread-local xorshift state for fast random number generation
+// Each thread gets its own state to avoid contention
+inline uint32_t& xorshift_state() {
+    static thread_local uint32_t state = 2463534242u;  // Non-zero seed
+    return state;
+}
+
+// Seed the random number generator (call once at startup with varied seed)
+inline void seed_random(uint32_t seed) {
+    if(seed == 0) seed = 1;  // State must never be zero
+    xorshift_state() = seed;
+}
+
+// Fast xorshift32 random number generator
+// Period: 2^32-1, passes most statistical tests
+inline uint32_t xorshift32() {
+    uint32_t &state = xorshift_state();
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
 // Generate random float between 0 and 1
-inline float randf(){ return (float)std::rand() / (float)RAND_MAX; }
+inline float randf() { 
+    return (float)xorshift32() / (float)0xFFFFFFFFu;
+}
 
 // Generate random point inside unit sphere (rejection sampling)
 // Used for uniform hemisphere sampling
@@ -84,13 +114,51 @@ inline Vec3 randomUnitVector(){
 // Generate random direction in hemisphere around normal (cosine-weighted)
 // This is importance sampling for Lambertian BRDF
 // PDF = cos(theta) / PI
+// Method: Add random unit vector to normal and normalize
+// This naturally produces cosine-weighted distribution
 inline Vec3 randomCosineDirection(const Vec3 &normal) {
-    Vec3 random_dir = randomUnitVector();
-    // Flip to correct hemisphere if needed
-    if (Vec3::dot(random_dir, normal) < 0.0f) {
-        random_dir = random_dir * -1.0f;
+    // Generate random point on unit sphere
+    Vec3 random_on_sphere = randomUnitVector();
+    // Add to normal - this biases toward normal direction
+    // The result is naturally cosine-weighted!
+    Vec3 result = normal + random_on_sphere;
+    result.normalize();
+    return result;
+}
+
+// ========== Glass/Refraction Functions ==========
+
+// Reflect direction around normal
+inline Vec3 reflect(const Vec3 &v, const Vec3 &n) {
+    return v - n * 2.0f * Vec3::dot(v, n);
+}
+
+// Refract direction using Snell's law
+// Returns zero vector if total internal reflection occurs
+inline Vec3 refract(const Vec3 &uv, const Vec3 &n, float etai_over_etat) {
+    float cos_theta = std::min(-Vec3::dot(uv, n), 1.0f);
+    Vec3 r_out_perp = (uv + n * cos_theta) * etai_over_etat;
+    float r_out_perp_len2 = Vec3::dot(r_out_perp, r_out_perp);
+    if (r_out_perp_len2 > 1.0f) {
+        // Total internal reflection
+        return Vec3(0, 0, 0);
     }
-    return random_dir;
+    Vec3 r_out_parallel = n * (-std::sqrt(std::abs(1.0f - r_out_perp_len2)));
+    return r_out_perp + r_out_parallel;
+}
+
+// Schlick's approximation for Fresnel reflectance
+// cosine: cos(theta) where theta is angle between incident ray and normal
+// ref_idx: relative index of refraction (n1/n2)
+// Returns probability of reflection (0 to 1)
+inline float schlickFresnelReflectance(float cosine, float ref_idx) {
+    // r0 = ((n1-n2)/(n1+n2))^2 = ((1-n2/n1)/(1+n2/n1))^2 for air->material
+    // But we receive ref_idx = n1/n2, so:
+    // r0 = ((ref_idx - 1)/(ref_idx + 1))^2 when going from medium with higher index
+    // For simplicity, use the standard formula with the IOR itself
+    float r0 = (1.0f - ref_idx) / (1.0f + ref_idx);
+    r0 = r0 * r0;
+    return r0 + (1.0f - r0) * std::pow((1.0f - cosine), 5.0f);
 }
 
 // ========== Node Graph Structures ==========
@@ -194,28 +262,133 @@ struct NodeTree {
 // Stores physical material properties from Blender's Principled BSDF
 struct Material {
     Vec3 albedo;      // Base color (diffuse reflectance)
-    float metallic;   // Metallic factor (0=dielectric, 1=metal) [currently unused]
-    float roughness;  // Surface roughness [currently unused]
+    float metallic;   // Metallic factor (0=dielectric, 1=metal)
+    float roughness;  // Surface roughness
     Vec3 emission;    // Emission color * strength (for light sources)
+    float transmission; // Glass/transparency (0=opaque, 1=fully transparent)
+    float ior;        // Index of Refraction (1.0=air, 1.45=glass, 1.33=water)
     
     // Node-based material system
     NodeTree nodeTree;  // Full node graph from Blender
     bool useNodes;      // Should we use node tree or legacy properties?
     
-    Material() : albedo(0.8f, 0.8f, 0.8f), metallic(0.0f), roughness(0.5f), emission(0.0f, 0.0f, 0.0f), useNodes(false) {}
-    Material(Vec3 a, float m, float r) : albedo(a), metallic(m), roughness(r), emission(0.0f, 0.0f, 0.0f), useNodes(false) {}
-    Material(Vec3 a, float m, float r, Vec3 e) : albedo(a), metallic(m), roughness(r), emission(e), useNodes(false) {}
+    Material() : albedo(0.8f, 0.8f, 0.8f), metallic(0.0f), roughness(0.5f), 
+                 emission(0.0f, 0.0f, 0.0f), transmission(0.0f), ior(1.45f), useNodes(false) {}
+    Material(Vec3 a, float m, float r) : albedo(a), metallic(m), roughness(r), 
+                 emission(0.0f, 0.0f, 0.0f), transmission(0.0f), ior(1.45f), useNodes(false) {}
+    Material(Vec3 a, float m, float r, Vec3 e) : albedo(a), metallic(m), roughness(r), 
+                 emission(e), transmission(0.0f), ior(1.45f), useNodes(false) {}
 };
 
 struct Ray { Vec3 o; Vec3 d; };
 
-struct Triangle { int i0, i1, i2; Vec3 faceNormal; };
+struct Triangle { int i0, i1, i2; Vec3 faceNormal; Vec3 centroid; };
+
+// ========== BVH (Bounding Volume Hierarchy) ==========
+// Accelerates ray-triangle intersection by organizing triangles
+// in a binary tree of axis-aligned bounding boxes.
+
+struct BVHNode {
+    Vec3 bmin, bmax;           // Bounding box of this node
+    int left, right;           // Child indices (-1 for leaf)
+    int triStart, triCount;    // Triangle range for leaf nodes
+    
+    bool isLeaf() const { return triCount > 0; }
+};
+
+struct BVH {
+    std::vector<BVHNode> nodes;
+    std::vector<int> triIndices;  // Reordered triangle indices
+    
+    // Build BVH from mesh triangles
+    void build(const std::vector<Vec3>& vertices, std::vector<Triangle>& triangles) {
+        if(triangles.empty()) return;
+        
+        // Initialize triangle indices and compute centroids
+        triIndices.resize(triangles.size());
+        for(size_t i = 0; i < triangles.size(); ++i) {
+            triIndices[i] = (int)i;
+            Triangle& tri = triangles[i];
+            const Vec3& a = vertices[tri.i0];
+            const Vec3& b = vertices[tri.i1];
+            const Vec3& c = vertices[tri.i2];
+            tri.centroid = Vec3((a.x+b.x+c.x)/3.0f, (a.y+b.y+c.y)/3.0f, (a.z+b.z+c.z)/3.0f);
+        }
+        
+        // Reserve space for nodes (2n-1 nodes for n triangles in worst case)
+        nodes.reserve(2 * triangles.size());
+        
+        // Build recursively
+        buildRecursive(vertices, triangles, 0, (int)triangles.size());
+    }
+    
+private:
+    int buildRecursive(const std::vector<Vec3>& vertices, std::vector<Triangle>& triangles, 
+                       int start, int end) {
+        int nodeIdx = (int)nodes.size();
+        nodes.push_back(BVHNode());
+        BVHNode& node = nodes[nodeIdx];
+        
+        // Compute bounds for this node
+        node.bmin = Vec3(1e30f, 1e30f, 1e30f);
+        node.bmax = Vec3(-1e30f, -1e30f, -1e30f);
+        for(int i = start; i < end; ++i) {
+            const Triangle& tri = triangles[triIndices[i]];
+            for(int v = 0; v < 3; ++v) {
+                const Vec3& vert = vertices[v == 0 ? tri.i0 : (v == 1 ? tri.i1 : tri.i2)];
+                node.bmin.x = std::min(node.bmin.x, vert.x);
+                node.bmin.y = std::min(node.bmin.y, vert.y);
+                node.bmin.z = std::min(node.bmin.z, vert.z);
+                node.bmax.x = std::max(node.bmax.x, vert.x);
+                node.bmax.y = std::max(node.bmax.y, vert.y);
+                node.bmax.z = std::max(node.bmax.z, vert.z);
+            }
+        }
+        
+        int count = end - start;
+        
+        // Leaf node if few triangles
+        if(count <= 4) {
+            node.triStart = start;
+            node.triCount = count;
+            node.left = node.right = -1;
+            return nodeIdx;
+        }
+        
+        // Find best split axis (longest extent)
+        Vec3 extent = node.bmax - node.bmin;
+        int axis = 0;
+        if(extent.y > extent.x) axis = 1;
+        if(extent.z > (axis == 0 ? extent.x : extent.y)) axis = 2;
+        
+        // Sort by centroid along split axis
+        int mid = (start + end) / 2;
+        std::nth_element(triIndices.begin() + start, triIndices.begin() + mid, 
+                        triIndices.begin() + end,
+                        [&](int a, int b) {
+                            float ca = axis == 0 ? triangles[a].centroid.x : 
+                                      (axis == 1 ? triangles[a].centroid.y : triangles[a].centroid.z);
+                            float cb = axis == 0 ? triangles[b].centroid.x : 
+                                      (axis == 1 ? triangles[b].centroid.y : triangles[b].centroid.z);
+                            return ca < cb;
+                        });
+        
+        // Build children
+        node.triStart = 0;
+        node.triCount = 0;  // Not a leaf
+        node.left = buildRecursive(vertices, triangles, start, mid);
+        node.right = buildRecursive(vertices, triangles, mid, end);
+        
+        return nodeIdx;
+    }
+};
 
 struct Mesh {
     std::vector<Vec3> vertices;
     std::vector<Triangle> triangles;
     Material material;
-    // axis-aligned bounding box
+    BVH bvh;  // BVH acceleration structure
+    // axis-aligned bounding box (for whole mesh)
     Vec3 bmin{ 1e30f, 1e30f, 1e30f };
     Vec3 bmax{ -1e30f, -1e30f, -1e30f };
 };
@@ -255,6 +428,29 @@ inline void finalizeMeshBounds(Mesh &m){
         t.faceNormal = Vec3::cross(b-a, c-a);
         t.faceNormal.normalize();
     }
+    
+    // Build BVH for this mesh
+    m.bvh.build(m.vertices, m.triangles);
+}
+
+// Optimized AABB test with precomputed inverse direction
+inline bool rayAABBFast(const Ray &r, const Vec3 &invDir, const Vec3 &bmin, const Vec3 &bmax){
+    float t1 = (bmin.x - r.o.x) * invDir.x;
+    float t2 = (bmax.x - r.o.x) * invDir.x;
+    float tmin = std::min(t1, t2);
+    float tmax = std::max(t1, t2);
+    
+    t1 = (bmin.y - r.o.y) * invDir.y;
+    t2 = (bmax.y - r.o.y) * invDir.y;
+    tmin = std::max(tmin, std::min(t1, t2));
+    tmax = std::min(tmax, std::max(t1, t2));
+    
+    t1 = (bmin.z - r.o.z) * invDir.z;
+    t2 = (bmax.z - r.o.z) * invDir.z;
+    tmin = std::max(tmin, std::min(t1, t2));
+    tmax = std::min(tmax, std::max(t1, t2));
+    
+    return tmax >= std::max(tmin, 0.0f);
 }
 
 inline bool rayAABB(const Ray &r, const Vec3 &bmin, const Vec3 &bmax){
@@ -297,31 +493,88 @@ inline float rayTriangle(const Ray &r, const Vec3 &v0, const Vec3 &v1, const Vec
     return (t > EPS) ? t : -1.0f;  // both sides valid if t > 0
 }
 
+// BVH traversal for a single mesh
+inline void intersectBVH(const Mesh &mesh, const Ray &ray, const Vec3 &invDir, Hit &result) {
+    if(mesh.bvh.nodes.empty()) {
+        // Fallback: linear scan if no BVH
+        for(const auto &tri : mesh.triangles) {
+            const Vec3 &a = mesh.vertices[tri.i0];
+            const Vec3 &b = mesh.vertices[tri.i1];
+            const Vec3 &c = mesh.vertices[tri.i2];
+            float t = rayTriangle(ray, a, b, c);
+            if(t > 0.0001f && t < result.t) {
+                result.t = t;
+                result.hit = true;
+                result.point = ray.o + ray.d * t;
+                result.normal = tri.faceNormal;
+                result.material = mesh.material;
+            }
+        }
+        return;
+    }
+    
+    // Stack-based BVH traversal (non-recursive for speed)
+    int stack[64];
+    int stackPtr = 0;
+    stack[stackPtr++] = 0;  // Start with root node
+    
+    while(stackPtr > 0) {
+        int nodeIdx = stack[--stackPtr];
+        const BVHNode &node = mesh.bvh.nodes[nodeIdx];
+        
+        // Test ray against node bounds
+        if(!rayAABBFast(ray, invDir, node.bmin, node.bmax)) continue;
+        
+        if(node.isLeaf()) {
+            // Test triangles in this leaf
+            for(int i = 0; i < node.triCount; ++i) {
+                int triIdx = mesh.bvh.triIndices[node.triStart + i];
+                const Triangle &tri = mesh.triangles[triIdx];
+                const Vec3 &a = mesh.vertices[tri.i0];
+                const Vec3 &b = mesh.vertices[tri.i1];
+                const Vec3 &c = mesh.vertices[tri.i2];
+                float t = rayTriangle(ray, a, b, c);
+                if(t > 0.0001f && t < result.t) {
+                    result.t = t;
+                    result.hit = true;
+                    result.point = ray.o + ray.d * t;
+                    result.normal = tri.faceNormal;
+                    result.material = mesh.material;
+                }
+            }
+        } else {
+            // Push children onto stack
+            if(node.right >= 0) stack[stackPtr++] = node.right;
+            if(node.left >= 0) stack[stackPtr++] = node.left;
+        }
+    }
+}
+
 inline Hit intersectScene(const Scene &scene, const Ray &ray, bool useAABB = true){
     Hit result;
     result.t = 1e30f;
     result.hit = false;
     
+    // Precompute inverse direction for faster AABB tests
+    Vec3 invDir(
+        std::abs(ray.d.x) > 1e-8f ? 1.0f / ray.d.x : 1e30f,
+        std::abs(ray.d.y) > 1e-8f ? 1.0f / ray.d.y : 1e30f,
+        std::abs(ray.d.z) > 1e-8f ? 1.0f / ray.d.z : 1e30f
+    );
+    
     for(const auto &m : scene.meshes){
-        if(useAABB && !rayAABB(ray, m.bmin, m.bmax)) continue;
-        for(const auto &tri : m.triangles){
-            const Vec3 &a = m.vertices[tri.i0];
-            const Vec3 &b = m.vertices[tri.i1];
-            const Vec3 &c = m.vertices[tri.i2];
-            float t = rayTriangle(ray, a, b, c);
-            if(t > 0.0001f && t < result.t){
-                result.t = t;
-                result.hit = true;
-                result.point = ray.o + ray.d * t;
-                result.normal = tri.faceNormal;
-                result.material = m.material;
-                // Flip normal if hitting backface
-                if(Vec3::dot(result.normal, ray.d) > 0) {
-                    result.normal = result.normal * -1.0f;
-                }
-            }
-        }
+        // First check mesh-level AABB
+        if(useAABB && !rayAABBFast(ray, invDir, m.bmin, m.bmax)) continue;
+        
+        // Use BVH for triangle intersection
+        intersectBVH(m, ray, invDir, result);
     }
+    
+    // NOTE: We no longer flip normals here for backface hits.
+    // Glass materials need to know the original geometric normal direction
+    // to determine if we're entering or exiting the material.
+    // The trace() function handles normal direction as needed.
+    
     return result;
 }
 
@@ -336,6 +589,12 @@ Vec3 getAlbedoFromNodeTree(const NodeTree &tree);
 
 // Get emission from node tree
 Vec3 getEmissionFromNodeTree(const NodeTree &tree);
+
+// Get transmission (glass) from node tree (0.0 = opaque, 1.0 = fully transparent)
+float getTransmissionFromNodeTree(const NodeTree &tree);
+
+// Get Index of Refraction from node tree (default 1.45 for glass)
+float getIORFromNodeTree(const NodeTree &tree);
 
 // ========== Debug Rendering Functions ==========
 
@@ -380,10 +639,10 @@ inline Vec3 traceEmission(const Scene &scene, const Ray &ray, bool useAABB = tru
     return Vec3{0,0,0};
 }
 
-// Sky color for background
-inline Vec3 skyColor(const Ray &ray){
-    float t = 0.5f * (ray.d.y + 1.0f);
-    return Vec3(1.0f, 1.0f, 1.0f) * (1.0f - t) + Vec3(0.5f, 0.7f, 1.0f) * t;
+// Sky/environment color for background
+// Set to black (no environment lighting) to match Cycles with black world
+inline Vec3 getEnvironmentColor(const Ray &ray){
+    return Vec3(0.0f, 0.0f, 0.0f);
 }
 
 // Shadow test
@@ -400,59 +659,178 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
     // Base case: maximum recursion depth reached
     if(depth <= 0) return Vec3{0,0,0};
     
-    // Russian Roulette: probabilistically terminate paths after depth 3
-    if(depth < 5) {
-        float rrProbability = 0.8f;  // 80% chance to continue
+    // Russian Roulette: probabilistically terminate paths after depth 2
+    // Only apply RR after a few bounces to avoid bias in direct lighting
+    float rrProbability = 1.0f;
+    if(depth < 3) {
+        rrProbability = 0.9f;  // 90% chance to continue (more conservative)
         if(randf() > rrProbability) {
             return Vec3{0,0,0};  // Terminate path
         }
-        // If we continue, compensate by dividing by probability later
     }
     
     // Test ray against all geometry in scene
     Hit hit = intersectScene(scene, ray, useAABB);
     
-    // Ray escaped to infinity - return black (no environment lighting)
-    if(!hit.hit) return Vec3(0,0,0);
+    // Ray escaped to infinity - return environment/sky color
+    // This provides ambient lighting from the "sky dome"
+    if(!hit.hit) {
+        return getEnvironmentColor(ray);
+    }
     
     // Evaluate material properties (use node tree if available, fallback to legacy)
     Vec3 albedo = hit.material.albedo;
     Vec3 emission = hit.material.emission;
+    float transmission = hit.material.transmission;
+    float ior = hit.material.ior;
     
     if(hit.material.useNodes && hit.material.nodeTree.valid) {
         // Use node-based material evaluation
         albedo = getAlbedoFromNodeTree(hit.material.nodeTree);
         emission = getEmissionFromNodeTree(hit.material.nodeTree);
+        transmission = getTransmissionFromNodeTree(hit.material.nodeTree);
+        ior = getIORFromNodeTree(hit.material.nodeTree);
     }
     
-    // Check if we hit a light source (emission > 0)
-    float emissionMagnitude = emission.x + emission.y + emission.z;
-    if(emissionMagnitude > 0.001f) {
-        // Direct hit on light - return its emission
-        return emission;
+    // Debug: print glass material info (only first few times)
+    static int glassDebugCount = 0;
+    if(transmission > 0.0f && glassDebugCount < 5) {
+        glassDebugCount++;
+        std::cerr << "[Glass] transmission=" << transmission << ", ior=" << ior 
+                  << ", albedo=(" << albedo.x << "," << albedo.y << "," << albedo.z << ")\n";
     }
     
-    // Scatter ray in random direction using cosine-weighted sampling
-    // This is importance sampling for Lambertian (diffuse) surfaces
-    Vec3 scatterDir = randomCosineDirection(hit.normal);
-    Ray scattered{hit.point + hit.normal * 0.001f, scatterDir};  // Offset to avoid self-intersection
+    // Start with emission (if this surface is a light source)
+    Vec3 result = emission;
+    
+    Ray scattered;
+    Vec3 attenuation = albedo;
+    
+    // Glass/Transparent material handling
+    if(transmission > 0.0f) {
+        // Mix between glass and diffuse based on transmission factor
+        if(randf() >= transmission) {
+            // Diffuse path (partial transmission - e.g. frosted glass)
+            Vec3 normal = hit.normal;
+            if(Vec3::dot(ray.d, normal) > 0) {
+                normal = normal * -1.0f;
+            }
+            Vec3 scatterDir = randomCosineDirection(normal);
+            scattered.o = hit.point + normal * 0.001f;
+            scattered.d = scatterDir;
+        } else {
+            // Glass path - full refraction/reflection
+            
+            // Determine if we're entering or exiting the material
+            // frontFace = true means ray is hitting the outside of the surface
+            bool frontFace = Vec3::dot(ray.d, hit.normal) < 0;
+            
+            // Always use outward-facing normal for calculations
+            Vec3 n = frontFace ? hit.normal : hit.normal * -1.0f;
+            
+            // IOR ratio: n1/n2 where n1 is current medium, n2 is the medium we're entering
+            // Entering glass (frontFace=true): air(1.0) -> glass(ior), ratio = 1/ior
+            // Exiting glass (frontFace=false): glass(ior) -> air(1.0), ratio = ior/1 = ior
+            float refraction_ratio = frontFace ? (1.0f / ior) : ior;
+            
+            Vec3 unit_direction = ray.d;
+            unit_direction.normalize();
+            
+            float cos_theta = std::min(-Vec3::dot(unit_direction, n), 1.0f);
+            float sin_theta = std::sqrt(1.0f - cos_theta * cos_theta);
+            
+            // Check for total internal reflection
+            bool cannot_refract = refraction_ratio * sin_theta > 1.0f;
+            
+            // Schlick's approximation for Fresnel reflectance
+            // For Schlick, we need to use the cosine from the less dense medium
+            // If entering glass (frontFace), use cos_theta directly
+            // If exiting glass, we should use the refracted angle's cosine
+            float reflectance;
+            if(cannot_refract) {
+                reflectance = 1.0f;  // Total internal reflection
+            } else {
+                // Calculate Fresnel reflectance
+                // Use the angle in the less optically dense medium
+                float cos_for_fresnel = cos_theta;
+                if(!frontFace) {
+                    // Exiting: use the refracted angle (angle in air)
+                    float sin_refracted = refraction_ratio * sin_theta;
+                    cos_for_fresnel = std::sqrt(1.0f - sin_refracted * sin_refracted);
+                }
+                // r0 for air-glass interface: ((1 - ior) / (1 + ior))^2
+                float r0 = (1.0f - ior) / (1.0f + ior);
+                r0 = r0 * r0;
+                reflectance = r0 + (1.0f - r0) * std::pow((1.0f - cos_for_fresnel), 5.0f);
+            }
+            
+            // Debug output
+            static int fresnelDebugCount = 0;
+            if(fresnelDebugCount < 3) {
+                fresnelDebugCount++;
+                std::cerr << "[Fresnel] frontFace=" << frontFace << ", cos_theta=" << cos_theta 
+                          << ", refraction_ratio=" << refraction_ratio << ", reflectance=" << reflectance << "\n";
+            }
+            
+            Vec3 direction;
+            if(cannot_refract || randf() < reflectance) {
+                // Reflect - ray bounces off surface
+                direction = reflect(unit_direction, n);
+                // Offset along the reflection direction (same side as incoming ray)
+                scattered.o = hit.point + n * 0.001f;
+            } else {
+                // Refract - ray passes through surface
+                direction = refract(unit_direction, n, refraction_ratio);
+                // Offset in the direction of refraction (opposite side of normal)
+                scattered.o = hit.point - n * 0.001f;
+                
+                // Debug refraction
+                static int refractDebugCount = 0;
+                if(refractDebugCount < 5) {
+                    refractDebugCount++;
+                    float incident_angle = std::acos(cos_theta) * 180.0f / 3.14159f;
+                    Vec3 dir_normalized = direction;
+                    dir_normalized.normalize();
+                    float refract_cos = std::abs(Vec3::dot(dir_normalized, n));
+                    float refract_angle = std::acos(refract_cos) * 180.0f / 3.14159f;
+                    std::cerr << "[Refract] frontFace=" << frontFace 
+                              << ", incident_angle=" << incident_angle << "deg"
+                              << ", refract_angle=" << refract_angle << "deg"
+                              << ", ratio=" << refraction_ratio << "\n";
+                    std::cerr << "  in_dir=(" << unit_direction.x << "," << unit_direction.y << "," << unit_direction.z << ")"
+                              << ", n=(" << n.x << "," << n.y << "," << n.z << ")"
+                              << ", out_dir=(" << direction.x << "," << direction.y << "," << direction.z << ")\n";
+                }
+            }
+            
+            scattered.d = direction;
+            attenuation = Vec3(1.0f, 1.0f, 1.0f);  // Pure glass doesn't absorb light
+            // For colored glass, use: attenuation = albedo;
+        }
+    } else {
+        // Opaque diffuse material
+        // For diffuse, we need the normal to face the ray (flip if backface)
+        Vec3 normal = hit.normal;
+        if(Vec3::dot(ray.d, normal) > 0) {
+            normal = normal * -1.0f;
+        }
+        Vec3 scatterDir = randomCosineDirection(normal);
+        scattered.o = hit.point + normal * 0.001f;
+        scattered.d = scatterDir;
+    }
     
     // Recursively trace the scattered ray to get incoming light
     Vec3 incomingLight = trace(scene, scattered, depth - 1, useAABB);
     
     // Rendering equation with cosine-weighted importance sampling:
-    // Lo = integral(BRDF * Li * cos(theta))
-    // BRDF (Lambertian) = albedo / PI
-    // PDF (cosine-weighted) = cos(theta) / PI
-    // Monte Carlo estimator: (BRDF * Li * cos(theta)) / PDF
-    //                       = (albedo/PI * Li * cos(theta)) / (cos(theta)/PI)
-    //                       = albedo * Li
-    // The cos(theta) and PI terms cancel out!
-    Vec3 result = albedo * incomingLight;
+    // Lo = Le + integral(BRDF * Li * cos(theta))
+    // For diffuse: BRDF terms cancel with PDF
+    // For glass: attenuation is the glass color/tint
+    result = result + attenuation * incomingLight;
     
     // Apply Russian Roulette compensation
-    if(depth < 5) {
-        result = result * (1.0f / 0.8f);  // Divide by continuation probability
+    if(rrProbability < 1.0f) {
+        result = result * (1.0f / rrProbability);
     }
     
     return result;

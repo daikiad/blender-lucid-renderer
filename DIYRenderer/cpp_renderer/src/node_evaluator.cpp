@@ -324,3 +324,94 @@ Vec3 getEmissionFromNodeTree(const NodeTree &tree) {
     
     return Vec3(0.0f, 0.0f, 0.0f);
 }
+
+/**
+ * getTransmissionFromNodeTree: Extract transmission (glass/transparency) from node graph
+ * 
+ * @param tree The material node tree to evaluate
+ * @return Transmission value (0.0 = opaque, 1.0 = fully transparent)
+ * 
+ * Algorithm:
+ * 1. Find Material Output node
+ * 2. Follow its Surface input connection
+ * 3. If connected to Principled BSDF, get its Transmission socket
+ */
+float getTransmissionFromNodeTree(const NodeTree &tree) {
+    if(!tree.valid) {
+        return 0.0f;  // No transmission (opaque)
+    }
+    
+    // Find Material Output node
+    const MaterialNode *outputNode = tree.findOutputNode();
+    if(!outputNode) {
+        return 0.0f;
+    }
+    
+    // Get Surface input
+    const NodeSocket *surfaceSocket = outputNode->findInput("Surface");
+    if(!surfaceSocket || !surfaceSocket->is_linked) {
+        return 0.0f;
+    }
+    
+    // Check if connected to Principled BSDF
+    const MaterialNode *shaderNode = tree.findNode(surfaceSocket->linked_node);
+    if(shaderNode && shaderNode->type == "ShaderNodeBsdfPrincipled") {
+        // Try "Transmission" socket (Blender 4.0+)
+        const NodeSocket *transmissionSocket = shaderNode->findInput("Transmission");
+        // Older Blender versions might use "Transmission Weight"
+        if(!transmissionSocket) {
+            transmissionSocket = shaderNode->findInput("Transmission Weight");
+        }
+        
+        if(transmissionSocket && !transmissionSocket->is_linked) {
+            if(transmissionSocket->default_value.type == SocketValue::FLOAT) {
+                return transmissionSocket->default_value.f;
+            }
+        }
+    }
+    
+    return 0.0f;
+}
+
+/**
+ * getIORFromNodeTree: Extract Index of Refraction from node graph
+ * 
+ * @param tree The material node tree to evaluate
+ * @return IOR value (1.0 = air, 1.45 = glass, 1.33 = water, 2.42 = diamond)
+ * 
+ * Algorithm:
+ * 1. Find Material Output node
+ * 2. Follow its Surface input connection
+ * 3. If connected to Principled BSDF, get its IOR socket
+ */
+float getIORFromNodeTree(const NodeTree &tree) {
+    if(!tree.valid) {
+        return 1.45f;  // Default glass IOR
+    }
+    
+    // Find Material Output node
+    const MaterialNode *outputNode = tree.findOutputNode();
+    if(!outputNode) {
+        return 1.45f;
+    }
+    
+    // Get Surface input
+    const NodeSocket *surfaceSocket = outputNode->findInput("Surface");
+    if(!surfaceSocket || !surfaceSocket->is_linked) {
+        return 1.45f;
+    }
+    
+    // Check if connected to Principled BSDF
+    const MaterialNode *shaderNode = tree.findNode(surfaceSocket->linked_node);
+    if(shaderNode && shaderNode->type == "ShaderNodeBsdfPrincipled") {
+        const NodeSocket *iorSocket = shaderNode->findInput("IOR");
+        
+        if(iorSocket && !iorSocket->is_linked) {
+            if(iorSocket->default_value.type == SocketValue::FLOAT) {
+                return iorSocket->default_value.f;
+            }
+        }
+    }
+    
+    return 1.45f;  // Default glass IOR
+}
