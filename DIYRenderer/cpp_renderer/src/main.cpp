@@ -332,6 +332,7 @@ int main(int argc, char** argv){
     float cx=0, cy=0, cz=5, dx=0, dy=0, dz=-1, ux=0, uy=1, uz=0, fovDeg=60;
     bool debugFlag=false; bool disableAABB=false;
     std::string mode = "raytrace";  // Render mode: raytrace/normal/albedo/emission
+    std::string algorithm = "nee";  // Sampling algorithm: simple/nee/mis
     int samples = 1;                 // Samples per pixel
     int maxDepth = 8;                // Max ray bounce depth (increased from 3 for better quality)
     int sampleOffset = 0;            // Sample offset for progressive rendering
@@ -348,6 +349,7 @@ int main(int argc, char** argv){
         else if(a=="--camup"){ need("--camup"); ux = std::atof(argv[++i]); need("--camup"); uy = std::atof(argv[++i]); need("--camup"); uz = std::atof(argv[++i]); }
         else if(a=="--fov"){ need("--fov"); fovDeg = std::atof(argv[++i]); }
         else if(a=="--mode"){ need("--mode"); mode = argv[++i]; }         // Debug or render mode
+        else if(a=="--algorithm"){ need("--algorithm"); algorithm = argv[++i]; }  // Sampling algorithm
         else if(a=="--samples"){ need("--samples"); samples = std::atoi(argv[++i]); }  // Samples per pixel
         else if(a=="--depth"){ need("--depth"); maxDepth = std::atoi(argv[++i]); }     // Ray bounce limit
         else if(a=="--sample-offset"){ need("--sample-offset"); sampleOffset = std::atoi(argv[++i]); }  // For progressive rendering
@@ -475,11 +477,9 @@ int main(int argc, char** argv){
                 // Output is SUM of all samples (not averaged)
                 // Python side will accumulate and divide by total samples
                 for(int s = 0; s < samples; ++s){
-                    // Seed RNG per-pixel AND per-sample for unique random sequences
-                    // sampleOffset allows different runs (accumulated samples) to continue uniquely
-                    uint32_t pixelSeed = (uint32_t)(y * fullW + x);
-                    uint32_t sampleSeed = (uint32_t)(sampleOffset + s);
-                    seed_random(pixelSeed, sampleSeed);
+                    // Seed RNG with x, y, and sample index for independent random streams
+                    // sampleOffset allows progressive rendering to continue with unique seeds
+                    seed_random_xyz((uint32_t)x, (uint32_t)y, (uint32_t)(sampleOffset + s));
                     
                     Ray sampleRay = ray;
                     // Add slight jitter for anti-aliasing if samples > 1
@@ -490,8 +490,18 @@ int main(int argc, char** argv){
                         jitteredDir.normalize();
                         sampleRay.d = jitteredDir;
                     }
-                    // Use new PBR path tracing with MIS
-                    color = color + traceMIS(scene, sceneLights, sampleRay, maxDepth);
+                    // Path tracing with selected algorithm:
+                    // - simple: BSDF sampling only (no NEE, slow convergence)
+                    // - nee: NEE for direct light, BSDF for indirect (fast)
+                    // - mis: Both with MIS weights (best quality)
+                    if (algorithm == "simple") {
+                        color = color + traceSimple(scene, sampleRay, maxDepth);
+                    } else if (algorithm == "mis") {
+                        color = color + traceMIS(scene, sceneLights, sampleRay, maxDepth);
+                    } else {
+                        // Default: NEE
+                        color = color + traceNEE(scene, sceneLights, sampleRay, maxDepth);
+                    }
                 }
                 // NOTE: Do NOT divide by samples here!
                 // Output is raw sum. Python accumulates sums and divides by total at display time.

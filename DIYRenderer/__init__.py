@@ -92,6 +92,16 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
         min=1,
         max=128
     )
+    sampling_algorithm: bpy.props.EnumProperty(
+        name="Sampling Algorithm",
+        description="Path tracing algorithm",
+        items=[
+            ('simple', "Simple", "BSDF sampling only (slow convergence, good for debugging)"),
+            ('nee', "NEE", "Next Event Estimation (fast direct lighting)"),
+            ('mis', "MIS", "Multiple Importance Sampling (best quality)"),
+        ],
+        default='nee'
+    )
     debug_mode: bpy.props.EnumProperty(
         name="Debug Mode",
         description="Render mode for debugging",
@@ -129,6 +139,10 @@ class DIY_RENDER_PT_sampling(bpy.types.Panel):
         # Viewport section
         col = layout.column(heading="Viewport")
         col.prop(diy, "viewport_samples", text="Samples")
+        
+        # Algorithm section
+        col = layout.column(heading="Algorithm")
+        col.prop(diy, "sampling_algorithm", text="Method")
 
 class DIY_RENDER_PT_light_paths(bpy.types.Panel):
     bl_label = "Light Paths"
@@ -897,7 +911,7 @@ def compute_camera_params(scene, width, height):
         'fov': fov_deg
     }
 
-def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, full_h, cam_params, mode='raytrace', samples=1, depth=8, debug_mode=None, cancel_check=None, sample_offset=0):
+def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, full_h, cam_params, mode='raytrace', samples=1, depth=8, debug_mode=None, cancel_check=None, sample_offset=0, algorithm='nee'):
     """
     Call external C++ renderer with cancellation support.
     
@@ -922,6 +936,7 @@ def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, f
             test_break() or other cancellation flags.
         sample_offset: Offset for sample numbering in progressive rendering
             This ensures each progressive pass uses unique random seeds.
+        algorithm: Sampling algorithm ('simple', 'nee', 'mis')
     
     Returns:
         list: Pixel data as [[r,g,b,a], ...] in linear color space, Y-flipped
@@ -954,8 +969,9 @@ def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, f
            '--samples', str(samples),
            '--depth', str(depth),
            '--sample-offset', str(sample_offset),
+           '--algorithm', algorithm,
            '--mode', render_mode]
-    print(f"[DIYRenderer] Calling external renderer (mode={render_mode}, samples={samples}, depth={depth}, sample_offset={sample_offset}): {' '.join(cmd)}")
+    print(f"[DIYRenderer] Calling external renderer (mode={render_mode}, samples={samples}, depth={depth}, algorithm={algorithm}): {' '.join(cmd)}")
     
     try:
         import time
@@ -1225,6 +1241,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             diy = original_scene.diy_renderer
             debug_mode = diy.debug_mode if diy.debug_mode != 'NONE' else None
             max_bounces = diy.max_bounces
+            algorithm = diy.sampling_algorithm
             
             # Render this iteration by calling external C++ renderer
             # Pass cancel_check callback so subprocess can be terminated immediately
@@ -1235,7 +1252,8 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 depth=max_bounces,
                 debug_mode=debug_mode,
                 cancel_check=check_cancel,  # Enable immediate cancellation
-                sample_offset=total_samples  # Unique seeds for progressive rendering
+                sample_offset=total_samples,  # Unique seeds for progressive rendering
+                algorithm=algorithm
             )
             
             # Check if cancelled during render
@@ -1351,6 +1369,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 diy = scene.diy_renderer
                 debug_mode = diy.debug_mode if diy.debug_mode != 'NONE' else None
                 max_bounces = diy.max_bounces
+                algorithm = diy.sampling_algorithm
                 
                 # Get current accumulated sample count for this tile
                 tile_key = (0, 0, render_width, render_height)
@@ -1370,7 +1389,8 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                     depth=max_bounces,
                     debug_mode=debug_mode,
                     cancel_check=should_cancel,  # Enable cancellation
-                    sample_offset=current_sample_offset  # Unique seeds for progressive rendering
+                    sample_offset=current_sample_offset,  # Unique seeds for progressive rendering
+                    algorithm=algorithm
                 )
                 
                 # Clean up temp file

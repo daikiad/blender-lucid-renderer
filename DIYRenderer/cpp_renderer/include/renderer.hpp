@@ -79,16 +79,70 @@ inline PCGState& pcg_state() {
     return s;
 }
 
-// Seed the PCG random number generator
-// Combines pixel position and sample number for unique sequences
-inline void seed_random(uint32_t seed1, uint32_t seed2 = 0) {
+// MurmurHash3 finalizer - very high quality bit mixing
+inline uint32_t murmur3_finalize(uint32_t h) {
+    h ^= h >> 16;
+    h *= 0x85ebca6bU;
+    h ^= h >> 13;
+    h *= 0xc2b2ae35U;
+    h ^= h >> 16;
+    return h;
+}
+
+// Splitmix64 - high quality 64-bit hash
+inline uint64_t splitmix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+// Jenkins hash - simple but effective for combining values
+inline uint32_t jenkins_hash(uint32_t a) {
+    a = (a + 0x7ed55d16) + (a << 12);
+    a = (a ^ 0xc761c23c) ^ (a >> 19);
+    a = (a + 0x165667b1) + (a << 5);
+    a = (a + 0xd3a2646c) ^ (a << 9);
+    a = (a + 0xfd7046c5) + (a << 3);
+    a = (a ^ 0xb55a4f09) ^ (a >> 16);
+    return a;
+}
+
+// Seed with x, y pixel coordinates and sample index
+// Uses multiple hash rounds for thorough decorrelation
+inline void seed_random_xyz(uint32_t x, uint32_t y, uint32_t sampleIdx) {
     PCGState &s = pcg_state();
+    
+    // Combine x, y, sample using different mixing patterns
+    // This ensures (x,y,s) = (1,0,0) is very different from (0,1,0) etc.
+    uint32_t h1 = jenkins_hash(x + 1);
+    uint32_t h2 = jenkins_hash(y + 1 + h1);
+    uint32_t h3 = jenkins_hash(sampleIdx + 1 + h2);
+    
+    // Create two independent 64-bit seeds
+    uint64_t seed1 = ((uint64_t)murmur3_finalize(h1 ^ h3) << 32) | murmur3_finalize(h2);
+    uint64_t seed2 = ((uint64_t)murmur3_finalize(h2 ^ h1) << 32) | murmur3_finalize(h3);
+    
+    // Apply splitmix64 for final mixing
+    uint64_t stream = splitmix64(seed1);
+    uint64_t initseq = splitmix64(seed2);
+    
+    // PCG seeding - inc must be odd
+    s.inc = (stream << 1u) | 1u;
     s.state = 0;
-    s.inc = ((uint64_t)seed1 << 1u) | 1u;  // Must be odd
-    // Warm up
     s.state = s.state * 6364136223846793005ULL + s.inc;
-    s.state += seed2;
+    s.state += initseq;
     s.state = s.state * 6364136223846793005ULL + s.inc;
+    
+    // Extended warmup: discard more values for better decorrelation
+    for (int i = 0; i < 8; i++) {
+        s.state = s.state * 6364136223846793005ULL + s.inc;
+    }
+}
+
+// Legacy seed function
+inline void seed_random(uint32_t pixelIdx, uint32_t sampleIdx) {
+    seed_random_xyz(pixelIdx % 10000, pixelIdx / 10000, sampleIdx);
 }
 
 // Legacy single-seed version for compatibility

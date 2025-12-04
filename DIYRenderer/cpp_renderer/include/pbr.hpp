@@ -30,6 +30,11 @@ constexpr float PI = 3.14159265358979323846f;
 constexpr float INV_PI = 0.31830988618379067154f;
 constexpr float EPSILON = 1e-6f;
 
+// Minimum roughness to avoid delta distributions
+// This ensures all BSDFs are continuous and can be properly sampled via NEE/MIS
+// 0.01 gives a good balance between sharp reflections and stable MIS
+constexpr float MIN_ROUGHNESS = 0.01f;
+
 // ========== Utility Functions ==========
 
 // Clamp value between min and max
@@ -128,30 +133,40 @@ inline float fresnelDielectric(float cosThetaI, float eta) {
 
 // GGX Normal Distribution Function (NDF)
 // D(m) = α² / (π * (cos²θ * (α² - 1) + 1)²)
+// Note: In Blender/Cycles, alpha = roughness², so we use a2 = roughness⁴
 inline float ggxD(float NdotH, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
+    float alpha = roughness * roughness;  // α = roughness²
+    float a2 = alpha * alpha;             // α² = roughness⁴
     float NdotH2 = NdotH * NdotH;
     float denom = NdotH2 * (a2 - 1.0f) + 1.0f;
-    return a2 * INV_PI / (denom * denom);
+    return a2 * INV_PI / (denom * denom + EPSILON);
 }
 
 // GGX Geometry function (Smith's method with height-correlated G2)
 // G1(v) = 2 * NdotV / (NdotV + sqrt(α² + (1 - α²) * NdotV²))
 inline float ggxG1(float NdotV, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
+    float alpha = roughness * roughness;  // α = roughness²
+    float a2 = alpha * alpha;             // α² = roughness⁴
     return 2.0f * NdotV / (NdotV + safe_sqrt(a2 + (1.0f - a2) * NdotV * NdotV));
 }
 
-// Height-correlated Smith G2 (returns G2, NOT G2/(4*NdotL*NdotV))
+// Height-correlated Smith G2
+// G2(l,v) = 1 / (1 + Lambda(l) + Lambda(v))
+// For GGX: Lambda(v) = (-1 + sqrt(1 + α²*tan²θ)) / 2
 inline float ggxG2(float NdotL, float NdotV, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float ggxL = NdotV * safe_sqrt(a2 + (1.0f - a2) * NdotL * NdotL);
-    float ggxV = NdotL * safe_sqrt(a2 + (1.0f - a2) * NdotV * NdotV);
-    float denom = ggxL + ggxV;
+    if (NdotL <= 0.0f || NdotV <= 0.0f) return 0.0f;
+    
+    float alpha = roughness * roughness;  // α = roughness²
+    float a2 = alpha * alpha;             // α² = roughness⁴
+    
+    // Lambda terms
+    float lambdaL = safe_sqrt(a2 + (1.0f - a2) * NdotL * NdotL);
+    float lambdaV = safe_sqrt(a2 + (1.0f - a2) * NdotV * NdotV);
+    
+    // G2 = 2 * NdotL * NdotV / (NdotV * lambdaL + NdotL * lambdaV)
+    float denom = NdotV * lambdaL + NdotL * lambdaV;
     if (denom < EPSILON) return 0.0f;
+    
     return 2.0f * NdotL * NdotV / denom;
 }
 
@@ -162,9 +177,9 @@ inline Vec3 sampleGGXVNDF(const Vec3& wo, float roughness, float u1, float u2,
     // Transform wo to local space
     Vec3 woLocal = worldToLocal(wo, n, t, b);
     
-    // Stretch wo
-    float a = roughness * roughness;
-    Vec3 woStretched = Vec3(woLocal.x * a, woLocal.y * a, woLocal.z);
+    // Stretch wo by alpha (in Blender, alpha = roughness²)
+    float alpha = roughness * roughness;
+    Vec3 woStretched = Vec3(woLocal.x * alpha, woLocal.y * alpha, woLocal.z);
     woStretched.normalize();
     
     // Build orthonormal basis around stretched wo
@@ -185,7 +200,7 @@ inline Vec3 sampleGGXVNDF(const Vec3& wo, float roughness, float u1, float u2,
     Vec3 hLocal = t1 * p1 + t2 * p2 + woStretched * std::sqrt(std::max(0.0f, 1.0f - p1*p1 - p2*p2));
     
     // Unstretch
-    hLocal = Vec3(hLocal.x * a, hLocal.y * a, std::max(0.0f, hLocal.z));
+    hLocal = Vec3(hLocal.x * alpha, hLocal.y * alpha, std::max(0.0f, hLocal.z));
     hLocal.normalize();
     
     // Transform back to world space
@@ -255,6 +270,7 @@ inline Vec3 evalDiffuse(const MaterialParams& mat, float NdotL, float NdotV) {
 
 // Evaluate GGX specular BSDF (Cook-Torrance microfacet)
 // f = D * G * F / (4 * NdotL * NdotV)
+// We use the combined G2/(4*NdotL*NdotV) term for efficiency
 inline Vec3 evalSpecular(const MaterialParams& mat, const Vec3& wo, const Vec3& wi, 
                          const Vec3& n, float NdotL, float NdotV) {
     if (NdotL <= 0.0f || NdotV <= 0.0f) return Vec3(0, 0, 0);
@@ -264,21 +280,26 @@ inline Vec3 evalSpecular(const MaterialParams& mat, const Vec3& wo, const Vec3& 
     float NdotH = std::max(Vec3::dot(n, h), 0.0f);
     float VdotH = std::max(Vec3::dot(wo, h), 0.0f);
     
-    // Clamp roughness to avoid singularity
-    float roughness = std::max(mat.roughness, 0.04f);
+    // Clamp roughness to avoid singularity - use MIN_ROUGHNESS for consistency
+    float roughness = std::max(mat.roughness, MIN_ROUGHNESS);
     
     // Microfacet terms
     float D = ggxD(NdotH, roughness);
-    float G = ggxG2(NdotL, NdotV, roughness);
+    
+    // Smith G2 / (4 * NdotL * NdotV) combined term
+    // Note: In Blender, alpha = roughness²
+    float alpha = roughness * roughness;
+    float a2 = alpha * alpha;
+    float lambdaL = safe_sqrt(a2 + (1.0f - a2) * NdotL * NdotL);
+    float lambdaV = safe_sqrt(a2 + (1.0f - a2) * NdotV * NdotV);
+    float G2_over_denom = 0.5f / (NdotV * lambdaL + NdotL * lambdaV + EPSILON);
     
     // Fresnel term - for metals use albedo as F0, for dielectrics use 0.04
     Vec3 f0 = mat.albedo * mat.metallic + Vec3(0.04f, 0.04f, 0.04f) * (1.0f - mat.metallic);
     Vec3 F = fresnelSchlickVec3(VdotH, f0);
     
-    // f = D * G * F / (4 * NdotL * NdotV)
-    float denom = 4.0f * NdotL * NdotV;
-    if (denom < EPSILON) return Vec3(0, 0, 0);
-    float spec = D * G / denom;
+    // f = D * G2_over_denom * F
+    float spec = D * G2_over_denom;
     return Vec3(spec * F.x, spec * F.y, spec * F.z);
 }
 
@@ -317,87 +338,130 @@ inline Vec3 evalBSDF(const MaterialParams& mat, const Vec3& wo, const Vec3& wi, 
 
 struct BSDFSample {
     Vec3 wi;        // Sampled direction
-    Vec3 f;         // BSDF value
-    float pdf;      // Probability density
+    Vec3 f;         // BSDF value (only used when useWeight=false)
+    float pdf;      // Probability density (only used when useWeight=false)
+    Vec3 weight;    // Direct throughput multiplier = f * |NdotL| / pdf (used when useWeight=true)
+    bool useWeight; // If true, use weight directly instead of f*NdotL/pdf
     bool isDelta;   // Is this a delta distribution (perfect mirror/glass)?
     enum Type { DIFFUSE, SPECULAR, TRANSMISSION } type;
     
-    BSDFSample() : wi(), f(), pdf(0.0f), isDelta(false), type(DIFFUSE) {}
+    BSDFSample() : wi(), f(), pdf(0.0f), weight(1,1,1), useWeight(false), isDelta(false), type(DIFFUSE) {}
 };
 
 // Sample BSDF direction based on material properties
 inline BSDFSample sampleBSDF(const MaterialParams& mat, const Vec3& wo, const Vec3& n, 
                               float u1, float u2, float u3) {
     BSDFSample sample;
-    float NdotV = std::max(Vec3::dot(n, wo), EPSILON);
+    
+    // Use minimum roughness to avoid numerical issues
+    float roughness = std::max(mat.roughness, MIN_ROUGHNESS);
     
     // Handle glass/transmission
-    if (mat.transmission > 0.0f) {
-        if (u3 < mat.transmission) {
-            // Glass path
-            // wo points away from surface (toward camera/eye)
-            // n is the geometric normal (pointing outward from surface)
+    if (mat.transmission > 0.0f && u3 < mat.transmission) {
+        // Glass path - dielectric GGX microfacet model
+        bool frontFace = Vec3::dot(wo, n) > 0.0f;
+        Vec3 faceNormal = frontFace ? n : n * -1.0f;
+        float eta = frontFace ? (1.0f / mat.ior) : mat.ior;
+        
+        // Sample microfacet normal using VNDF
+        Vec3 t, b;
+        buildOrthonormalBasis(faceNormal, t, b);
+        Vec3 h = sampleGGXVNDF(wo, roughness, u1, u2, faceNormal, t, b);
+        
+        float cosThetaI = std::abs(Vec3::dot(wo, h));
+        float F = fresnelDielectric(cosThetaI, eta);
+        
+        Vec3 incident = wo * -1.0f;
+        
+        if (randf() < F) {
+            // Fresnel reflection - sampled with probability F
+            sample.wi = reflect(incident, h);
             
-            // Check if we're on the front face (outside) or back face (inside)
-            bool frontFace = Vec3::dot(wo, n) > 0.0f;
+            float NdotL = Vec3::dot(faceNormal, sample.wi);
+            float NdotV = Vec3::dot(faceNormal, wo);
+            if (NdotL <= 0.0f || NdotV <= 0.0f) {
+                sample.pdf = 0.0f;
+                sample.f = Vec3(0, 0, 0);
+                return sample;
+            }
             
-            // outward_normal always points to the "outside" of the object
-            Vec3 outward_normal = frontFace ? n : n * -1.0f;
+            // VNDF sampling: weight = G2/G1 (F is importance sampled)
+            float G2 = ggxG2(NdotL, NdotV, roughness);
+            float G1 = ggxG1(NdotV, roughness);
+            float w = G2 / (G1 + EPSILON);
             
-            // eta = n_incident / n_transmitted
-            // frontFace (entering glass): air(1) -> glass(ior), eta = 1/ior
-            // backFace (exiting glass): glass(ior) -> air(1), eta = ior
-            float eta = frontFace ? (1.0f / mat.ior) : mat.ior;
+            // Use direct weight to avoid numerical issues
+            sample.useWeight = true;
+            sample.weight = Vec3(w, w, w);
+            sample.pdf = 1.0f;  // Dummy, not used when useWeight=true
             
-            // incident direction points INTO the surface
-            Vec3 incident = wo * -1.0f;
-            
-            // cos of incident angle (positive value)
-            float cosThetaI = std::abs(Vec3::dot(incident, outward_normal));
-            float F = fresnelDielectric(cosThetaI, eta);
-            
-            if (u1 < F) {
-                // Reflect
-                sample.wi = reflect(incident, outward_normal);
-                sample.f = Vec3(1, 1, 1);
-                sample.pdf = F * mat.transmission;
-                sample.isDelta = true;
+            sample.isDelta = false;
+            sample.type = BSDFSample::SPECULAR;
+        } else {
+            // Refraction - sampled with probability (1-F)
+            Vec3 refracted = refract(incident, h, eta);
+            if (refracted.length() < 0.5f) {
+                // Total internal reflection
+                sample.wi = reflect(incident, h);
+                float NdotL = Vec3::dot(faceNormal, sample.wi);
+                float NdotV = Vec3::dot(faceNormal, wo);
+                if (NdotL <= 0.0f || NdotV <= 0.0f) {
+                    sample.pdf = 0.0f;
+                    sample.f = Vec3(0, 0, 0);
+                    return sample;
+                }
+                
+                float G2 = ggxG2(NdotL, NdotV, roughness);
+                float G1 = ggxG1(NdotV, roughness);
+                float w = G2 / (G1 + EPSILON);
+                
+                sample.useWeight = true;
+                sample.weight = Vec3(w, w, w);
+                sample.pdf = 1.0f;
+                
+                sample.isDelta = false;
                 sample.type = BSDFSample::SPECULAR;
             } else {
-                // Refract
-                Vec3 refracted = refract(incident, outward_normal, eta);
-                if (refracted.length() > 0.5f) {
-                    sample.wi = refracted;
-                    sample.f = Vec3(1, 1, 1);
-                    sample.pdf = (1.0f - F) * mat.transmission;
-                    sample.isDelta = true;
-                    sample.type = BSDFSample::TRANSMISSION;
-                } else {
-                    // Total internal reflection
-                    sample.wi = reflect(incident, outward_normal);
-                    sample.f = Vec3(1, 1, 1);
-                    sample.pdf = mat.transmission;
-                    sample.isDelta = true;
-                    sample.type = BSDFSample::SPECULAR;
-                }
+                sample.wi = refracted;
+                
+                float NdotL = std::abs(Vec3::dot(sample.wi, faceNormal));
+                float NdotV = std::abs(Vec3::dot(wo, faceNormal));
+                
+                // For transmission, weight = G2/G1
+                float G2 = ggxG2(NdotL, NdotV, roughness);
+                float G1 = ggxG1(NdotV, roughness);
+                float w = G2 / (G1 + EPSILON);
+                
+                sample.useWeight = true;
+                sample.weight = Vec3(w, w, w);
+                sample.pdf = 1.0f;
+                
+                sample.isDelta = false;
+                sample.type = BSDFSample::TRANSMISSION;
             }
-            return sample;
         }
-        // Else continue with opaque BSDF (scaled by 1 - transmission)
+        return sample;
     }
     
-    // Decide between diffuse and specular sampling based on roughness and metallic
-    // Probability of specular sampling increases with metallic and decreases with roughness
-    float specProb = 0.5f * (1.0f + mat.metallic) * (1.0f - mat.roughness * 0.5f);
-    specProb = clampf(specProb, 0.25f, 0.75f);
+    // Opaque material: diffuse + specular
+    // For metals (metallic=1), use pure specular sampling since there's no diffuse
+    // For dielectrics, mix based on roughness (smooth = more specular sampling)
+    float specProb;
+    if (mat.metallic > 0.99f) {
+        // Pure metal - no diffuse component, use pure specular sampling
+        specProb = 1.0f;
+    } else {
+        // Mix sampling: higher metallic and lower roughness = more specular
+        specProb = 0.5f * (1.0f + mat.metallic) * (1.0f - mat.roughness * 0.5f);
+        specProb = clampf(specProb, 0.1f, 0.9f);
+    }
     
     Vec3 t, b;
     buildOrthonormalBasis(n, t, b);
+    float NdotV = std::max(Vec3::dot(n, wo), EPSILON);
     
-    if (u3 >= mat.transmission && u1 < specProb) {
+    if (u1 < specProb) {
         // Specular sampling using GGX VNDF
-        float roughness = std::max(mat.roughness, 0.04f);
-        
         Vec3 h = sampleGGXVNDF(wo, roughness, u1 / specProb, u2, n, t, b);
         sample.wi = reflect(wo * -1.0f, h);
         
@@ -408,20 +472,20 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const Vec3& wo, const Ve
             return sample;
         }
         
-        // Evaluate full BSDF
+        // Standard approach: evaluate full BSDF and combined PDF
+        // weight = f * cos / pdf
         sample.f = evalBSDF(mat, wo, sample.wi, n);
-        
-        // PDF is GGX VNDF pdf * specProb + diffuse pdf * (1 - specProb)
         float pdfSpec = pdfGGXVNDF(wo, h, roughness, n);
         float pdfDiff = pdfCosineHemisphere(NdotL);
-        sample.pdf = specProb * pdfSpec + (1.0f - specProb) * pdfDiff;
-        sample.pdf *= (1.0f - mat.transmission);
+        sample.pdf = (specProb * pdfSpec + (1.0f - specProb) * pdfDiff) * (1.0f - mat.transmission);
+        
+        sample.useWeight = false;
         sample.isDelta = false;
         sample.type = BSDFSample::SPECULAR;
     } else {
-        // Diffuse sampling using cosine hemisphere
-        float u1Adjusted = (u1 - specProb) / (1.0f - specProb);
-        sample.wi = sampleCosineHemisphere(u1Adjusted, u2, n);
+        // Diffuse sampling
+        float u1Adj = (u1 - specProb) / (1.0f - specProb);
+        sample.wi = sampleCosineHemisphere(u1Adj, u2, n);
         
         float NdotL = Vec3::dot(n, sample.wi);
         if (NdotL <= 0.0f) {
@@ -430,17 +494,15 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const Vec3& wo, const Ve
             return sample;
         }
         
-        // Evaluate full BSDF
+        // Standard approach: evaluate full BSDF and combined PDF
         sample.f = evalBSDF(mat, wo, sample.wi, n);
-        
-        // Combined PDF
-        float roughness = std::max(mat.roughness, 0.04f);
         Vec3 h = wo + sample.wi;
         h.normalize();
         float pdfSpec = pdfGGXVNDF(wo, h, roughness, n);
         float pdfDiff = pdfCosineHemisphere(NdotL);
-        sample.pdf = specProb * pdfSpec + (1.0f - specProb) * pdfDiff;
-        sample.pdf *= (1.0f - mat.transmission);
+        sample.pdf = (specProb * pdfSpec + (1.0f - specProb) * pdfDiff) * (1.0f - mat.transmission);
+        
+        sample.useWeight = false;
         sample.isDelta = false;
         sample.type = BSDFSample::DIFFUSE;
     }
@@ -449,15 +511,21 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const Vec3& wo, const Ve
 }
 
 // Get PDF for a given direction
+// All BSDFs are continuous (no delta distributions) thanks to MIN_ROUGHNESS
 inline float pdfBSDF(const MaterialParams& mat, const Vec3& wo, const Vec3& wi, const Vec3& n) {
     float NdotL = Vec3::dot(n, wi);
     if (NdotL <= 0.0f) return 0.0f;
     
     // Same probability distribution as sampling
-    float specProb = 0.5f * (1.0f + mat.metallic) * (1.0f - mat.roughness * 0.5f);
-    specProb = clampf(specProb, 0.25f, 0.75f);
+    float specProb;
+    if (mat.metallic > 0.99f) {
+        specProb = 1.0f;
+    } else {
+        specProb = 0.5f * (1.0f + mat.metallic) * (1.0f - mat.roughness * 0.5f);
+        specProb = clampf(specProb, 0.1f, 0.9f);
+    }
     
-    float roughness = std::max(mat.roughness, 0.04f);
+    float roughness = std::max(mat.roughness, MIN_ROUGHNESS);
     Vec3 h = wo + wi;
     h.normalize();
     
@@ -627,10 +695,10 @@ struct SceneLights {
     }
     
     // Select a light based on area-weighted probability
-    // Returns index and adjusts pdf accordingly
-    int selectLight(float u, float& pdf) const {
+    // Returns index and selection probability
+    int selectLight(float u, float& selectionProb) const {
         if (lights.empty()) {
-            pdf = 0.0f;
+            selectionProb = 0.0f;
             return -1;
         }
         
@@ -639,31 +707,37 @@ struct SceneLights {
         int idx = (int)(it - cdf.begin());
         idx = std::min(idx, (int)lights.size() - 1);
         
-        // PDF is proportional to area
-        pdf = lights[idx].area / totalArea;
+        // Selection probability is proportional to area
+        selectionProb = lights[idx].area / totalArea;
         
         return idx;
+    }
+    
+    // Get the total PDF for sampling a specific point on any light
+    // This accounts for the probability of selecting that light
+    float getPdfForLight(int lightIdx) const {
+        if (lightIdx < 0 || lightIdx >= (int)lights.size()) return 0.0f;
+        return lights[lightIdx].area / totalArea;
     }
     
     bool hasLights() const { return !lights.empty(); }
 };
 
-// ========== Path Tracing with MIS ==========
+// ========== Path Tracing Implementations ==========
 
-// Trace a path with Multiple Importance Sampling
-// Combines BSDF sampling (indirect) with Next Event Estimation (direct light sampling)
-inline Vec3 traceMIS(const Scene& scene, const SceneLights& sceneLights, 
-                     const Ray& ray, int maxDepth) {
+// ==========================================================
+// 1. Simple Path Tracing (BSDF sampling only, no NEE)
+// ==========================================================
+// This is the most basic path tracer - just samples BSDF and accumulates emission
+inline Vec3 traceSimple(const Scene& scene, const Ray& ray, int maxDepth) {
     Vec3 result(0, 0, 0);
     Vec3 throughput(1, 1, 1);
     Ray currentRay = ray;
-    bool specularBounce = true;  // First hit can see lights directly
     
     for (int depth = 0; depth < maxDepth; ++depth) {
         Hit hit = intersectScene(scene, currentRay, true);
         
         if (!hit.hit) {
-            // Ray escaped - add environment
             result = result + throughput * getEnvironmentColor(currentRay);
             break;
         }
@@ -684,81 +758,195 @@ inline Vec3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
             mat.ior = getIORFromNodeTree(hit.material.nodeTree);
         }
         
+        // Enforce minimum roughness to avoid delta distributions
+        mat.roughness = std::max(mat.roughness, MIN_ROUGHNESS);
+        
         // Get emission
         Vec3 emission = hit.material.emission;
         if (hit.material.useNodes && hit.material.nodeTree.valid) {
             emission = getEmissionFromNodeTree(hit.material.nodeTree);
         }
         
-        // Orient normal to face the ray (for non-glass materials)
+        // Add emission (always, no MIS)
+        result = result + throughput * emission;
+        
+        // Setup normals
         Vec3 n = hit.normal;
         Vec3 wo = currentRay.d * -1.0f;
         wo.normalize();
         bool frontFace = Vec3::dot(wo, n) > 0;
         
-        // For glass, we need the original geometric normal for inside/outside detection
-        // For opaque materials, flip normal to face the ray
         Vec3 shadingNormal = n;
         if (mat.transmission < 0.5f && !frontFace) {
             shadingNormal = n * -1.0f;
         }
         
-        // Add emission with MIS weight
-        // On first hit or after specular bounce: full emission (no NEE was done)
-        // After non-specular bounce: apply MIS weight
-        float emissionWeight = 1.0f;
-        if (!specularBounce && sceneLights.hasLights() && depth > 0) {
-            // We hit a light via BSDF sampling - need MIS weight
-            // Find which light we hit (if any)
-            float emissionStrength = emission.x + emission.y + emission.z;
-            if (emissionStrength > EPSILON) {
-                // Approximate: use a representative light PDF
-                // For proper MIS, we'd need to find the exact triangle
-                // For now, treat as if we sampled this point uniformly from scene lights
-                // This is approximate but avoids fireflies
-                emissionWeight = 0.5f;  // Rough balance between BSDF and light sampling
+        // Sample BSDF for next direction
+        Vec3 sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
+        BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
+        
+        if (bsdfSample.pdf < EPSILON && !bsdfSample.useWeight) {
+            break;
+        }
+        
+        // Update throughput
+        if (bsdfSample.useWeight) {
+            // Direct weight (for glass etc.) - already computed as f*|NdotL|/pdf
+            throughput = Vec3(
+                throughput.x * bsdfSample.weight.x,
+                throughput.y * bsdfSample.weight.y,
+                throughput.z * bsdfSample.weight.z
+            );
+        } else {
+            // Standard: f * |NdotL| / pdf
+            float absNdotL = std::abs(Vec3::dot(sampleNormal, bsdfSample.wi));
+            if (absNdotL > EPSILON && bsdfSample.pdf > EPSILON) {
+                float weightX = bsdfSample.f.x * absNdotL / bsdfSample.pdf;
+                float weightY = bsdfSample.f.y * absNdotL / bsdfSample.pdf;
+                float weightZ = bsdfSample.f.z * absNdotL / bsdfSample.pdf;
+                
+                // Debug: clamp excessive weights
+                const float MAX_WEIGHT = 10.0f;
+                if (weightX > MAX_WEIGHT || weightY > MAX_WEIGHT || weightZ > MAX_WEIGHT) {
+                    // This shouldn't happen with correct VNDF sampling
+                    weightX = std::min(weightX, MAX_WEIGHT);
+                    weightY = std::min(weightY, MAX_WEIGHT);
+                    weightZ = std::min(weightZ, MAX_WEIGHT);
+                }
+                
+                throughput = Vec3(
+                    throughput.x * weightX,
+                    throughput.y * weightY,
+                    throughput.z * weightZ
+                );
+            } else {
+                break;
             }
         }
-        result = result + throughput * emission * emissionWeight;
         
-        // ===== Next Event Estimation (Direct Light Sampling) =====
-        // Only for non-delta materials (skip for glass)
-        if (sceneLights.hasLights() && mat.transmission < 0.5f) {
-            // Select a light
-            float lightSelectPdf;
-            int lightIdx = sceneLights.selectLight(randf(), lightSelectPdf);
+        // Russian Roulette after depth 3
+        if (depth >= 3) {
+            float maxThroughput = std::max({throughput.x, throughput.y, throughput.z});
+            float rrProb = std::min(maxThroughput, 0.95f);
+            if (randf() > rrProb) break;
+            throughput = throughput * (1.0f / rrProb);
+        }
+        
+        // Check for NaN/Inf
+        if (std::isnan(throughput.x) || std::isinf(throughput.x) ||
+            std::isnan(throughput.y) || std::isinf(throughput.y) ||
+            std::isnan(throughput.z) || std::isinf(throughput.z)) {
+            break;
+        }
+        
+        // Setup next ray
+        if (bsdfSample.type == BSDFSample::TRANSMISSION) {
+            currentRay.o = hit.point + bsdfSample.wi * 0.001f;
+        } else {
+            Vec3 offsetNormal = (Vec3::dot(bsdfSample.wi, sampleNormal) > 0) ? sampleNormal : sampleNormal * -1.0f;
+            currentRay.o = hit.point + offsetNormal * 0.001f;
+        }
+        currentRay.d = bsdfSample.wi;
+    }
+    
+    return result;
+}
+
+// ==========================================================
+// 2. NEE-only Path Tracing (Next Event Estimation)
+// ==========================================================
+// Uses light sampling for direct illumination, BSDF sampling for indirect
+// No MIS - just uses NEE for direct, skips emission on BSDF hits (except specular)
+inline Vec3 traceNEE(const Scene& scene, const SceneLights& sceneLights, 
+                     const Ray& ray, int maxDepth) {
+    Vec3 result(0, 0, 0);
+    Vec3 throughput(1, 1, 1);
+    Ray currentRay = ray;
+    
+    for (int depth = 0; depth < maxDepth; ++depth) {
+        Hit hit = intersectScene(scene, currentRay, true);
+        
+        if (!hit.hit) {
+            result = result + throughput * getEnvironmentColor(currentRay);
+            break;
+        }
+        
+        // Get material parameters
+        MaterialParams mat;
+        mat.albedo = hit.material.albedo;
+        mat.metallic = hit.material.metallic;
+        mat.roughness = hit.material.roughness;
+        mat.transmission = hit.material.transmission;
+        mat.ior = hit.material.ior;
+        
+        if (hit.material.useNodes && hit.material.nodeTree.valid) {
+            mat.albedo = getAlbedoFromNodeTree(hit.material.nodeTree);
+            mat.metallic = getMetallicFromNodeTree(hit.material.nodeTree);
+            mat.roughness = getRoughnessFromNodeTree(hit.material.nodeTree);
+            mat.transmission = getTransmissionFromNodeTree(hit.material.nodeTree);
+            mat.ior = getIORFromNodeTree(hit.material.nodeTree);
+        }
+        
+        // Enforce minimum roughness to avoid delta distributions
+        mat.roughness = std::max(mat.roughness, MIN_ROUGHNESS);
+        
+        // Get emission
+        Vec3 emission = hit.material.emission;
+        if (hit.material.useNodes && hit.material.nodeTree.valid) {
+            emission = getEmissionFromNodeTree(hit.material.nodeTree);
+        }
+        
+        // Setup normals
+        Vec3 n = hit.normal;
+        Vec3 wo = currentRay.d * -1.0f;
+        wo.normalize();
+        bool frontFace = Vec3::dot(wo, n) > 0;
+        
+        Vec3 shadingNormal = n;
+        if (mat.transmission < 0.5f && !frontFace) {
+            shadingNormal = n * -1.0f;
+        }
+        
+        // Add emission only on first hit (depth == 0)
+        // NEE handles all other light contributions via direct light sampling
+        float emissionStrength = emission.x + emission.y + emission.z;
+        if (emissionStrength > EPSILON && depth == 0) {
+            result = result + throughput * emission;
+        }
+        
+        // ===== Next Event Estimation =====
+        // Skip for emissive surfaces and transmission materials
+        // (transmission materials need special handling - BSDF sampling only)
+        bool isTransmissive = mat.transmission > 0.5f;
+        if (sceneLights.hasLights() && emissionStrength < EPSILON && !isTransmissive) {
+            float lightSelectProb;
+            int lightIdx = sceneLights.selectLight(randf(), lightSelectProb);
             
-            if (lightIdx >= 0) {
+            if (lightIdx >= 0 && lightSelectProb > EPSILON) {
                 const Light& light = sceneLights.lights[lightIdx];
-                
-                // Sample point on light
                 LightSample ls = sampleLight(light, hit.point, randf(), randf());
                 
                 if (ls.pdf > EPSILON) {
-                    float NdotL = Vec3::dot(shadingNormal, ls.direction);
+                    // Use absolute value of NdotL - surface should be lit from either side
+                    // (handles cases where floor normal points down but light is above)
+                    float NdotL = std::abs(Vec3::dot(shadingNormal, ls.direction));
                     
                     if (NdotL > 0.0f) {
-                        // Shadow test
-                        Ray shadowRay{hit.point + shadingNormal * 0.001f, ls.direction};
+                        // Shadow test - offset in direction of light
+                        Ray shadowRay{hit.point + ls.direction * 0.001f, ls.direction};
                         Hit shadowHit = intersectScene(scene, shadowRay, true);
                         
                         bool inShadow = shadowHit.hit && shadowHit.t < ls.distance - 0.001f;
                         
                         if (!inShadow) {
-                            // Evaluate BSDF
                             Vec3 f = evalBSDF(mat, wo, ls.direction, shadingNormal);
+                            float pdfLight = ls.pdf * lightSelectProb;
                             
-                            // MIS weight: light sampling vs BSDF sampling
-                            float pdfLight = ls.pdf * lightSelectPdf;
-                            float pdfBsdf = pdfBSDF(mat, wo, ls.direction, shadingNormal);
-                            float misWeight = powerHeuristic(pdfLight, pdfBsdf);
-                            
-                            // Add contribution: f * Li * cos(θ) * misWeight / pdfLight
-                            Vec3 directLight = ls.emission;
+                            // No MIS weight - just 1/pdf
                             Vec3 contrib = Vec3(
-                                f.x * directLight.x * NdotL * misWeight / pdfLight,
-                                f.y * directLight.y * NdotL * misWeight / pdfLight,
-                                f.z * directLight.z * NdotL * misWeight / pdfLight
+                                f.x * ls.emission.x * NdotL / pdfLight,
+                                f.y * ls.emission.y * NdotL / pdfLight,
+                                f.z * ls.emission.z * NdotL / pdfLight
                             );
                             result = result + throughput * contrib;
                         }
@@ -767,29 +955,26 @@ inline Vec3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
             }
         }
         
-        // ===== BSDF Sampling (for next bounce) =====
-        // For glass, use original geometric normal (n) for correct inside/outside detection
-        // For opaque materials, use shading normal (shadingNormal)
+        // ===== BSDF Sampling for next bounce =====
         Vec3 sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
         BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
         
-        if (bsdfSample.pdf < EPSILON) {
+        if (bsdfSample.pdf < EPSILON && !bsdfSample.useWeight) {
             break;
         }
         
         // Update throughput
-        // For delta distributions: throughput *= f (pdf is implicit, no cos term needed)
-        // For continuous: throughput *= f * cos(θ) / pdf
-        if (bsdfSample.isDelta) {
-            // Delta BSDF: f gives the throughput directly
+        if (bsdfSample.useWeight) {
+            // Direct weight (for glass etc.) - already computed as f*|NdotL|/pdf
             throughput = Vec3(
-                throughput.x * bsdfSample.f.x,
-                throughput.y * bsdfSample.f.y,
-                throughput.z * bsdfSample.f.z
+                throughput.x * bsdfSample.weight.x,
+                throughput.y * bsdfSample.weight.y,
+                throughput.z * bsdfSample.weight.z
             );
         } else {
-            float NdotL = std::max(Vec3::dot(sampleNormal, bsdfSample.wi), 0.0f);
-            if (NdotL > 0.0f && bsdfSample.pdf > EPSILON) {
+            // Standard: f * |NdotL| / pdf
+            float NdotL = std::abs(Vec3::dot(sampleNormal, bsdfSample.wi));
+            if (NdotL > EPSILON && bsdfSample.pdf > EPSILON) {
                 throughput = Vec3(
                     throughput.x * bsdfSample.f.x * NdotL / bsdfSample.pdf,
                     throughput.y * bsdfSample.f.y * NdotL / bsdfSample.pdf,
@@ -804,9 +989,7 @@ inline Vec3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
         if (depth >= 3) {
             float maxThroughput = std::max({throughput.x, throughput.y, throughput.z});
             float rrProb = std::min(maxThroughput, 0.95f);
-            if (randf() > rrProb) {
-                break;
-            }
+            if (randf() > rrProb) break;
             throughput = throughput * (1.0f / rrProb);
         }
         
@@ -817,18 +1000,197 @@ inline Vec3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
             break;
         }
         
-        // Offset ray origin to avoid self-intersection
+        // Setup next ray
         if (bsdfSample.type == BSDFSample::TRANSMISSION) {
-            // For transmission, offset along the ray direction (into the surface)
             currentRay.o = hit.point + bsdfSample.wi * 0.001f;
         } else {
-            // For reflection/diffuse, offset along the normal (away from surface)
+            Vec3 offsetNormal = (Vec3::dot(bsdfSample.wi, sampleNormal) > 0) ? sampleNormal : sampleNormal * -1.0f;
+            currentRay.o = hit.point + offsetNormal * 0.001f;
+        }
+        currentRay.d = bsdfSample.wi;
+    }
+    
+    return result;
+}
+
+// ==========================================================
+// 3. MIS Path Tracing (Multiple Importance Sampling)
+// ==========================================================
+// Combines BSDF sampling and NEE with proper MIS weights
+// Both paths contribute, weighted by their relative probabilities
+// All BSDFs are continuous (no delta distributions) due to MIN_ROUGHNESS
+inline Vec3 traceMIS(const Scene& scene, const SceneLights& sceneLights, 
+                     const Ray& ray, int maxDepth) {
+    Vec3 result(0, 0, 0);
+    Vec3 throughput(1, 1, 1);
+    Ray currentRay = ray;
+    float lastBsdfPdf = 0.0f;    // PDF of previous BSDF sample (for emission MIS), 0 means first hit
+    
+    for (int depth = 0; depth < maxDepth; ++depth) {
+        Hit hit = intersectScene(scene, currentRay, true);
+        
+        if (!hit.hit) {
+            result = result + throughput * getEnvironmentColor(currentRay);
+            break;
+        }
+        
+        // Get material parameters
+        MaterialParams mat;
+        mat.albedo = hit.material.albedo;
+        mat.metallic = hit.material.metallic;
+        mat.roughness = hit.material.roughness;
+        mat.transmission = hit.material.transmission;
+        mat.ior = hit.material.ior;
+        
+        if (hit.material.useNodes && hit.material.nodeTree.valid) {
+            mat.albedo = getAlbedoFromNodeTree(hit.material.nodeTree);
+            mat.metallic = getMetallicFromNodeTree(hit.material.nodeTree);
+            mat.roughness = getRoughnessFromNodeTree(hit.material.nodeTree);
+            mat.transmission = getTransmissionFromNodeTree(hit.material.nodeTree);
+            mat.ior = getIORFromNodeTree(hit.material.nodeTree);
+        }
+        
+        // Enforce minimum roughness to avoid delta distributions
+        mat.roughness = std::max(mat.roughness, MIN_ROUGHNESS);
+        
+        // Get emission
+        Vec3 emission = hit.material.emission;
+        if (hit.material.useNodes && hit.material.nodeTree.valid) {
+            emission = getEmissionFromNodeTree(hit.material.nodeTree);
+        }
+        
+        // Setup normals
+        Vec3 n = hit.normal;
+        Vec3 wo = currentRay.d * -1.0f;
+        wo.normalize();
+        bool frontFace = Vec3::dot(wo, n) > 0;
+        
+        Vec3 shadingNormal = n;
+        if (mat.transmission < 0.5f && !frontFace) {
+            shadingNormal = n * -1.0f;
+        }
+        
+        // ===== Add emission with MIS weight =====
+        float emissionStrength = emission.x + emission.y + emission.z;
+        if (emissionStrength > EPSILON) {
+            float emissionWeight = 1.0f;
+            
+            // Apply MIS weight for all bounces except first hit
+            // (first hit: no previous BSDF sample, so no MIS needed)
+            if (lastBsdfPdf > EPSILON && sceneLights.hasLights()) {
+                // What would be the PDF if we had sampled this point via NEE?
+                float cosLight = std::abs(Vec3::dot(hit.normal, currentRay.d));
+                if (cosLight > EPSILON) {
+                    // Light PDF in solid angle measure
+                    float lightPdf = (hit.t * hit.t) / (sceneLights.totalArea * cosLight);
+                    emissionWeight = powerHeuristic(lastBsdfPdf, lightPdf);
+                }
+            }
+            result = result + throughput * emission * emissionWeight;
+        }
+        
+        // ===== Next Event Estimation with MIS =====
+        // Skip for emissive surfaces and transmission materials
+        // (transmission materials are handled via BSDF sampling only)
+        bool isEmissive = emissionStrength > EPSILON;
+        bool isTransmissive = mat.transmission > 0.5f;
+        if (sceneLights.hasLights() && !isEmissive && !isTransmissive) {
+            float lightSelectProb;
+            int lightIdx = sceneLights.selectLight(randf(), lightSelectProb);
+            
+            if (lightIdx >= 0 && lightSelectProb > EPSILON) {
+                const Light& light = sceneLights.lights[lightIdx];
+                LightSample ls = sampleLight(light, hit.point, randf(), randf());
+                
+                if (ls.pdf > EPSILON) {
+                    // Use absolute value of NdotL - surface should be lit from either side
+                    float NdotL = std::abs(Vec3::dot(shadingNormal, ls.direction));
+                    
+                    if (NdotL > 0.0f) {
+                        // Shadow test - offset in direction of light
+                        Ray shadowRay{hit.point + ls.direction * 0.001f, ls.direction};
+                        Hit shadowHit = intersectScene(scene, shadowRay, true);
+                        
+                        bool inShadow = shadowHit.hit && shadowHit.t < ls.distance - 0.001f;
+                        
+                        if (!inShadow) {
+                            Vec3 f = evalBSDF(mat, wo, ls.direction, shadingNormal);
+                            
+                            float pdfLight = ls.pdf * lightSelectProb;
+                            float pdfBsdf = pdfBSDF(mat, wo, ls.direction, shadingNormal);
+                            
+                            // MIS weight
+                            float misWeight = powerHeuristic(pdfLight, pdfBsdf);
+                            
+                            Vec3 contrib = Vec3(
+                                f.x * ls.emission.x * NdotL * misWeight / pdfLight,
+                                f.y * ls.emission.y * NdotL * misWeight / pdfLight,
+                                f.z * ls.emission.z * NdotL * misWeight / pdfLight
+                            );
+                            result = result + throughput * contrib;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // ===== BSDF Sampling for next bounce =====
+        Vec3 sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
+        BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
+        
+        if (bsdfSample.pdf < EPSILON && !bsdfSample.useWeight) {
+            break;
+        }
+        
+        // Update throughput
+        if (bsdfSample.useWeight) {
+            // Direct weight (for glass etc.) - already computed as f*|NdotL|/pdf
+            throughput = Vec3(
+                throughput.x * bsdfSample.weight.x,
+                throughput.y * bsdfSample.weight.y,
+                throughput.z * bsdfSample.weight.z
+            );
+        } else {
+            // Standard: f * |NdotL| / pdf
+            float NdotL = std::abs(Vec3::dot(sampleNormal, bsdfSample.wi));
+            if (NdotL > EPSILON && bsdfSample.pdf > EPSILON) {
+                throughput = Vec3(
+                    throughput.x * bsdfSample.f.x * NdotL / bsdfSample.pdf,
+                    throughput.y * bsdfSample.f.y * NdotL / bsdfSample.pdf,
+                    throughput.z * bsdfSample.f.z * NdotL / bsdfSample.pdf
+                );
+            } else {
+                break;
+            }
+        }
+        
+        // Russian Roulette after depth 3
+        if (depth >= 3) {
+            float maxThroughput = std::max({throughput.x, throughput.y, throughput.z});
+            float rrProb = std::min(maxThroughput, 0.95f);
+            if (randf() > rrProb) break;
+            throughput = throughput * (1.0f / rrProb);
+        }
+        
+        // Check for NaN/Inf
+        if (std::isnan(throughput.x) || std::isinf(throughput.x) ||
+            std::isnan(throughput.y) || std::isinf(throughput.y) ||
+            std::isnan(throughput.z) || std::isinf(throughput.z)) {
+            break;
+        }
+        
+        // Setup next ray
+        if (bsdfSample.type == BSDFSample::TRANSMISSION) {
+            currentRay.o = hit.point + bsdfSample.wi * 0.001f;
+        } else {
             Vec3 offsetNormal = (Vec3::dot(bsdfSample.wi, sampleNormal) > 0) ? sampleNormal : sampleNormal * -1.0f;
             currentRay.o = hit.point + offsetNormal * 0.001f;
         }
         currentRay.d = bsdfSample.wi;
         
-        specularBounce = bsdfSample.isDelta;
+        // Store BSDF PDF for next emission's MIS weight calculation
+        // For transmission (useWeight=true), set to 0 to disable MIS (pdf is not meaningful)
+        lastBsdfPdf = bsdfSample.useWeight ? 0.0f : bsdfSample.pdf;
     }
     
     return result;
