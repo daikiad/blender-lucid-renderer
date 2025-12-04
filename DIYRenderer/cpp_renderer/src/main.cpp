@@ -1,4 +1,5 @@
 #include "renderer.hpp"
+#include "pbr.hpp"
 #include "json.hpp"
 
 #include <thread>
@@ -416,6 +417,11 @@ int main(int argc, char** argv){
     // Each pixel stores RGBA (4 floats)
     std::vector<float> pixelBuffer(totalPixels * 4);
     
+    // Build scene lights for MIS
+    SceneLights sceneLights;
+    sceneLights.buildFromScene(scene);
+    std::cerr << "[diyrt] Found " << sceneLights.lights.size() << " light triangles, total area=" << sceneLights.totalArea << "\n";
+    
     // Report thread count
     #ifdef _OPENMP
     int numThreads = omp_get_max_threads();
@@ -465,7 +471,7 @@ int main(int argc, char** argv){
                 // Debug mode: show emission
                 color = traceEmission(scene, ray, !disableAABB);
             } else {
-                // Raytrace mode: full path tracing with samples
+                // Raytrace mode: full path tracing with MIS
                 // Output is SUM of all samples (not averaged)
                 // Python side will accumulate and divide by total samples
                 for(int s = 0; s < samples; ++s){
@@ -484,7 +490,8 @@ int main(int argc, char** argv){
                         jitteredDir.normalize();
                         sampleRay.d = jitteredDir;
                     }
-                    color = color + trace(scene, sampleRay, maxDepth, !disableAABB);
+                    // Use new PBR path tracing with MIS
+                    color = color + traceMIS(scene, sceneLights, sampleRay, maxDepth);
                 }
                 // NOTE: Do NOT divide by samples here!
                 // Output is raw sum. Python accumulates sums and divides by total at display time.
