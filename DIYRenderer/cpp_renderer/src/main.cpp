@@ -333,6 +333,7 @@ int main(int argc, char** argv){
     std::string mode = "raytrace";  // Render mode: raytrace/normal/albedo/emission
     int samples = 1;                 // Samples per pixel
     int maxDepth = 8;                // Max ray bounce depth (increased from 3 for better quality)
+    int sampleOffset = 0;            // Sample offset for progressive rendering
     
     // ===== Parse Command-Line Arguments =====
     for(int i=1;i<argc;i++){
@@ -348,12 +349,13 @@ int main(int argc, char** argv){
         else if(a=="--mode"){ need("--mode"); mode = argv[++i]; }         // Debug or render mode
         else if(a=="--samples"){ need("--samples"); samples = std::atoi(argv[++i]); }  // Samples per pixel
         else if(a=="--depth"){ need("--depth"); maxDepth = std::atoi(argv[++i]); }     // Ray bounce limit
+        else if(a=="--sample-offset"){ need("--sample-offset"); sampleOffset = std::atoi(argv[++i]); }  // For progressive rendering
         else if(a=="--debug"){ debugFlag = true; }
         else if(a=="--disable-aabb"){ disableAABB = true; }
     }
     
     std::srand(42);  // Legacy seed (kept for compatibility)
-    seed_random(42); // Fast xorshift seed for reproducible renders
+    // Note: Per-pixel seeding is done inside the render loop
     
     // ===== Load Scene =====
     Scene scene;
@@ -439,11 +441,6 @@ int main(int argc, char** argv){
             Ray ray{cam.pos, worldDir};
             Vec3 color{0,0,0};
             
-            // Seed RNG per-pixel for consistent results across different sample counts
-            // This ensures that increasing samples adds new samples rather than changing existing ones
-            uint32_t pixelSeed = (uint32_t)(y * fullW + x) * 2654435761u + 42u;  // Knuth multiplicative hash
-            seed_random(pixelSeed);
-            
             if(mode == "debug" || mode == "normal"){
                 // Debug mode: show normals
                 Vec3 n = traceNormal(scene, ray, !disableAABB);
@@ -472,6 +469,12 @@ int main(int argc, char** argv){
                 // Output is SUM of all samples (not averaged)
                 // Python side will accumulate and divide by total samples
                 for(int s = 0; s < samples; ++s){
+                    // Seed RNG per-pixel AND per-sample for unique random sequences
+                    // sampleOffset allows different runs (accumulated samples) to continue uniquely
+                    uint32_t pixelSeed = (uint32_t)(y * fullW + x);
+                    uint32_t sampleSeed = (uint32_t)(sampleOffset + s);
+                    seed_random(pixelSeed, sampleSeed);
+                    
                     Ray sampleRay = ray;
                     // Add slight jitter for anti-aliasing if samples > 1
                     if(samples > 1){

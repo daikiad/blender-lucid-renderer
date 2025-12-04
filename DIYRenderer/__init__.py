@@ -897,7 +897,7 @@ def compute_camera_params(scene, width, height):
         'fov': fov_deg
     }
 
-def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, full_h, cam_params, mode='raytrace', samples=1, depth=8, debug_mode=None, cancel_check=None):
+def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, full_h, cam_params, mode='raytrace', samples=1, depth=8, debug_mode=None, cancel_check=None, sample_offset=0):
     """
     Call external C++ renderer with cancellation support.
     
@@ -920,6 +920,8 @@ def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, f
         cancel_check: Optional callable that returns True to cancel rendering
             This allows the render to be interrupted by checking Blender's
             test_break() or other cancellation flags.
+        sample_offset: Offset for sample numbering in progressive rendering
+            This ensures each progressive pass uses unique random seeds.
     
     Returns:
         list: Pixel data as [[r,g,b,a], ...] in linear color space, Y-flipped
@@ -951,8 +953,9 @@ def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, f
            '--fov', str(cam_params['fov']),
            '--samples', str(samples),
            '--depth', str(depth),
+           '--sample-offset', str(sample_offset),
            '--mode', render_mode]
-    print(f"[DIYRenderer] Calling external renderer (mode={render_mode}, samples={samples}, depth={depth}): {' '.join(cmd)}")
+    print(f"[DIYRenderer] Calling external renderer (mode={render_mode}, samples={samples}, depth={depth}, sample_offset={sample_offset}): {' '.join(cmd)}")
     
     try:
         import time
@@ -1225,12 +1228,14 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             
             # Render this iteration by calling external C++ renderer
             # Pass cancel_check callback so subprocess can be terminated immediately
+            # sample_offset ensures each progressive pass uses unique random seeds
             iteration_pixels = call_external_renderer(
                 scene_file, 0, 0, width, height, width, height, cam_params, 
                 samples=iteration_samples,
                 depth=max_bounces,
                 debug_mode=debug_mode,
-                cancel_check=check_cancel  # Enable immediate cancellation
+                cancel_check=check_cancel,  # Enable immediate cancellation
+                sample_offset=total_samples  # Unique seeds for progressive rendering
             )
             
             # Check if cancelled during render
@@ -1347,6 +1352,12 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 debug_mode = diy.debug_mode if diy.debug_mode != 'NONE' else None
                 max_bounces = diy.max_bounces
                 
+                # Get current accumulated sample count for this tile
+                tile_key = (0, 0, render_width, render_height)
+                current_sample_offset = 0
+                if tile_key in self.accumulated_samples:
+                    current_sample_offset = self.accumulated_samples[tile_key][1]
+                
                 # Define cancel check for this render
                 def should_cancel():
                     return self.current_render_cancelled or self.stop_thread
@@ -1358,7 +1369,8 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                     samples=samples_per_iteration,
                     depth=max_bounces,
                     debug_mode=debug_mode,
-                    cancel_check=should_cancel  # Enable cancellation
+                    cancel_check=should_cancel,  # Enable cancellation
+                    sample_offset=current_sample_offset  # Unique seeds for progressive rendering
                 )
                 
                 # Clean up temp file

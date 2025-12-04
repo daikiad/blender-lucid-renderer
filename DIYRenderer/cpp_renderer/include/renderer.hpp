@@ -67,32 +67,49 @@ struct Vec3 {
  * Much faster than std::rand() with better statistical properties.
  */
 
-// Thread-local xorshift state for fast random number generation
-// Each thread gets its own state to avoid contention
-inline uint32_t& xorshift_state() {
-    static thread_local uint32_t state = 2463534242u;  // Non-zero seed
-    return state;
+// Thread-local PCG state for high-quality random number generation
+// PCG (Permuted Congruential Generator) has excellent statistical properties
+struct PCGState {
+    uint64_t state;
+    uint64_t inc;
+};
+
+inline PCGState& pcg_state() {
+    static thread_local PCGState s = {0x853c49e6748fea9bULL, 0xda3e39cb94b95bdbULL};
+    return s;
 }
 
-// Seed the random number generator (call once at startup with varied seed)
+// Seed the PCG random number generator
+// Combines pixel position and sample number for unique sequences
+inline void seed_random(uint32_t seed1, uint32_t seed2 = 0) {
+    PCGState &s = pcg_state();
+    s.state = 0;
+    s.inc = ((uint64_t)seed1 << 1u) | 1u;  // Must be odd
+    // Warm up
+    s.state = s.state * 6364136223846793005ULL + s.inc;
+    s.state += seed2;
+    s.state = s.state * 6364136223846793005ULL + s.inc;
+}
+
+// Legacy single-seed version for compatibility
 inline void seed_random(uint32_t seed) {
-    if(seed == 0) seed = 1;  // State must never be zero
-    xorshift_state() = seed;
+    seed_random(seed, 0);
 }
 
-// Fast xorshift32 random number generator
-// Period: 2^32-1, passes most statistical tests
-inline uint32_t xorshift32() {
-    uint32_t &state = xorshift_state();
-    state ^= state << 13;
-    state ^= state >> 17;
-    state ^= state << 5;
-    return state;
+// PCG32 random number generator
+// Excellent statistical properties, passes all BigCrush tests
+inline uint32_t pcg32() {
+    PCGState &s = pcg_state();
+    uint64_t oldstate = s.state;
+    s.state = oldstate * 6364136223846793005ULL + s.inc;
+    uint32_t xorshifted = (uint32_t)(((oldstate >> 18u) ^ oldstate) >> 27u);
+    uint32_t rot = (uint32_t)(oldstate >> 59u);
+    return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
 }
 
 // Generate random float between 0 and 1
 inline float randf() { 
-    return (float)xorshift32() / (float)0xFFFFFFFFu;
+    return (float)pcg32() / (float)0xFFFFFFFFu;
 }
 
 // Generate random point inside unit sphere (rejection sampling)
