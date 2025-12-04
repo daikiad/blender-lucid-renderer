@@ -415,3 +415,79 @@ float getIORFromNodeTree(const NodeTree &tree) {
     
     return 1.45f;  // Default glass IOR
 }
+
+/**
+ * getMetallicFromNodeTree: Extract metallic value from node graph
+ * 
+ * @param tree The material node tree to evaluate
+ * @return Metallic value (0.0 = dielectric, 1.0 = metal)
+ */
+float getMetallicFromNodeTree(const NodeTree &tree) {
+    if(!tree.valid) {
+        return 0.0f;  // Default dielectric
+    }
+    
+    // Find Material Output node
+    const MaterialNode *outputNode = tree.findOutputNode();
+    if(!outputNode) {
+        return 0.0f;
+    }
+    
+    // Get Surface input
+    const NodeSocket *surfaceSocket = outputNode->findInput("Surface");
+    if(!surfaceSocket || !surfaceSocket->is_linked) {
+        return 0.0f;
+    }
+    
+    // Check if connected to Principled BSDF
+    const MaterialNode *shaderNode = tree.findNode(surfaceSocket->linked_node);
+    if(shaderNode && shaderNode->type == "ShaderNodeBsdfPrincipled") {
+        const NodeSocket *metallicSocket = shaderNode->findInput("Metallic");
+        
+        if(metallicSocket && !metallicSocket->is_linked) {
+            if(metallicSocket->default_value.type == SocketValue::FLOAT) {
+                return metallicSocket->default_value.f;
+            }
+        }
+    }
+    
+    return 0.0f;  // Default dielectric
+}
+
+/**
+ * getRoughnessFromNodeTree: Extract roughness value from node graph
+ * 
+ * @param tree The material node tree to evaluate
+ * @return Roughness value (0.0 = smooth/mirror, 1.0 = rough/diffuse)
+ */
+float getRoughnessFromNodeTree(const NodeTree &tree) {
+    if(!tree.valid) {
+        return 0.5f;  // Default roughness
+    }
+    
+    // Find Material Output node
+    const MaterialNode *outputNode = tree.findOutputNode();
+    if(!outputNode) {
+        return 0.5f;
+    }
+    
+    // Get Surface input
+    const NodeSocket *surfaceSocket = outputNode->findInput("Surface");
+    if(!surfaceSocket || !surfaceSocket->is_linked) {
+        return 0.5f;
+    }
+    
+    // Check if connected to Principled BSDF
+    const MaterialNode *shaderNode = tree.findNode(surfaceSocket->linked_node);
+    if(shaderNode && shaderNode->type == "ShaderNodeBsdfPrincipled") {
+        const NodeSocket *roughnessSocket = shaderNode->findInput("Roughness");
+        
+        if(roughnessSocket && !roughnessSocket->is_linked) {
+            if(roughnessSocket->default_value.type == SocketValue::FLOAT) {
+                return roughnessSocket->default_value.f;
+            }
+        }
+    }
+    
+    return 0.5f;  // Default roughness
+}

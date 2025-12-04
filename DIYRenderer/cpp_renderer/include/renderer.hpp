@@ -613,6 +613,12 @@ float getTransmissionFromNodeTree(const NodeTree &tree);
 // Get Index of Refraction from node tree (default 1.45 for glass)
 float getIORFromNodeTree(const NodeTree &tree);
 
+// Get metallic value from node tree (0.0 = dielectric, 1.0 = metal)
+float getMetallicFromNodeTree(const NodeTree &tree);
+
+// Get roughness value from node tree (0.0 = mirror, 1.0 = diffuse)
+float getRoughnessFromNodeTree(const NodeTree &tree);
+
 // ========== Debug Rendering Functions ==========
 
 // Debug mode: return normal as color
@@ -700,6 +706,8 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
     Vec3 emission = hit.material.emission;
     float transmission = hit.material.transmission;
     float ior = hit.material.ior;
+    float metallic = hit.material.metallic;
+    float roughness = hit.material.roughness;
     
     if(hit.material.useNodes && hit.material.nodeTree.valid) {
         // Use node-based material evaluation
@@ -707,6 +715,8 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
         emission = getEmissionFromNodeTree(hit.material.nodeTree);
         transmission = getTransmissionFromNodeTree(hit.material.nodeTree);
         ior = getIORFromNodeTree(hit.material.nodeTree);
+        metallic = getMetallicFromNodeTree(hit.material.nodeTree);
+        roughness = getRoughnessFromNodeTree(hit.material.nodeTree);
     }
     
     // Debug: print glass material info (only first few times)
@@ -823,6 +833,51 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
             scattered.d = direction;
             attenuation = Vec3(1.0f, 1.0f, 1.0f);  // Pure glass doesn't absorb light
             // For colored glass, use: attenuation = albedo;
+        }
+    } else if(metallic > 0.0f) {
+        // Metallic material handling
+        // Metals reflect light with color tint from albedo
+        
+        // For metallic, we need the normal to face the ray (flip if backface)
+        Vec3 normal = hit.normal;
+        if(Vec3::dot(ray.d, normal) > 0) {
+            normal = normal * -1.0f;
+        }
+        
+        Vec3 unit_direction = ray.d;
+        unit_direction.normalize();
+        
+        // Perfect mirror reflection
+        Vec3 reflected = reflect(unit_direction, normal);
+        
+        // Add roughness: blend between mirror reflection and random scatter
+        // roughness = 0: perfect mirror
+        // roughness = 1: fully diffuse (but still tinted by albedo for metals)
+        if(roughness > 0.001f) {
+            // Add random perturbation based on roughness
+            Vec3 random_scatter = randomUnitVector() * roughness;
+            reflected = reflected + random_scatter;
+            reflected.normalize();
+            // Make sure reflected ray doesn't go below surface
+            if(Vec3::dot(reflected, normal) < 0) {
+                reflected = reflect(unit_direction, normal);  // Fallback to perfect reflection
+            }
+        }
+        
+        scattered.o = hit.point + normal * 0.001f;
+        scattered.d = reflected;
+        
+        // Metallic surfaces tint reflections with their base color
+        // Mix between metallic reflection and diffuse based on metallic value
+        if(randf() < metallic) {
+            // Metallic path: colored specular reflection
+            attenuation = albedo;
+        } else {
+            // Dielectric path: white specular + diffuse
+            // For partially metallic, fall back to diffuse
+            Vec3 scatterDir = randomCosineDirection(normal);
+            scattered.d = scatterDir;
+            attenuation = albedo;
         }
     } else {
         // Opaque diffuse material
