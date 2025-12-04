@@ -427,9 +427,11 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const Vec3& wo, const Ve
                 float NdotL = std::abs(Vec3::dot(sample.wi, faceNormal));
                 float NdotV = std::abs(Vec3::dot(wo, faceNormal));
                 
-                // For transmission, weight = G2/G1
                 float G2 = ggxG2(NdotL, NdotV, roughness);
                 float G1 = ggxG1(NdotV, roughness);
+                
+                // For transmission with VNDF sampling, weight = G2/G1
+                // This gives correct energy conservation for rough glass
                 float w = G2 / (G1 + EPSILON);
                 
                 sample.useWeight = true;
