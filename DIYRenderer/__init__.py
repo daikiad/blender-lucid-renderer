@@ -559,21 +559,60 @@ def export_scene_to_json(depsgraph):
         
         # Transform vertices to world space
         mw = obj_instance.matrix_world
+        normal_matrix = mw.to_3x3().inverted().transposed()  # Normal transformation matrix
         vertices = []
         for v in mesh.vertices:
             co = mw @ v.co  # Apply world transformation
             vertices.append([co.x, co.y, co.z])
         
+        # Check if any polygon uses smooth shading
+        use_smooth = any(p.use_smooth for p in mesh.polygons)
+        
+        # Get corner normals for smooth shading (Blender 4.1+)
+        corner_normals_data = None
+        if use_smooth:
+            try:
+                # Blender 4.1+ uses corner_normals attribute
+                if hasattr(mesh, 'corner_normals'):
+                    corner_normals_data = [n.vector[:] for n in mesh.corner_normals]
+                else:
+                    # Fallback for older Blender: calc_normals_split + loops
+                    mesh.calc_normals_split()
+                    corner_normals_data = [loop.normal[:] for loop in mesh.loops]
+            except Exception as e:
+                print(f"[DIYRenderer] Warning: Could not get corner normals: {e}")
+                use_smooth = False
+        
         # Triangulate and collect face data
         # Renderer expects triangles only (no quads/ngons)
         triangles = []
+        triangle_normals = []
+        
         for poly in mesh.polygons:
             v_indices = list(poly.vertices)
+            loop_indices = list(poly.loop_indices)
             if len(v_indices) < 3:
                 continue
             # Fan triangulation: split polygon into triangles
             for i in range(1, len(v_indices) - 1):
                 triangles.append([v_indices[0], v_indices[i], v_indices[i+1]])
+                
+                if use_smooth and corner_normals_data:
+                    # Get corner normals and transform to world space
+                    n0_local = corner_normals_data[loop_indices[0]]
+                    n1_local = corner_normals_data[loop_indices[i]]
+                    n2_local = corner_normals_data[loop_indices[i+1]]
+                    
+                    from mathutils import Vector
+                    n0 = (normal_matrix @ Vector(n0_local)).normalized()
+                    n1 = (normal_matrix @ Vector(n1_local)).normalized()
+                    n2 = (normal_matrix @ Vector(n2_local)).normalized()
+                    
+                    triangle_normals.append([
+                        [n0.x, n0.y, n0.z],
+                        [n1.x, n1.y, n1.z],
+                        [n2.x, n2.y, n2.z]
+                    ])
         
         # Extract material properties (now includes full node tree)
         mat_props = get_material_properties(obj)
@@ -663,6 +702,11 @@ def export_scene_to_json(depsgraph):
             "material": material,
             "attributes": attributes
         }
+        
+        # Add smooth shading data if available
+        if use_smooth and triangle_normals:
+            mesh_data["triangle_normals"] = triangle_normals
+            mesh_data["smooth"] = True
         
         scene_data["meshes"].append(mesh_data)
         eval_obj.to_mesh_clear()

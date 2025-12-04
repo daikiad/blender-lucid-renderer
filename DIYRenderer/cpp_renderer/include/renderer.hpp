@@ -353,7 +353,15 @@ struct Material {
 
 struct Ray { Vec3 o; Vec3 d; };
 
-struct Triangle { int i0, i1, i2; Vec3 faceNormal; Vec3 centroid; };
+struct Triangle { 
+    int i0, i1, i2;         // Vertex indices
+    Vec3 faceNormal;        // Face normal (flat shading)
+    Vec3 n0, n1, n2;        // Vertex normals (smooth shading)
+    Vec3 centroid;          // For BVH construction
+    bool smooth;            // Use smooth shading?
+    
+    Triangle() : i0(0), i1(0), i2(0), smooth(false) {}
+};
 
 // ========== BVH (Bounding Volume Hierarchy) ==========
 // Accelerates ray-triangle intersection by organizing triangles
@@ -564,6 +572,21 @@ inline float rayTriangle(const Ray &r, const Vec3 &v0, const Vec3 &v1, const Vec
     return (t > EPS) ? t : -1.0f;  // both sides valid if t > 0
 }
 
+// Ray-Triangle intersection returning barycentric coordinates for smooth shading
+inline float rayTriangleUV(const Ray &r, const Vec3 &v0, const Vec3 &v1, const Vec3 &v2, float &outU, float &outV){
+    const float EPS = 1e-6f;
+    Vec3 e1 = v1 - v0; Vec3 e2 = v2 - v0; Vec3 pvec = Vec3::cross(r.d, e2); float det = Vec3::dot(e1, pvec);
+    if(det > -EPS && det < EPS) return -1.0f;
+    float invDet = 1.0f / det;
+    Vec3 tvec = r.o - v0;
+    float u = Vec3::dot(tvec, pvec) * invDet; if(u < 0.0f || u > 1.0f) return -1.0f;
+    Vec3 qvec = Vec3::cross(tvec, e1);
+    float v = Vec3::dot(r.d, qvec) * invDet; if(v < 0.0f || u + v > 1.0f) return -1.0f;
+    float t = Vec3::dot(e2, qvec) * invDet;
+    if(t > EPS) { outU = u; outV = v; return t; }
+    return -1.0f;
+}
+
 // BVH traversal for a single mesh
 inline void intersectBVH(const Mesh &mesh, const Ray &ray, const Vec3 &invDir, Hit &result) {
     if(mesh.bvh.nodes.empty()) {
@@ -572,12 +595,20 @@ inline void intersectBVH(const Mesh &mesh, const Ray &ray, const Vec3 &invDir, H
             const Vec3 &a = mesh.vertices[tri.i0];
             const Vec3 &b = mesh.vertices[tri.i1];
             const Vec3 &c = mesh.vertices[tri.i2];
-            float t = rayTriangle(ray, a, b, c);
+            float u, v;
+            float t = rayTriangleUV(ray, a, b, c, u, v);
             if(t > 0.0001f && t < result.t) {
                 result.t = t;
                 result.hit = true;
                 result.point = ray.o + ray.d * t;
-                result.normal = tri.faceNormal;
+                // Smooth shading: interpolate vertex normals
+                if(tri.smooth) {
+                    float w = 1.0f - u - v;
+                    result.normal = tri.n0 * w + tri.n1 * u + tri.n2 * v;
+                    result.normal.normalize();
+                } else {
+                    result.normal = tri.faceNormal;
+                }
                 result.material = mesh.material;
             }
         }
@@ -604,12 +635,20 @@ inline void intersectBVH(const Mesh &mesh, const Ray &ray, const Vec3 &invDir, H
                 const Vec3 &a = mesh.vertices[tri.i0];
                 const Vec3 &b = mesh.vertices[tri.i1];
                 const Vec3 &c = mesh.vertices[tri.i2];
-                float t = rayTriangle(ray, a, b, c);
+                float u, v;
+                float t = rayTriangleUV(ray, a, b, c, u, v);
                 if(t > 0.0001f && t < result.t) {
                     result.t = t;
                     result.hit = true;
                     result.point = ray.o + ray.d * t;
-                    result.normal = tri.faceNormal;
+                    // Smooth shading: interpolate vertex normals
+                    if(tri.smooth) {
+                        float w = 1.0f - u - v;
+                        result.normal = tri.n0 * w + tri.n1 * u + tri.n2 * v;
+                        result.normal.normalize();
+                    } else {
+                        result.normal = tri.faceNormal;
+                    }
                     result.material = mesh.material;
                 }
             }

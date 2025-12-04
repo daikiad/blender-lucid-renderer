@@ -215,7 +215,7 @@ Scene loadScene(const std::string &path){
             }
             
             for(int i=0;i<vcount;i++){ std::string vt; in >> vt; if(vt != "v"){ std::cerr << "Expected v" << std::endl; return scene; } float x,y,z; in >> x >> y >> z; m.vertices.emplace_back(x,y,z); }
-            for(int i=0;i<tcount;i++){ std::string tt; in >> tt; if(tt != "t"){ std::cerr << "Expected t" << std::endl; return scene; } int a,b,c; in >> a >> b >> c; m.triangles.push_back({a,b,c,{}}); }
+            for(int i=0;i<tcount;i++){ std::string tt; in >> tt; if(tt != "t"){ std::cerr << "Expected t" << std::endl; return scene; } int a,b,c; in >> a >> b >> c; Triangle tri; tri.i0=a; tri.i1=b; tri.i2=c; tri.smooth=false; m.triangles.push_back(tri); }
             finalizeMeshBounds(m); scene.meshes.push_back(std::move(m));
         } else if(tok == "(end)"){
             break;
@@ -253,10 +253,44 @@ Scene loadSceneFromJson(const std::string &path) {
                 m.vertices.emplace_back(v[0], v[1], v[2]);
             }
         }
+        // Per-triangle vertex normals (for smooth shading)
+        std::vector<std::array<Vec3, 3>> triangleNormals;
+        bool hasTriangleNormals = false;
+        if (meshj.contains("triangle_normals")) {
+            hasTriangleNormals = true;
+            for (const auto &tn : meshj["triangle_normals"]) {
+                std::array<Vec3, 3> normals;
+                normals[0] = Vec3(tn[0][0], tn[0][1], tn[0][2]);
+                normals[1] = Vec3(tn[1][0], tn[1][1], tn[1][2]);
+                normals[2] = Vec3(tn[2][0], tn[2][1], tn[2][2]);
+                triangleNormals.push_back(normals);
+            }
+        }
+        
+        // Smooth shading flag
+        bool smoothShading = meshj.contains("smooth") && meshj["smooth"].get<bool>();
+        
         // Triangles
+        int triIndex = 0;
         if (meshj.contains("triangles")) {
             for (const auto &t : meshj["triangles"]) {
-                m.triangles.push_back({t[0], t[1], t[2], {}});
+                Triangle tri;
+                tri.i0 = t[0];
+                tri.i1 = t[1];
+                tri.i2 = t[2];
+                
+                // Per-triangle vertex normals for smooth shading
+                if (hasTriangleNormals && (size_t)triIndex < triangleNormals.size()) {
+                    tri.n0 = triangleNormals[triIndex][0];
+                    tri.n1 = triangleNormals[triIndex][1];
+                    tri.n2 = triangleNormals[triIndex][2];
+                    tri.smooth = smoothShading;
+                } else {
+                    tri.smooth = false;
+                }
+                
+                m.triangles.push_back(tri);
+                triIndex++;
             }
         }
         // Material
