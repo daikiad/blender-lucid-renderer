@@ -927,16 +927,16 @@ inline Vec3 traceNEE(const Scene& scene, const SceneLights& sceneLights,
                 LightSample ls = sampleLight(light, hit.point, randf(), randf());
                 
                 if (ls.pdf > EPSILON) {
-                    // Use absolute value of NdotL - surface should be lit from either side
-                    // (handles cases where floor normal points down but light is above)
-                    float NdotL = std::abs(Vec3::dot(shadingNormal, ls.direction));
+                    // NdotL must be positive (light on same side as normal)
+                    float NdotL = Vec3::dot(shadingNormal, ls.direction);
                     
-                    if (NdotL > 0.0f) {
-                        // Shadow test - offset in direction of light
+                    if (NdotL > EPSILON) {
+                        // Shadow test - offset in light direction to avoid self-intersection
                         Ray shadowRay{hit.point + ls.direction * 0.001f, ls.direction};
                         Hit shadowHit = intersectScene(scene, shadowRay, true);
                         
-                        bool inShadow = shadowHit.hit && shadowHit.t < ls.distance - 0.001f;
+                        // Use larger tolerance to avoid artifacts from light source self-intersection
+                        bool inShadow = shadowHit.hit && shadowHit.t < ls.distance - 0.01f;
                         
                         if (!inShadow) {
                             Vec3 f = evalBSDF(mat, wo, ls.direction, shadingNormal);
@@ -1103,15 +1103,16 @@ inline Vec3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
                 LightSample ls = sampleLight(light, hit.point, randf(), randf());
                 
                 if (ls.pdf > EPSILON) {
-                    // Use absolute value of NdotL - surface should be lit from either side
-                    float NdotL = std::abs(Vec3::dot(shadingNormal, ls.direction));
+                    // NdotL must be positive (light on same side as normal)
+                    float NdotL = Vec3::dot(shadingNormal, ls.direction);
                     
-                    if (NdotL > 0.0f) {
-                        // Shadow test - offset in direction of light
+                    if (NdotL > EPSILON) {
+                        // Shadow test - offset in light direction to avoid self-intersection
                         Ray shadowRay{hit.point + ls.direction * 0.001f, ls.direction};
                         Hit shadowHit = intersectScene(scene, shadowRay, true);
                         
-                        bool inShadow = shadowHit.hit && shadowHit.t < ls.distance - 0.001f;
+                        // Use larger tolerance to avoid artifacts from light source self-intersection
+                        bool inShadow = shadowHit.hit && shadowHit.t < ls.distance - 0.01f;
                         
                         if (!inShadow) {
                             Vec3 f = evalBSDF(mat, wo, ls.direction, shadingNormal);
