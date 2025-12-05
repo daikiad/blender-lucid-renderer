@@ -370,6 +370,8 @@ int main(int argc, char** argv){
     int samples = 1;                 // Samples per pixel
     int maxDepth = 8;                // Max ray bounce depth (increased from 3 for better quality)
     int sampleOffset = 0;            // Sample offset for progressive rendering
+    int passId = -1;                 // Interleaved pass ID (-1 = render all pixels)
+    int numPasses = 16;              // Total number of passes (e.g., 16 for 4x4 grid)
     
     // ===== Parse Command-Line Arguments =====
     for(int i=1;i<argc;i++){
@@ -387,6 +389,8 @@ int main(int argc, char** argv){
         else if(a=="--samples"){ need("--samples"); samples = std::atoi(argv[++i]); }  // Samples per pixel
         else if(a=="--depth"){ need("--depth"); maxDepth = std::atoi(argv[++i]); }     // Ray bounce limit
         else if(a=="--sample-offset"){ need("--sample-offset"); sampleOffset = std::atoi(argv[++i]); }  // For progressive rendering
+        else if(a=="--pass"){ need("--pass"); passId = std::atoi(argv[++i]); }  // Interleaved pass ID
+        else if(a=="--num-passes"){ need("--num-passes"); numPasses = std::atoi(argv[++i]); }  // Total passes
         else if(a=="--debug"){ debugFlag = true; }
         else if(a=="--disable-aabb"){ disableAABB = true; }
     }
@@ -451,20 +455,33 @@ int main(int argc, char** argv){
     
     // Allocate output buffer for parallel rendering
     // Each pixel stores RGBA (4 floats)
-    std::vector<float> pixelBuffer(totalPixels * 4);
+    // Initialize with -1 to mark unrendered pixels (for interleaved mode)
+    std::vector<float> pixelBuffer(totalPixels * 4, -1.0f);
     
     // Build scene lights for MIS
     SceneLights sceneLights;
     sceneLights.buildFromScene(scene);
     std::cerr << "[diyrt] Found " << sceneLights.lights.size() << " light triangles, total area=" << sceneLights.totalArea << "\n";
     
-    // Report thread count
+    // Report thread count and pass info
     #ifdef _OPENMP
     int numThreads = omp_get_max_threads();
     std::cerr << "[diyrt] OpenMP enabled with " << numThreads << " threads\n";
     #else
     std::cerr << "[diyrt] Single-threaded mode\n";
     #endif
+    
+    if (passId >= 0) {
+        std::cerr << "[diyrt] Interleaved pass " << passId << "/" << numPasses << "\n";
+    }
+    
+    // Calculate grid size for interleaved pattern
+    // For numPasses=16, gridSize=4 (4x4 pattern)
+    // For numPasses=4, gridSize=2 (2x2 pattern)
+    int gridSize = (int)std::sqrt((float)numPasses);
+    if (gridSize * gridSize != numPasses) {
+        gridSize = (int)std::ceil(std::sqrt((float)numPasses));
+    }
     
     // Parallel rendering loop
     #pragma omp parallel for schedule(dynamic, 16) collapse(2)
@@ -473,6 +490,21 @@ int main(int argc, char** argv){
             int y = tileY + py;
             int x = tileX + px;
             int pixelIdx = py * tileW + px;
+            
+            // Interleaved rendering: only render pixels belonging to this pass
+            if (passId >= 0) {
+                // Compute which pass this pixel belongs to
+                // Using modulo to create interleaved pattern
+                int pixelPassX = x % gridSize;
+                int pixelPassY = y % gridSize;
+                int pixelPass = pixelPassY * gridSize + pixelPassX;
+                
+                if (pixelPass != passId) {
+                    // Skip this pixel - it belongs to a different pass
+                    // Leave buffer at -1 to indicate unrendered
+                    continue;
+                }
+            }
             
             float ndcX = (2.0f * (x + 0.5f) / fullW - 1.0f) * cam.aspect;
             float ndcY = 1.0f - 2.0f * (y + 0.5f) / fullH;  // Y-axis flip for screen coordinates
@@ -554,15 +586,17 @@ int main(int argc, char** argv){
     }
     
     // Progress report (after parallel section)
-    std::cerr << "[diyrt] Rendering complete, outputting " << totalPixels << " pixels\n";
+    std::cerr << "[diyrt] Rendering complete, outputting " << totalPixels << " pixels (binary, Y-flipped)\n";
     
-    // Output all pixels in order (sequential, but fast since it's just I/O)
-    for(int i = 0; i < totalPixels; ++i) {
-        std::cout << pixelBuffer[i * 4 + 0] << ' ' 
-                  << pixelBuffer[i * 4 + 1] << ' ' 
-                  << pixelBuffer[i * 4 + 2] << ' ' 
-                  << pixelBuffer[i * 4 + 3] << '\n';
+    // Output pixels as binary data (much faster than text)
+    // Format: raw float32 array [r,g,b,a, r,g,b,a, ...]
+    // Output Y-flipped: Blender expects bottom-to-top, we rendered top-to-bottom
+    for(int y = tileH - 1; y >= 0; --y) {
+        int rowStart = y * tileW * 4;
+        std::cout.write(reinterpret_cast<const char*>(&pixelBuffer[rowStart]), 
+                        tileW * 4 * sizeof(float));
     }
+    std::cout.flush();
     
     return 0;
 }

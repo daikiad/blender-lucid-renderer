@@ -795,11 +795,9 @@ class SceneCache:
             self.cached_file and 
             os.path.isfile(self.cached_file) and
             self.scene_hash == current_hash):
-            print(f"[DIYRenderer] Using cached scene file")
             return self.cached_file
         
         # Need to export
-        print(f"[DIYRenderer] Scene changed, exporting...")
         import time
         start = time.time()
         
@@ -814,6 +812,16 @@ class SceneCache:
         self.last_export_time = time.time()
         
         return path
+    
+    def get_cached_file_fast(self):
+        """
+        Get cached file without hash computation.
+        Returns None if no cached file exists.
+        Use this for viewport rendering when scene hasn't changed (only camera moved).
+        """
+        if self.cached_file and os.path.isfile(self.cached_file):
+            return self.cached_file
+        return None
     
     def invalidate(self):
         """Force re-export on next request."""
@@ -955,7 +963,7 @@ def compute_camera_params(scene, width, height):
         'fov': fov_deg
     }
 
-def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, full_h, cam_params, mode='raytrace', samples=1, depth=8, debug_mode=None, cancel_check=None, sample_offset=0, algorithm='nee'):
+def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, full_h, cam_params, mode='raytrace', samples=1, depth=8, debug_mode=None, cancel_check=None, sample_offset=0, algorithm='nee', pass_id=-1, num_passes=16):
     """
     Call external C++ renderer with cancellation support.
     
@@ -981,9 +989,12 @@ def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, f
         sample_offset: Offset for sample numbering in progressive rendering
             This ensures each progressive pass uses unique random seeds.
         algorithm: Sampling algorithm ('simple', 'nee', 'mis')
+        pass_id: Interleaved pass ID (-1 = render all pixels, 0-15 = specific pass)
+        num_passes: Total number of interleaved passes (e.g., 16 for 4x4 grid)
     
     Returns:
         list: Pixel data as [[r,g,b,a], ...] in linear color space, Y-flipped
+              For interleaved mode, unrendered pixels have r=-1
         None: If rendering failed or was cancelled
     
     Color Space Note:
@@ -1015,30 +1026,39 @@ def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, f
            '--sample-offset', str(sample_offset),
            '--algorithm', algorithm,
            '--mode', render_mode]
-    print(f"[DIYRenderer] Calling external renderer (mode={render_mode}, samples={samples}, depth={depth}, algorithm={algorithm}): {' '.join(cmd)}")
+    
+    # Add interleaved pass parameters if specified
+    if pass_id >= 0:
+        cmd.extend(['--pass', str(pass_id), '--num-passes', str(num_passes)])
     
     try:
         import time
         import threading
         
+        timing_start = time.perf_counter()
+        
         # Use Popen for non-blocking execution with cancellation support
-        # CRITICAL: Use bufsize and handle stdout in a separate thread to prevent
-        # pipe buffer from filling up and blocking the C++ renderer
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        # CRITICAL: Use binary mode for stdout (text=False) for binary output
+        # stderr remains text for debug messages
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=-1)
+        
+        timing_after_popen = time.perf_counter()
         
         # Use threads to read stdout/stderr to prevent buffer deadlock
-        # When the C++ renderer outputs many lines (256x256=65536 lines),
-        # the pipe buffer fills up and blocks if we don't read it.
-        stdout_lines = []
+        stdout_data = bytearray()
         stderr_chunks = []
         
         def read_stdout():
-            for line in proc.stdout:
-                stdout_lines.append(line)
+            nonlocal stdout_data
+            while True:
+                chunk = proc.stdout.read(65536)  # Read in 64KB chunks
+                if not chunk:
+                    break
+                stdout_data.extend(chunk)
         
         def read_stderr():
             for line in proc.stderr:
-                stderr_chunks.append(line)
+                stderr_chunks.append(line.decode('utf-8', errors='replace'))
         
         stdout_thread = threading.Thread(target=read_stdout, daemon=True)
         stderr_thread = threading.Thread(target=read_stderr, daemon=True)
@@ -1046,31 +1066,35 @@ def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, f
         stderr_thread.start()
         
         # Poll for completion with cancellation check
+        # Use very short polling interval for responsive cancellation
         while True:
             # Check if process has completed
             retcode = proc.poll()
             if retcode is not None:
                 break
                 
-            # Check for cancellation
+            # Check for cancellation - do this frequently for responsiveness
             if cancel_check and cancel_check():
-                print("[DIYRenderer] Render cancelled, terminating subprocess...")
-                proc.terminate()
+                # Immediately kill the process for fast response
+                proc.kill()  # Use kill() instead of terminate() for immediate stop
                 try:
-                    proc.wait(timeout=2.0)  # Give it 2 seconds to terminate gracefully
+                    proc.wait(timeout=0.1)  # Very short timeout
                 except subprocess.TimeoutExpired:
-                    proc.kill()  # Force kill if not terminated
+                    pass  # Already killed, ignore
                 return None
             
-            # Small sleep to avoid busy-waiting
-            time.sleep(0.05)  # 50ms polling interval
+            # Very short sleep for responsive cancellation
+            time.sleep(0.005)  # 5ms polling interval - fast response to cancel
+        
+        timing_after_render = time.perf_counter()
         
         # Wait for threads to finish reading
         stdout_thread.join(timeout=5.0)
         stderr_thread.join(timeout=5.0)
         
-        # Combine outputs
-        stdout = ''.join(stdout_lines)
+        timing_after_threads = time.perf_counter()
+        
+        # Combine stderr
         stderr = ''.join(stderr_chunks)
         
         if proc.returncode != 0:
@@ -1079,44 +1103,41 @@ def call_external_renderer(scene_file, tile_x, tile_y, tile_w, tile_h, full_w, f
                 print(f"[DIYRenderer] stderr: {stderr[-2000:]}")
             return None
         
-        stderr_len = len(stderr) if stderr else 0
-        print(f"[DIYRenderer] External renderer stderr length: {stderr_len} chars")
-        if stderr:
-            # Show last 5000 chars of stderr (where our debug output should be)
-            print(f"[DIYRenderer] External renderer stderr (last 5000 chars):\n{stderr[-5000:]}")
-        
-        # DEBUG: Check stdout
-        stdout_len = len(stdout) if stdout else 0
-        print(f"[DIYRenderer] External renderer stdout length: {stdout_len} chars")
-        if stdout_len == 0:
-            print(f"[DIYRenderer] ERROR: No stdout from renderer! Command: {' '.join(cmd)}")
+        # Check binary data size
+        expected_pixels = tile_w * tile_h
+        expected_bytes = expected_pixels * 4 * 4  # 4 floats per pixel, 4 bytes per float
+        if len(stdout_data) != expected_bytes:
+            print(f"[DIYRenderer] ERROR: Unexpected binary size: {len(stdout_data)} bytes, expected {expected_bytes}")
+            if stderr:
+                print(f"[DIYRenderer] stderr: {stderr[-1000:]}")
             return None
             
     except Exception as e:
         print('[DIYRenderer] External renderer invocation failed:', e)
         return None
     
-    lines = stdout.strip().splitlines()
-    print(f"[DIYRenderer] Got {len(lines)} lines from renderer (expected {tile_w * tile_h})")
-    if len(lines) != tile_w * tile_h:
-        print('[DIYRenderer] Unexpected line count from external renderer', len(lines), 'expected', tile_w * tile_h)
-        if len(lines) > 0:
-            print(f"[DIYRenderer] First line: {lines[0]}")
-            print(f"[DIYRenderer] Last line: {lines[-1]}")
-        return None
-    pixels = []
-    for ln in lines:
-        try:
-            r,g,b,a = map(float, ln.split())
-            pixels.append([r,g,b,a])
-        except ValueError:
-            pixels.append([1.0,0.0,1.0,1.0])  # error magenta
+    timing_before_parse = time.perf_counter()
     
-    # Flip Y-axis: C++ outputs top-to-bottom, Blender expects bottom-to-top
-    flipped_pixels = []
-    for y in range(tile_h - 1, -1, -1):  # Reverse Y order
-        for x in range(tile_w):
-            flipped_pixels.append(pixels[y * tile_w + x])
+    # Parse binary data: array of float32 [r,g,b,a, r,g,b,a, ...]
+    # C++ already outputs Y-flipped, so we just need to convert bytes to float array
+    import array
+    float_array = array.array('f')
+    float_array.frombytes(stdout_data)
+    
+    # Return as flat list (much faster than list of lists)
+    # Blender's rect accepts flat [r,g,b,a, r,g,b,a, ...] format
+    flipped_pixels = float_array.tolist()
+    
+    timing_end = time.perf_counter()
+    
+    # Print timing breakdown (parse now includes flip since C++ does it)
+    popen_time = (timing_after_popen - timing_start) * 1000
+    render_time = (timing_after_render - timing_after_popen) * 1000
+    thread_time = (timing_after_threads - timing_after_render) * 1000
+    parse_time = (timing_end - timing_before_parse) * 1000
+    total_time = (timing_end - timing_start) * 1000
+    
+    print(f"[DIYRenderer] Timing {tile_w}x{tile_h}: popen={popen_time:.1f}ms, C++={render_time:.1f}ms, threads={thread_time:.1f}ms, parse={parse_time:.1f}ms, TOTAL={total_time:.1f}ms")
     
     # Return linear values without gamma correction
     # Gamma correction will be applied after sample accumulation
@@ -1305,41 +1326,48 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 print("[DIYRenderer] Render cancelled during iteration")
                 break
             
-            if not iteration_pixels or len(iteration_pixels) != width * height:
-                print("[DIYRenderer] Iteration failed, skipping")
+            # iteration_pixels is now flat array [r,g,b,a, r,g,b,a, ...]
+            expected_len = width * height * 4
+            if not iteration_pixels or len(iteration_pixels) != expected_len:
+                print(f"[DIYRenderer] Iteration failed, skipping (got {len(iteration_pixels) if iteration_pixels else 0}, expected {expected_len})")
                 continue
             
             # Accumulate samples: C++ outputs raw SUM of samples (not averaged)
             # We simply add the sums together and divide by total samples for display
             
             # DEBUG: Check center pixel values (more likely to hit geometry)
-            center_idx = (height // 2) * width + (width // 2)
-            if len(iteration_pixels) > center_idx:
-                p0 = iteration_pixels[center_idx]
-                print(f"[DIYRenderer] DEBUG iteration {idx}: samples={iteration_samples}, center_pixel_raw=({p0[0]:.4f}, {p0[1]:.4f}, {p0[2]:.4f})")
+            center_idx = ((height // 2) * width + (width // 2)) * 4
+            if len(iteration_pixels) > center_idx + 2:
+                print(f"[DIYRenderer] DEBUG iteration {idx}: samples={iteration_samples}, center_pixel_raw=({iteration_pixels[center_idx]:.4f}, {iteration_pixels[center_idx+1]:.4f}, {iteration_pixels[center_idx+2]:.4f})")
             
+            import array
             if accumulated_pixels is None:
-                # First iteration - copy the raw sums
-                accumulated_pixels = [[p[0], p[1], p[2], 1.0] for p in iteration_pixels]
+                # First iteration - copy the raw sums as array
+                accumulated_pixels = array.array('f', iteration_pixels)
                 total_samples = iteration_samples
             else:
                 # Subsequent iterations - add raw sums
                 for i in range(len(accumulated_pixels)):
-                    accumulated_pixels[i][0] += iteration_pixels[i][0]
-                    accumulated_pixels[i][1] += iteration_pixels[i][1]
-                    accumulated_pixels[i][2] += iteration_pixels[i][2]
+                    accumulated_pixels[i] += iteration_pixels[i]
                 total_samples += iteration_samples
             
             # DEBUG: Check accumulated values
-            if len(accumulated_pixels) > center_idx:
-                a0 = accumulated_pixels[center_idx]
-                print(f"[DIYRenderer] DEBUG accumulated: total_samples={total_samples}, center_pixel_sum=({a0[0]:.4f}, {a0[1]:.4f}, {a0[2]:.4f})")
-                print(f"[DIYRenderer] DEBUG display value: ({a0[0]/total_samples:.4f}, {a0[1]/total_samples:.4f}, {a0[2]/total_samples:.4f})")
+            if len(accumulated_pixels) > center_idx + 2:
+                print(f"[DIYRenderer] DEBUG accumulated: total_samples={total_samples}, center_pixel_sum=({accumulated_pixels[center_idx]:.4f}, {accumulated_pixels[center_idx+1]:.4f}, {accumulated_pixels[center_idx+2]:.4f})")
+                print(f"[DIYRenderer] DEBUG display value: ({accumulated_pixels[center_idx]/total_samples:.4f}, {accumulated_pixels[center_idx+1]/total_samples:.4f}, {accumulated_pixels[center_idx+2]/total_samples:.4f})")
             
             # Create display pixels by dividing accumulated sums by total samples
+            # For F12 render, rect needs [[r,g,b,a], ...] format (not flat)
+            # Alpha is always 1.0 (don't divide, it would become < 1 incorrectly)
+            inv_samples = 1.0 / total_samples
             display_pixels = []
-            for p in accumulated_pixels:
-                display_pixels.append([p[0] / total_samples, p[1] / total_samples, p[2] / total_samples, 1.0])
+            for i in range(0, len(accumulated_pixels), 4):
+                display_pixels.append([
+                    accumulated_pixels[i] * inv_samples,
+                    accumulated_pixels[i+1] * inv_samples,
+                    accumulated_pixels[i+2] * inv_samples,
+                    1.0  # Alpha always 1.0
+                ])
             
             # Update the render result in Blender's render window
             result = self.begin_result(0, 0, width, height)
@@ -1377,19 +1405,29 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         """
         Background thread function to render viewport without blocking UI.
         
-        This thread runs continuously while jobs are queued, processing each
-        render request in turn. It supports cancellation for quick response
-        when the user moves the camera or changes the scene.
+        Simple progressive rendering:
+        - Moving: Quick low-res render, no accumulation
+        - Idle: 1/2 resolution with progressive sample accumulation
         
         Args:
-            initial_job_data: Tuple of (depsgraph, cam_params, width, height, job_id, samples, tile_key, target_samples)
+            initial_job_data: Tuple of (scene_file, cam_params, width, height, job_id, samples, 
+                              tile_key, target_samples, viewport_bounces, max_bounces, 
+                              debug_mode, algorithm, is_moving)
         """
-        self.viewport_thread_running = True
+        try:
+            self.viewport_thread_running = True
+        except ReferenceError:
+            return  # Engine was deleted, exit immediately
+            
         job_data = initial_job_data
         accumulated_local = 0  # Track how many samples we've rendered
         
-        while not self.stop_thread:
+        while True:
             try:
+                # Check if engine still exists and if we should stop
+                if self.stop_thread:
+                    break
+                    
                 # Check if this job should be cancelled (new job waiting)
                 if self.current_render_cancelled:
                     self.current_render_cancelled = False
@@ -1401,63 +1439,43 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                     except queue.Empty:
                         break  # No more jobs, exit thread
                 
-                depsgraph, cam_params, render_width, render_height, job_id, samples_per_iteration, tile_key, target_samples = job_data
+                # Unpack job data - all Blender data access already done in main thread
+                scene_file, cam_params, render_width, render_height, job_id, samples_per_iteration, tile_key, target_samples, viewport_bounces, max_bounces, debug_mode, algorithm, is_moving = job_data
                 
-                # Export scene (uses cache if unchanged)
-                scene_file = export_scene_to_file(depsgraph)
                 if not scene_file:
                     break
                 
-                # Get debug mode from settings
-                scene = depsgraph.scene
-                diy = scene.diy_renderer
-                debug_mode = diy.debug_mode if diy.debug_mode != 'NONE' else None
-                max_bounces = diy.max_bounces
-                algorithm = diy.sampling_algorithm
-                
                 # Get current accumulated sample count for this tile
-                tile_key = (0, 0, render_width, render_height)
+                render_tile_key = (0, 0, render_width, render_height)
                 current_sample_offset = 0
-                if tile_key in self.accumulated_samples:
-                    current_sample_offset = self.accumulated_samples[tile_key][1]
+                try:
+                    if render_tile_key in self.accumulated_samples:
+                        current_sample_offset = self.accumulated_samples[render_tile_key][1]
+                except ReferenceError:
+                    break  # Engine deleted
                 
                 # Define cancel check for this render
                 def should_cancel():
-                    return self.current_render_cancelled or self.stop_thread
+                    try:
+                        return self.current_render_cancelled or self.stop_thread
+                    except ReferenceError:
+                        return True  # Engine deleted, cancel render
                 
-                # Call external renderer with cancellation support
+                # Simple direct rendering (no interleave)
                 ext_pixels = call_external_renderer(
                     scene_file, 0, 0, render_width, render_height, 
                     render_width, render_height, cam_params, 
                     samples=samples_per_iteration,
                     depth=max_bounces,
                     debug_mode=debug_mode,
-                    cancel_check=should_cancel,  # Enable cancellation
-                    sample_offset=current_sample_offset,  # Unique seeds for progressive rendering
-                    algorithm=algorithm
+                    cancel_check=should_cancel,
+                    sample_offset=current_sample_offset,
+                    algorithm=algorithm,
+                    pass_id=-1,  # No interleave
+                    num_passes=1
                 )
                 
-                # Clean up temp file
-                try:
-                    if scene_file and os.path.isfile(scene_file):
-                        os.remove(scene_file)
-                except Exception:
-                    pass
-                
-                # If cancelled, don't put result
-                if self.current_render_cancelled:
-                    self.current_render_cancelled = False
-                    try:
-                        job_data = self.render_queue.get_nowait()
-                        accumulated_local = 0
-                        continue
-                    except queue.Empty:
-                        break
-                
-                # Put result in queue (non-blocking)
-                # Each result will be accumulated in view_draw for progressive refinement
-                if ext_pixels:
-                    accumulated_local += samples_per_iteration
+                if ext_pixels and not should_cancel():
                     try:
                         self.result_queue.put_nowait({
                             'pixels': ext_pixels,
@@ -1465,54 +1483,140 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                             'height': render_height,
                             'job_id': job_id,
                             'samples_per_iteration': samples_per_iteration,
-                            'tile_key': tile_key
+                            'tile_key': tile_key,
+                            'is_partial': False
                         })
-                        print(f"[DIYRenderer] Thread: rendered {samples_per_iteration} samples, total={accumulated_local}/{target_samples}")
-                    except queue.Full:
-                        pass  # Discard if queue full
+                        if not is_moving:
+                            accumulated_local += samples_per_iteration
+                    except (queue.Full, ReferenceError):
+                        pass
                 
-                # Check if we need to continue rendering for more samples
-                if accumulated_local < target_samples and not self.current_render_cancelled:
-                    # Continue rendering with same parameters (job_data stays the same)
+                # Check for cancellation
+                try:
+                    if self.current_render_cancelled:
+                        self.current_render_cancelled = False
+                        try:
+                            job_data = self.render_queue.get_nowait()
+                            accumulated_local = 0
+                            continue
+                        except queue.Empty:
+                            break
+                except ReferenceError:
+                    break
+                
+                # Moving mode: wait briefly for next job, keep thread alive
+                if is_moving:
+                    try:
+                        job_data = self.render_queue.get(timeout=0.2)  # Wait up to 200ms for new job
+                        accumulated_local = 0
+                        continue
+                    except queue.Empty:
+                        # No new job yet - keep waiting (don't break)
+                        # Thread stays alive to quickly process next job
+                        try:
+                            job_data = self.render_queue.get(timeout=0.5)
+                            accumulated_local = 0
+                            continue
+                        except queue.Empty:
+                            break  # Timeout, exit thread
+                    except ReferenceError:
+                        break
+                
+                # Idle mode: continue progressive rendering
+                try:
+                    should_continue = accumulated_local < target_samples and not self.current_render_cancelled
+                except ReferenceError:
+                    break
+                    
+                if should_continue:
                     # Check for new job first
                     try:
                         new_job = self.render_queue.get_nowait()
                         job_data = new_job
-                        accumulated_local = 0  # Reset for new job
+                        accumulated_local = 0
                     except queue.Empty:
-                        # Small delay to allow view_draw to process result
                         import time
-                        time.sleep(0.05)  # 50ms delay for UI update
+                        time.sleep(0.01)
+                    except ReferenceError:
+                        break
                     continue
                 else:
                     # Reached target or cancelled, wait for next job
-                    print(f"[DIYRenderer] Thread: completed target samples ({accumulated_local})")
                     try:
                         job_data = self.render_queue.get(timeout=0.5)
                         accumulated_local = 0
                     except queue.Empty:
-                        break  # No more jobs after timeout, exit thread
+                        break
+                    except ReferenceError:
+                        break
                     
+            except ReferenceError:
+                # Engine was deleted while thread was running
+                break
             except Exception as e:
                 print(f"[DIYRenderer] Async render error: {e}")
                 import traceback
                 traceback.print_exc()
                 break
         
-        self.viewport_thread_running = False
-        self.rendering_in_progress = False
+        # Safely update state
+        try:
+            self.viewport_thread_running = False
+            self.rendering_in_progress = False
+        except ReferenceError:
+            pass  # Engine already deleted
     
     def view_update(self, context, depsgraph):
         """
         Called when the scene is modified in viewport mode.
         
-        Responsibilities:
-        - Invalidate scene cache (force re-export)
-        - Reset viewport render state
-        - Clear accumulated samples
-        - Cancel pending render jobs
+        Only reset rendering if actual geometry/material changes occurred.
+        Selection changes and other minor updates are ignored.
         """
         self._init_async_render()
+        
+        # Check what actually changed in the depsgraph
+        # We only care about changes that affect rendering
+        needs_reset = False
+        
+        for update in depsgraph.updates:
+            # Check what type of update this is
+            obj = update.id
+            
+            # Skip selection-only changes
+            # Object updates with is_updated_geometry or is_updated_transform indicate real changes
+            if update.is_updated_geometry:
+                needs_reset = True
+                print(f"[DIYRenderer] Geometry changed: {obj.name if hasattr(obj, 'name') else type(obj)}")
+                break
+            
+            if update.is_updated_transform:
+                # Transform changes matter for objects, but not for selection outlines
+                if hasattr(obj, 'type') and obj.type in {'MESH', 'LIGHT', 'CAMERA'}:
+                    needs_reset = True
+                    print(f"[DIYRenderer] Transform changed: {obj.name}")
+                    break
+            
+            # Material/shader changes
+            if isinstance(obj, bpy.types.Material):
+                needs_reset = True
+                print(f"[DIYRenderer] Material changed: {obj.name}")
+                break
+            
+            if isinstance(obj, bpy.types.World):
+                needs_reset = True
+                print(f"[DIYRenderer] World changed")
+                break
+            
+            # Light data changes
+            if isinstance(obj, bpy.types.Light):
+                needs_reset = True
+                print(f"[DIYRenderer] Light changed: {obj.name}")
+                break
+        
+        if not needs_reset:
+            # No significant changes - don't reset rendering
+            return
         
         # Invalidate scene cache - scene has changed
         get_scene_cache().invalidate()
@@ -1544,7 +1648,11 @@ class DIYRenderEngine(bpy.types.RenderEngine):
     def _detect_camera_change(self, context):
         """
         Detect if the viewport camera has changed (rotation, pan, zoom).
-        Returns True if camera changed, False otherwise.
+        Returns True if camera changed significantly, False otherwise.
+        
+        Uses a reasonable threshold to avoid false positives from:
+        - Floating point precision errors
+        - Minor UI interactions (clicking without dragging)
         """
         region_data = context.region_data
         if region_data is None:
@@ -1552,23 +1660,39 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         
         current_matrix = region_data.view_matrix.copy()
         current_perspective = region_data.view_perspective
+        current_distance = region_data.view_distance
         
         changed = False
-        if self.last_camera_matrix is not None:
-            # Compare matrices (with small tolerance for floating point)
-            diff = 0.0
-            for i in range(4):
-                for j in range(4):
-                    diff += abs(current_matrix[i][j] - self.last_camera_matrix[i][j])
-            if diff > 0.0001:
-                changed = True
         
+        # Check perspective mode change (e.g., numpad 5 to toggle ortho)
         if self.last_view_perspective != current_perspective:
             changed = True
         
-        # Store current state
-        self.last_camera_matrix = current_matrix
-        self.last_view_perspective = current_perspective
+        # Check view distance (zoom) change - use relative threshold
+        if hasattr(self, 'last_view_distance') and self.last_view_distance is not None:
+            if self.last_view_distance > 0:
+                distance_change = abs(current_distance - self.last_view_distance) / self.last_view_distance
+                if distance_change > 0.01:  # 1% zoom change threshold
+                    changed = True
+        
+        # Check view matrix change (rotation, pan)
+        if self.last_camera_matrix is not None and not changed:
+            # Use max difference instead of sum to avoid accumulated small errors
+            max_diff = 0.0
+            for i in range(4):
+                for j in range(4):
+                    max_diff = max(max_diff, abs(current_matrix[i][j] - self.last_camera_matrix[i][j]))
+            # Threshold: typical camera movement should be > 0.001
+            # Floating point noise should be < 0.0001
+            if max_diff > 0.001:
+                changed = True
+        
+        # Only update stored state if there was a real change
+        # This prevents drift from accumulated small changes
+        if changed or self.last_camera_matrix is None:
+            self.last_camera_matrix = current_matrix
+            self.last_view_perspective = current_perspective
+            self.last_view_distance = current_distance
         
         return changed
 
@@ -1599,6 +1723,8 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         if not hasattr(self, 'last_render_width'):
             self.last_render_width = 0
             self.last_render_height = 0
+        if not hasattr(self, 'last_moving_render_time'):
+            self.last_moving_render_time = 0  # Throttle for moving renders
             
         current_time = time.time()
         
@@ -1607,31 +1733,37 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         if camera_changed:
             self.viewport_last_change_time = current_time
             self.high_res_complete = False
-            # Cancel current render for immediate response
-            self.current_render_cancelled = True
+            # Don't cancel immediately - let current render finish if close to done
+            # Just mark that we want a new render
             # Clear accumulated samples since view changed
             self.accumulated_samples = {}
         
         time_since_change = current_time - self.viewport_last_change_time
         
+        # Throttle interval for moving renders (target ~10 FPS during movement)
+        MOVING_RENDER_INTERVAL = 0.1  # 100ms = 10 FPS max during movement
+        
         # Adaptive quality system:
-        # - Moving (< 0.5 sec): 1/2 resolution, 1 sample - quick feedback
-        # - Idle (>= 0.5 sec): full resolution, progressive sampling
-        if time_since_change < 0.5:
-            # Moving: half resolution for quick feedback
-            scale_factor = 2
-            render_width = max(256, width // scale_factor)
-            render_height = max(192, height // scale_factor)
+        # - Moving (< 0.3 sec): 1/8 resolution for instant feedback
+        # - Idle (>= 0.3 sec): 1/2 resolution with progressive sampling
+        if time_since_change < 0.3:
+            # Moving: very low resolution for instant feedback
+            scale_factor = 8
+            render_width = width // scale_factor
+            render_height = height // scale_factor
             samples_per_iteration = 1
+            viewport_bounces = 4  # Minimal bounces for speed
             is_moving = True
         else:
-            # Idle: full resolution, progressive samples
-            render_width = width
-            render_height = height
-            samples_per_iteration = 4  # Add 4 samples per iteration
+            # Idle: 1/2 resolution with progressive samples
+            scale_factor = 2
+            render_width = width // scale_factor
+            render_height = height // scale_factor
+            samples_per_iteration = 1  # Add 1 sample per iteration
+            viewport_bounces = 8  # Full bounces
             is_moving = False
         
-        # DEBUG: Log state changes
+        # DEBUG: Log state changes (reduced spam)
         if not hasattr(self, '_last_debug_state'):
             self._last_debug_state = None
             self._last_debug_time = 0
@@ -1639,7 +1771,9 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         # Log every 2 seconds or when state changes
         if debug_state != self._last_debug_state or (current_time - self._last_debug_time > 2.0):
             thread_alive = self.render_thread is not None and self.render_thread.is_alive()
-            print(f"[DIYRenderer] State: {debug_state}, time_idle={time_since_change:.2f}s, thread_alive={thread_alive}, queue_size={self.result_queue.qsize()}")
+            # Reduce log spam - only log every 5 seconds
+            if current_time - self._last_debug_time > 5.0:
+                print(f"[DIYRenderer] State: {debug_state}, time_idle={time_since_change:.2f}s")
             self._last_debug_state = debug_state
             self._last_debug_time = current_time
         
@@ -1673,36 +1807,91 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         thread_running = self.render_thread is not None and self.render_thread.is_alive()
         thread_effectively_running = thread_running and not self.current_render_cancelled
         
+        # Throttling for moving renders: only request new render every MOVING_RENDER_INTERVAL
+        time_since_last_moving_render = current_time - self.last_moving_render_time
+        moving_render_allowed = time_since_last_moving_render >= MOVING_RENDER_INTERVAL
+        
         needs_new_render = (
             not hasattr(self, 'texture') or self.texture is None or
             resolution_changed or
-            (is_moving and not thread_effectively_running) or
+            (is_moving and moving_render_allowed and not thread_effectively_running) or
             (not is_moving and current_sample_count < target_samples and not thread_effectively_running)
         )
-        
-        # DEBUG: Log render decisions
-        if needs_new_render:
-            print(f"[DIYRenderer] Starting new render: res={render_width}x{render_height}, samples={current_sample_count}/{target_samples}, thread_running={thread_running}, cancelled={self.current_render_cancelled}")
         
         if needs_new_render:
             self.last_render_width = render_width
             self.last_render_height = render_height
             
+            # Update throttle timer for moving renders
+            if is_moving:
+                self.last_moving_render_time = current_time
+            
             region_data = context.region_data
             if region_data is not None:
+                # Get view matrix inverse for camera position and orientation
+                view_matrix_inv = region_data.view_matrix.inverted()
+                
+                cam_pos = view_matrix_inv.translation
+                cam_dir = (view_matrix_inv.to_3x3() @ Vector((0, 0, -1))).normalized()
+                cam_up = (view_matrix_inv.to_3x3() @ Vector((0, 1, 0))).normalized()
+                
+                # Calculate FOV based on view type
+                import math
+                if region_data.view_perspective == 'CAMERA':
+                    # Camera view - use actual camera's FOV
+                    camera = context.scene.camera
+                    if camera and camera.data:
+                        cam_data = camera.data
+                        sensor_width = cam_data.sensor_width
+                        focal_length = cam_data.lens
+                        fov = math.degrees(2 * math.atan(sensor_width / (2 * focal_length)))
+                    else:
+                        fov = 50.0
+                elif region_data.view_perspective == 'PERSP':
+                    # Perspective view - use default viewport FOV
+                    # Blender's default viewport uses approximately 39.6mm lens (50° FOV)
+                    # This matches the default "View" lens in preferences
+                    fov = 50.0
+                else:
+                    # Orthographic - use small FOV approximation
+                    fov = 5.0
+                
                 cam_params = {
-                    'pos': region_data.view_matrix.inverted().translation,
-                    'dir': (region_data.view_matrix.inverted().to_3x3() @ Vector((0,0,-1))).normalized(),
-                    'up': (region_data.view_matrix.inverted().to_3x3() @ Vector((0,1,0))).normalized(),
-                    'fov': 60.0 if getattr(region_data, 'is_perspective', True) else 5.0
+                    'pos': cam_pos,
+                    'dir': cam_dir,
+                    'up': cam_up,
+                    'fov': fov
                 }
                 
-                # Prepare job data (including target_samples for thread to know when to stop)
+                # When camera is moving, use cached file directly (skip hash computation)
+                # This is much faster and scene can only change via view_update()
+                if is_moving:
+                    scene_file = get_scene_cache().get_cached_file_fast()
+                    if not scene_file:
+                        # No cache yet, need initial export
+                        scene_file = export_scene_to_file(depsgraph)
+                else:
+                    # Idle: full check with hash computation
+                    scene_file = export_scene_to_file(depsgraph)
+                
+                if not scene_file:
+                    return  # Can't render without scene
+                
+                # Get render settings in main thread (thread-safe)
+                diy = context.scene.diy_renderer
+                debug_mode = diy.debug_mode if diy.debug_mode != 'NONE' else None
+                # Use viewport_bounces if specified, otherwise use scene setting
+                max_bounces = viewport_bounces if viewport_bounces is not None else diy.max_bounces
+                algorithm = diy.sampling_algorithm
+                
+                # Prepare job data - all Blender data extracted here in main thread
                 if not hasattr(self, 'job_counter'):
                     self.job_counter = 0
                 self.job_counter += 1
-                job_data = (depsgraph, cam_params, render_width, render_height, self.job_counter, 
-                           samples_per_iteration, tile_key, target_samples)
+                # Include is_moving flag to control interleaved vs direct rendering
+                job_data = (scene_file, cam_params, render_width, render_height, self.job_counter, 
+                           samples_per_iteration, tile_key, target_samples, viewport_bounces,
+                           max_bounces, debug_mode, algorithm, is_moving)
                 
                 # Submit job to render thread
                 try:
@@ -1726,68 +1915,84 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                             daemon=True
                         )
                         self.render_thread.start()
-                        print("[DIYRenderer] Started new render thread")
                     elif self.current_render_cancelled:
                         # Thread is running but cancelled - it will pick up the new job from queue
                         print("[DIYRenderer] New job queued, waiting for cancelled thread to pick it up")
                 except queue.Full:
                     pass  # Skip if queue full
         
-        # Check for completed renders (non-blocking) - process ALL available results
+        # Check for completed renders (non-blocking) - process limited results to avoid blocking
+        # Only process a few results per frame to keep UI responsive
         has_new_result = False
         results_processed = 0
-        while True:
+        max_results_per_frame = 2  # Limit to prevent blocking during rapid updates
+        while results_processed < max_results_per_frame:
             try:
                 result = self.result_queue.get_nowait()
                 results_processed += 1
-                ext_pixels = result['pixels']
+                ext_pixels = result['pixels']  # Now flat list [r,g,b,a, r,g,b,a, ...]
                 result_width = result['width']
                 result_height = result['height']
                 result_tile_key = result.get('tile_key', '')
                 result_samples = result.get('samples_per_iteration', 1)
+                is_partial = result.get('is_partial', False)  # Interleaved partial result
                 
-                if ext_pixels and len(ext_pixels) == result_width * result_height:
-                    # Accumulate samples (only for same resolution)
-                    # Accumulate samples: C++ outputs raw SUM (not averaged)
-                    # accumulated_samples stores (raw_sum_pixels, total_sample_count)
-                    if result_tile_key in self.accumulated_samples:
-                        acc_pixels, prev_count = self.accumulated_samples[result_tile_key]
-                        # Add raw sums together
-                        new_count = prev_count + result_samples
-                        for i in range(len(acc_pixels)):
-                            acc_pixels[i][0] += ext_pixels[i][0]
-                            acc_pixels[i][1] += ext_pixels[i][1]
-                            acc_pixels[i][2] += ext_pixels[i][2]
-                        self.accumulated_samples[result_tile_key] = (acc_pixels, new_count)
-                        # Display: divide by total samples
-                        pixels = [[p[0]/new_count, p[1]/new_count, p[2]/new_count, 1.0] for p in acc_pixels]
-                        print(f"[DIYRenderer] Accumulated: {new_count} samples for {result_tile_key}")
-                        if new_count >= target_samples:
-                            print(f"[DIYRenderer] Viewport render complete: {new_count} samples")
-                            self.high_res_complete = True
+                expected_len = result_width * result_height * 4  # Flat array length
+                if ext_pixels and len(ext_pixels) == expected_len:
+                    if is_partial:
+                        # Partial result from interleaved rendering
+                        # Display immediately but don't accumulate samples yet
+                        # Divide by samples for display
+                        inv_samples = 1.0 / result_samples
+                        display_pixels = [v * inv_samples for v in ext_pixels]
+                        buffer = gpu.types.Buffer('FLOAT', expected_len, display_pixels)
+                        if hasattr(self, 'texture') and self.texture is not None:
+                            try:
+                                del self.texture
+                            except Exception:
+                                pass
+                        self.texture = gpu.types.GPUTexture((result_width, result_height), format='RGBA16F', data=buffer)
+                        self.texture_width = result_width
+                        self.texture_height = result_height
+                        has_new_result = True
                     else:
-                        # First iteration - store raw sums, display divided
-                        acc_pixels = [[p[0], p[1], p[2], 1.0] for p in ext_pixels]
-                        self.accumulated_samples[result_tile_key] = (acc_pixels, result_samples)
-                        pixels = [[p[0]/result_samples, p[1]/result_samples, p[2]/result_samples, 1.0] for p in ext_pixels]
-                        print(f"[DIYRenderer] First result for {result_tile_key}: {result_samples} samples")
-                    
-                    # Create GPU texture for display (updates progressively)
-                    self.viewport_pixels_cache = pixels
-                    flat = [c for px in pixels for c in px]
-                    buffer = gpu.types.Buffer('FLOAT', result_width * result_height * 4, flat)
-                    if hasattr(self, 'texture') and self.texture is not None:
-                        try:
-                            del self.texture
-                        except Exception:
-                            pass
-                    self.texture = gpu.types.GPUTexture((result_width, result_height), format='RGBA16F', data=buffer)
-                    self.texture_width = result_width
-                    self.texture_height = result_height
-                    has_new_result = True
-                    self.rendering_in_progress = False
+                        # Full result - accumulate samples
+                        # ext_pixels is flat [r,g,b,a, r,g,b,a, ...]
+                        # accumulated_samples stores (flat_sum_array, total_sample_count)
+                        import array
+                        if result_tile_key in self.accumulated_samples:
+                            acc_array, prev_count = self.accumulated_samples[result_tile_key]
+                            # Add raw sums together (fast array operation)
+                            new_count = prev_count + result_samples
+                            for i in range(len(acc_array)):
+                                acc_array[i] += ext_pixels[i]
+                            self.accumulated_samples[result_tile_key] = (acc_array, new_count)
+                            # Display: divide by total samples
+                            inv_count = 1.0 / new_count
+                            display_pixels = [v * inv_count for v in acc_array]
+                            if new_count >= target_samples:
+                                self.high_res_complete = True
+                        else:
+                            # First iteration - store raw sums as array
+                            acc_array = array.array('f', ext_pixels)
+                            self.accumulated_samples[result_tile_key] = (acc_array, result_samples)
+                            inv_samples = 1.0 / result_samples
+                            display_pixels = [v * inv_samples for v in ext_pixels]
+                        
+                        # Create GPU texture for display (updates progressively)
+                        buffer = gpu.types.Buffer('FLOAT', expected_len, display_pixels)
+                        if hasattr(self, 'texture') and self.texture is not None:
+                            try:
+                                del self.texture
+                            except Exception:
+                                pass
+                        self.texture = gpu.types.GPUTexture((result_width, result_height), format='RGBA16F', data=buffer)
+                        self.texture_width = result_width
+                        self.texture_height = result_height
+                        has_new_result = True
+                        self.rendering_in_progress = False
                 else:
-                    print(f"[DIYRenderer] Invalid result: pixels={len(ext_pixels) if ext_pixels else 0}, expected={result_width * result_height}")
+                    print(f"[DIYRenderer] Invalid result: pixels={len(ext_pixels) if ext_pixels else 0}, expected={expected_len}")
                     
             except queue.Empty:
                 break  # No more results in queue
@@ -1808,11 +2013,6 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             is_moving or 
             (not is_moving and current_sample_count < target_samples)
         )
-        
-        # DEBUG
-        if not hasattr(self, '_last_redraw_log') or current_time - self._last_redraw_log > 1.0:
-            print(f"[DIYRenderer] Redraw check: should_redraw={should_redraw}, thread_alive={thread_alive}, is_moving={is_moving}, samples={current_sample_count}/{target_samples}")
-            self._last_redraw_log = current_time
         
         if should_redraw:
             for area in context.screen.areas:
