@@ -31,7 +31,7 @@ bl_info = {
 import bpy
 
 from .preferences import DIYRendererPreferences, DIYRendererSettings, _get_prefs
-from .panels import DIY_RENDER_PT_sampling, DIY_RENDER_PT_light_paths, DIY_RENDER_PT_debug
+from .panels import DIY_RENDER_PT_sampling, DIY_RENDER_PT_light_paths, DIY_RENDER_PT_debug, DIY_RENDER_PT_performance
 from .engine import DIYRenderEngine
 
 
@@ -70,6 +70,7 @@ def register():
     bpy.utils.register_class(DIY_RENDER_PT_sampling)
     bpy.utils.register_class(DIY_RENDER_PT_light_paths)
     bpy.utils.register_class(DIY_RENDER_PT_debug)
+    bpy.utils.register_class(DIY_RENDER_PT_performance)
     bpy.utils.register_class(DIYRenderEngine)
     
     bpy.types.Scene.diy_renderer = bpy.props.PointerProperty(type=DIYRendererSettings)
@@ -154,6 +155,7 @@ def unregister():
     del bpy.types.Scene.diy_renderer
     
     bpy.utils.unregister_class(DIYRenderEngine)
+    bpy.utils.unregister_class(DIY_RENDER_PT_performance)
     bpy.utils.unregister_class(DIY_RENDER_PT_debug)
     bpy.utils.unregister_class(DIY_RENDER_PT_light_paths)
     bpy.utils.unregister_class(DIY_RENDER_PT_sampling)

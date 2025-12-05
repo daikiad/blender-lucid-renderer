@@ -78,3 +78,34 @@ class DIY_RENDER_PT_debug(bpy.types.Panel):
         
         diy = context.scene.diy_renderer
         layout.prop(diy, "debug_mode")
+
+
+class DIY_RENDER_PT_performance(bpy.types.Panel):
+    bl_label = "Performance"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "render"
+    bl_options = {'DEFAULT_CLOSED'}
+    COMPAT_ENGINES = {'DIY_RENDER_MINIMAL'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.engine in cls.COMPAT_ENGINES
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        
+        diy = context.scene.diy_renderer
+        
+        col = layout.column(heading="Backend")
+        col.prop(diy, "backend", text="Device")
+        
+        col = layout.column(heading="Server Mode")
+        col.prop(diy, "use_server_mode", text="Persistent Process")
+        
+        if diy.use_server_mode:
+            box = layout.box()
+            box.label(text="Server mode keeps renderer running", icon='INFO')
+            box.label(text="Faster camera updates, experimental")

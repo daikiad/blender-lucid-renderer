@@ -55,6 +55,20 @@ struct Vec3 {
     static Vec3 cross(const Vec3 &a, const Vec3 &b){ return { a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x }; }
 };
 
+// ========== Camera Structure ==========
+/**
+ * Camera - Rendering camera parameters
+ */
+struct Camera {
+    Vec3 pos;       // Camera position
+    Vec3 dir;       // View direction (normalized)
+    Vec3 up;        // Up vector (normalized)
+    float fovDeg;   // Field of view in degrees
+    float aspect;   // Aspect ratio (width/height)
+    Vec3 right;     // Right vector (derived)
+    Vec3 forward;   // Forward vector (same as dir, derived)
+};
+
 // ========== Random Sampling Functions ==========
 /**
  * Monte Carlo sampling utilities for path tracing

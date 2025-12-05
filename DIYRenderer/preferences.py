@@ -85,3 +85,17 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
         ],
         default='NONE'
     )
+    use_server_mode: bpy.props.BoolProperty(
+        name="Use Server Mode",
+        description="Use persistent renderer process (faster for viewport, experimental)",
+        default=False
+    )
+    backend: bpy.props.EnumProperty(
+        name="Backend",
+        description="Rendering backend",
+        items=[
+            ('cpu', "CPU", "Multi-threaded CPU rendering (OpenMP)"),
+            # ('webgpu', "WebGPU", "GPU rendering via Dawn (experimental)"),  # Phase 2
+        ],
+        default='cpu'
+    )

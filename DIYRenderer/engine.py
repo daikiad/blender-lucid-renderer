@@ -8,12 +8,60 @@ import time
 import queue
 import threading
 import array
+from typing import Optional
 
 import bpy
 from mathutils import Vector
 
 from .scene_export import export_scene_to_file, get_scene_cache
 from .renderer import call_external_renderer, compute_camera_params
+from .subprocess_renderer import SubprocessRenderer
+from .renderer_interface import (
+    RenderConfig, CameraParams as RICameraParams, TileParams,
+    BackendType, AlgorithmType
+)
+
+
+# Global renderer instance for server mode
+_server_renderer: Optional[SubprocessRenderer] = None
+_server_scene_hash: Optional[str] = None
+
+
+def get_server_renderer() -> Optional[SubprocessRenderer]:
+    """Get the global server renderer instance."""
+    global _server_renderer
+    return _server_renderer
+
+
+def start_server_renderer(config: RenderConfig) -> bool:
+    """Start or restart the server renderer with given config."""
+    global _server_renderer, _server_scene_hash
+    
+    if _server_renderer is not None:
+        if _server_renderer.is_running():
+            return True
+        _server_renderer.stop()
+    
+    _server_renderer = SubprocessRenderer()
+    _server_scene_hash = None
+    
+    success = _server_renderer.start(config)
+    if success:
+        print("[DIYRenderer] Server mode started")
+    else:
+        print("[DIYRenderer] Failed to start server mode")
+        _server_renderer = None
+    return success
+
+
+def stop_server_renderer():
+    """Stop the server renderer if running."""
+    global _server_renderer, _server_scene_hash
+    if _server_renderer is not None:
+        _server_renderer.stop()
+        _server_renderer = None
+        _server_scene_hash = None
+        print("[DIYRenderer] Server mode stopped")
 
 
 class DIYRenderEngine(bpy.types.RenderEngine):
@@ -48,6 +96,187 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 pixels.append([fx, fy, 0.2, 1.0])
         return pixels
 
+    def _use_server_mode(self, scene) -> bool:
+        """Check if server mode should be used."""
+        return scene.diy_renderer.use_server_mode
+
+    def _ensure_server_started(self, scene) -> bool:
+        """Ensure server renderer is started with correct config."""
+        global _server_renderer, _server_scene_hash
+        
+        diy = scene.diy_renderer
+        
+        # Map algorithm setting
+        algo_map = {
+            'simple': AlgorithmType.NAIVE,
+            'nee': AlgorithmType.NEE,
+            'mis': AlgorithmType.MIS
+        }
+        algorithm = algo_map.get(diy.sampling_algorithm, AlgorithmType.NEE)
+        
+        config = RenderConfig(
+            backend=BackendType.CPU,
+            algorithm=algorithm,
+            max_depth=diy.max_bounces
+        )
+        
+        return start_server_renderer(config)
+
+    def _update_server_scene(self, scene_file: str) -> bool:
+        """Update scene on server if needed."""
+        global _server_renderer, _server_scene_hash
+        
+        if _server_renderer is None:
+            return False
+        
+        # Read scene JSON
+        try:
+            with open(scene_file, 'r') as f:
+                scene_json = f.read()
+            print(f"[DIYRenderer] Scene JSON size: {len(scene_json)} bytes")
+        except Exception as e:
+            print(f"[DIYRenderer] Failed to read scene file: {e}")
+            return False
+        
+        # Compute hash to avoid resending same scene
+        import hashlib
+        scene_hash = hashlib.md5(scene_json.encode()).hexdigest()
+        
+        if scene_hash == _server_scene_hash:
+            print("[DIYRenderer] Scene unchanged, skipping update")
+            return True  # Scene unchanged
+        
+        print("[DIYRenderer] Sending scene to server...")
+        if _server_renderer.update_scene(scene_json):
+            _server_scene_hash = scene_hash
+            print("[DIYRenderer] Scene update successful")
+            return True
+        print("[DIYRenderer] Scene update failed")
+        return False
+
+    def _render_with_server(self, depsgraph, width, height, cam_params, 
+                            scene_file, target_samples, diy):
+        """Render using server mode."""
+        global _server_renderer
+        
+        # Update scene
+        if not self._update_server_scene(scene_file):
+            print("[DIYRenderer] Failed to update scene on server")
+            return None
+        
+        # Update camera
+        camera = RICameraParams(
+            pos=(cam_params['pos'].x, cam_params['pos'].y, cam_params['pos'].z),
+            dir=(cam_params['dir'].x, cam_params['dir'].y, cam_params['dir'].z),
+            up=(cam_params['up'].x, cam_params['up'].y, cam_params['up'].z),
+            fov=cam_params['fov']
+        )
+        
+        if not _server_renderer.update_camera(camera):
+            print("[DIYRenderer] Failed to update camera on server")
+            return None
+        
+        # Generate sample iterations (same as legacy)
+        sample_iterations = []
+        current = 1
+        total = 0
+        max_increment = 128
+        while total < target_samples:
+            to_add = min(current, target_samples - total)
+            sample_iterations.append(to_add)
+            total += to_add
+            if current < max_increment:
+                current *= 2
+        
+        print(f"[DIYRenderer] Server mode - sample iterations: {sample_iterations}")
+        
+        accumulated_pixels = None
+        total_samples = 0
+        max_samples = sum(sample_iterations)
+        render_start_time = time.time()
+        
+        def check_cancel():
+            return self.test_break() or self._render_cancelled
+        
+        def format_time(seconds):
+            if seconds < 60:
+                return f"{seconds:.0f}s"
+            elif seconds < 3600:
+                return f"{int(seconds // 60)}m {int(seconds % 60):02d}s"
+            else:
+                return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60):02d}m"
+        
+        for idx, iteration_samples in enumerate(sample_iterations):
+            if check_cancel():
+                _server_renderer.cancel()
+                print("[DIYRenderer] Render cancelled by user")
+                break
+            
+            elapsed = time.time() - render_start_time
+            if total_samples > 0:
+                time_per_sample = elapsed / total_samples
+                remaining_time = time_per_sample * (max_samples - total_samples)
+                time_str = f"Elapsed: {format_time(elapsed)} | Remaining: {format_time(remaining_time)}"
+            else:
+                time_str = f"Elapsed: {format_time(elapsed)}"
+            
+            self.update_progress(total_samples / max_samples)
+            self.update_stats("", f"Path Tracing (Server): {total_samples}/{max_samples} samples | {time_str}")
+            
+            # Render tile using server
+            tile = TileParams(
+                tile_x=0, tile_y=0,
+                tile_w=width, tile_h=height,
+                full_w=width, full_h=height,
+                samples=iteration_samples,
+                sample_offset=total_samples
+            )
+            
+            result = _server_renderer.render_tile(tile)
+            
+            if result is None:
+                if check_cancel():
+                    print("[DIYRenderer] Render cancelled during iteration")
+                    break
+                print("[DIYRenderer] Server render failed")
+                continue
+            
+            iteration_pixels = result.pixels
+            expected_len = width * height * 4
+            
+            if len(iteration_pixels) != expected_len:
+                print(f"[DIYRenderer] Invalid pixel count: {len(iteration_pixels)} vs {expected_len}")
+                continue
+            
+            # Accumulate
+            if accumulated_pixels is None:
+                accumulated_pixels = array.array('f', iteration_pixels)
+                total_samples = iteration_samples
+            else:
+                for i in range(len(accumulated_pixels)):
+                    accumulated_pixels[i] += iteration_pixels[i]
+                total_samples += iteration_samples
+            
+            # Display
+            inv_samples = 1.0 / total_samples
+            display_pixels = []
+            for i in range(0, len(accumulated_pixels), 4):
+                display_pixels.append([
+                    accumulated_pixels[i] * inv_samples,
+                    accumulated_pixels[i+1] * inv_samples,
+                    accumulated_pixels[i+2] * inv_samples,
+                    1.0
+                ])
+            
+            result_obj = self.begin_result(0, 0, width, height)
+            combined = result_obj.layers[0].passes["Combined"]
+            combined.rect = display_pixels
+            self.end_result(result_obj)
+        
+        total_elapsed = time.time() - render_start_time
+        print(f"[DIYRenderer] Server render complete ({total_samples} samples) in {format_time(total_elapsed)}")
+        return accumulated_pixels
+
     def render(self, depsgraph):
         """
         Main render function for F12 rendering.
@@ -62,7 +291,10 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         
         original_scene = depsgraph.scene
         target_samples = original_scene.diy_renderer.samples
-        print(f"[DIYRenderer] Starting progressive render ({width} x {height}, target: {target_samples} samples)")
+        diy = original_scene.diy_renderer
+        use_server = self._use_server_mode(original_scene)
+        
+        print(f"[DIYRenderer] Starting render ({width} x {height}, samples: {target_samples}, server_mode: {use_server})")
         
         cam_params = compute_camera_params(scene, width, height)
         
@@ -81,6 +313,26 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             self.end_result(result)
             return
         
+        # Server mode rendering
+        if use_server:
+            if not self._ensure_server_started(original_scene):
+                print("[DIYRenderer] Failed to start server, falling back to legacy mode")
+            else:
+                result = self._render_with_server(
+                    depsgraph, width, height, cam_params, 
+                    scene_file, target_samples, diy
+                )
+                if result is not None:
+                    # Cleanup scene file
+                    try:
+                        if scene_file and os.path.isfile(scene_file):
+                            os.remove(scene_file)
+                    except Exception:
+                        pass
+                    return
+                print("[DIYRenderer] Server render failed, falling back to legacy mode")
+        
+        # Legacy mode rendering
         # Generate sample iterations
         sample_iterations = []
         current = 1

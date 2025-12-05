@@ -29,6 +29,7 @@ find_package(OpenMP)
 add_executable(diyrt
     src/main.cpp
     src/node_evaluator.cpp
+    src/server.cpp
 )
 
 target_include_directories(diyrt PRIVATE include)

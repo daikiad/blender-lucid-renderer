@@ -1,6 +1,7 @@
 #include "renderer.hpp"
 #include "pbr.hpp"
 #include "json.hpp"
+#include "server.hpp"
 
 #include <thread>
 #include <atomic>
@@ -185,9 +186,7 @@ ASCII lines RGBA per pixel row-major: r g b a\n
 (For speed later switch to binary)
 */
 
-struct Camera {
-    Vec3 pos; Vec3 dir; Vec3 up; float fovDeg; float aspect; Vec3 right; Vec3 forward;
-};
+// Camera is now defined in renderer.hpp
 
 Scene loadScene(const std::string &path){
     Scene scene; std::ifstream in(path); if(!in){ std::cerr << "Failed to open scene file: " << path << "\n"; return scene; }
@@ -358,8 +357,21 @@ Scene loadSceneFromJson(const std::string &path) {
  * 
  * Parses command-line arguments, loads scene from JSON,
  * and renders the specified tile region.
+ * 
+ * Modes:
+ * - Default: One-shot rendering (load scene, render, exit)
+ * - Server: Persistent process with command-based protocol
  */
 int main(int argc, char** argv){
+    // Check for server mode first
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) == "--server") {
+            RenderServer server;
+            server.run();
+            return 0;
+        }
+    }
+    
     // Default values
     std::string scenePath;
     int tileX=0, tileY=0, tileW=64, tileH=64, fullW=512, fullH=512;
