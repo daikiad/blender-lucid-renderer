@@ -1,17 +1,54 @@
 """
 Addon preferences and settings.
+================================
+
+このモジュールは DIY Renderer の設定を定義しています。
+
+2種類の設定があります:
+1. AddonPreferences（DIYRendererPreferences）
+   - グローバル設定（全シーン共通）
+   - Edit > Preferences > Add-ons で編集
+   - 例: 外部レンダラーのパス、一時ファイルディレクトリ
+
+2. PropertyGroup（DIYRendererSettings）
+   - シーン固有の設定
+   - Properties > Render パネルで編集
+   - 例: サンプル数、バウンス数、デバッグモード
+
+Blender プロパティシステム:
+- bpy.props.IntProperty: 整数値
+- bpy.props.FloatProperty: 浮動小数点値
+- bpy.props.StringProperty: 文字列
+- bpy.props.BoolProperty: ブール値
+- bpy.props.EnumProperty: 選択肢（ドロップダウン）
 """
 
 import bpy
 
 
 def _get_prefs_entry():
-    """Get addon preferences entry from Blender"""
+    """
+    アドオン設定エントリを取得します。
+    
+    Returns:
+        アドオンエントリ、または未登録の場合 None
+    """
     return bpy.context.preferences.addons.get("DIYRenderer")
 
 
 def _get_prefs():
-    """Get addon preferences object"""
+    """
+    アドオン設定オブジェクトを取得します。
+    
+    他のモジュールからインポートして使用できます:
+        from .preferences import _get_prefs
+        prefs = _get_prefs()
+        if prefs:
+            path = prefs.external_renderer_path
+    
+    Returns:
+        DIYRendererPreferences オブジェクト、または None
+    """
     entry = _get_prefs_entry()
     if entry is not None:
         return getattr(entry, 'preferences', None)
@@ -19,15 +56,29 @@ def _get_prefs():
 
 
 class DIYRendererPreferences(bpy.types.AddonPreferences):
-    """Addon preferences for configuring external renderer path"""
+    """
+    アドオン全体の設定（グローバル設定）。
+    
+    Edit > Preferences > Add-ons > DIY Renderer で編集できます。
+    
+    Attributes:
+        external_renderer_path: C++ レンダラーバイナリ (diyrt) のパス
+        scene_export_directory: シーンエクスポート用の一時ディレクトリ
+    """
+    # bl_idname はアドオンのパッケージ名と一致する必要がある
     bl_idname = "DIYRenderer"
     
+    # 外部レンダラーバイナリのパス
+    # subtype='FILE_PATH' でファイル選択ダイアログを表示
     external_renderer_path: bpy.props.StringProperty(
         name="External Renderer Path", 
         description="Path to compiled external C++ renderer binary (diyrt)", 
         default="", 
         subtype='FILE_PATH'
     )
+    
+    # シーンエクスポート用一時ディレクトリ
+    # subtype='DIR_PATH' でディレクトリ選択ダイアログを表示
     scene_export_directory: bpy.props.StringProperty(
         name="Scene Export Temp Dir", 
         description="Directory to write temporary exported scene files", 
@@ -36,13 +87,39 @@ class DIYRendererPreferences(bpy.types.AddonPreferences):
     )
     
     def draw(self, context):
+        """
+        設定パネルの UI を描画します。
+        
+        Edit > Preferences > Add-ons で表示される設定画面を構築します。
+        """
         layout = self.layout
         layout.prop(self, "external_renderer_path")
         layout.prop(self, "scene_export_directory")
 
 
 class DIYRendererSettings(bpy.types.PropertyGroup):
-    """Per-scene settings for DIY Renderer"""
+    """
+    シーン固有のレンダリング設定。
+    
+    各シーンに紐づく設定で、Properties > Render パネルで編集できます。
+    scene.diy_renderer でアクセスできます。
+    
+    例:
+        samples = bpy.context.scene.diy_renderer.samples
+    
+    Attributes:
+        samples: F12レンダリング時のサンプル数（品質）
+        viewport_samples: ビューポートレンダリング時のサンプル数
+        max_bounces: 光線の最大バウンス（反射）回数
+        sampling_algorithm: パストレーシングアルゴリズム
+        debug_mode: デバッグ可視化モード
+        use_server_mode: サーバーモード（持続プロセス）を使用するか
+        backend: レンダリングバックエンド（CPU/WebGPU）
+    """
+    
+    # サンプル数: 多いほどノイズが減るが、時間がかかる
+    # モンテカルロ積分の収束速度は √N なので、
+    # ノイズを半分にするには4倍のサンプルが必要
     samples: bpy.props.IntProperty(
         name="Samples",
         description="Number of samples for path tracing",
@@ -50,6 +127,8 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
         min=1,
         max=10000
     )
+    
+    # ビューポート用のサンプル数（インタラクティブ性のため少なめ）
     viewport_samples: bpy.props.IntProperty(
         name="Viewport Samples",
         description="Maximum samples for viewport rendering",
@@ -57,6 +136,9 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
         min=1,
         max=1000
     )
+    
+    # 最大バウンス数: 光線が何回反射できるか
+    # 多いほどリアルな間接光が計算できるが、時間がかかる
     max_bounces: bpy.props.IntProperty(
         name="Max Bounces",
         description="Maximum number of light bounces (ray depth)",
@@ -64,6 +146,11 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
         min=1,
         max=128
     )
+    
+    # パストレーシングアルゴリズム
+    # - simple: 参照実装（デバッグ用、収束が遅い）
+    # - nee: Next Event Estimation（直接光を効率的に計算）
+    # - mis: Multiple Importance Sampling（最高品質）
     sampling_algorithm: bpy.props.EnumProperty(
         name="Sampling Algorithm",
         description="Path tracing algorithm",
@@ -74,6 +161,8 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
         ],
         default='nee'
     )
+    
+    # デバッグモード: レンダリングの中間結果を可視化
     debug_mode: bpy.props.EnumProperty(
         name="Debug Mode",
         description="Render mode for debugging",
@@ -85,11 +174,16 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
         ],
         default='NONE'
     )
+    
+    # サーバーモード: プロセスを持続させて起動オーバーヘッドを削減
     use_server_mode: bpy.props.BoolProperty(
         name="Use Server Mode",
         description="Use persistent renderer process (faster for viewport, experimental)",
         default=False
     )
+    
+    # レンダリングバックエンド
+    # Phase 2 で WebGPU を追加予定
     backend: bpy.props.EnumProperty(
         name="Backend",
         description="Rendering backend",

@@ -1,5 +1,49 @@
 """
 Scene export functionality - exports Blender scenes to JSON for the C++ renderer.
+=================================================================================
+
+このモジュールは Blender シーンを JSON 形式でエクスポートする機能を提供します。
+C++ レンダラーはこの JSON を読み込んでシーンを再構築します。
+
+エクスポートされるデータ:
+- メッシュジオメトリ（頂点、三角形）
+- 頂点法線（スムーズシェーディング用）
+- マテリアル（Principled BSDF パラメータ）
+- ノードツリー（完全なシェーダーグラフ）
+
+主要関数:
+- export_scene_to_file(): メインのエクスポート関数
+- export_scene_to_json(): JSON ファイルに書き出し
+- serialize_node_tree(): ノードグラフをシリアライズ
+- get_material_properties(): マテリアルを抽出
+
+キャッシュシステム:
+SceneCache クラスはシーンの MD5 ハッシュを計算し、
+変更がない場合は再エクスポートをスキップします。
+これにより、カメラのみが動いた場合のパフォーマンスが向上します。
+
+JSON フォーマット例:
+{
+    "version": "1.0",
+    "meshes": [
+        {
+            "name": "Cube",
+            "vertices": [[x, y, z], ...],
+            "triangles": [[i0, i1, i2], ...],
+            "triangle_normals": [[[n0], [n1], [n2]], ...],
+            "smooth": true,
+            "material": {
+                "name": "Material",
+                "use_nodes": true,
+                "base_color": [0.8, 0.8, 0.8],
+                "metallic": 0.0,
+                "roughness": 0.5,
+                "emission": [0.0, 0.0, 0.0],
+                "node_tree": { ... }
+            }
+        }
+    ]
+}
 """
 
 import os
@@ -10,7 +54,12 @@ import bpy
 
 
 def _get_prefs():
-    """Get addon preferences object"""
+    """
+    アドオン設定を取得します。
+    
+    Returns:
+        DIYRendererPreferences オブジェクト、または None
+    """
     entry = bpy.context.preferences.addons.get("DIYRenderer")
     if entry is not None:
         return getattr(entry, 'preferences', None)

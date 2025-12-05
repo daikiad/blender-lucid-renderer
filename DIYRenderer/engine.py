@@ -1,5 +1,21 @@
 """
 DIY Render Engine - Main render engine class for Blender integration.
+
+このファイルは Blender レンダーエンジンの中核です。
+F12 レンダリングとビューポートレンダリングの両方を処理します。
+
+処理フロー:
+1. Blender が render() または view_update()/view_draw() を呼び出す
+2. シーンをエクスポート (scene_export.py)
+3. サーバーモードまたはレガシーモードでレンダリング
+4. 結果を Blender に返す
+
+主要クラス:
+- DIYRenderEngine: bpy.types.RenderEngine のサブクラス
+
+グローバル変数:
+- _server_renderer: 持続する SubprocessRenderer インスタンス
+- _server_scene_hash: シーン変更検出用の MD5 ハッシュ
 """
 
 import os
@@ -22,9 +38,14 @@ from .renderer_interface import (
 )
 
 
-# Global renderer instance for server mode
-_server_renderer: Optional[SubprocessRenderer] = None
-_server_scene_hash: Optional[str] = None
+# =============================================================================
+# グローバル状態 (サーバーモード用)
+# =============================================================================
+# サーバーモードでは、レンダラープロセスを持続させてオーバーヘッドを削減します。
+# これらのグローバル変数でプロセスの状態を管理します。
+
+_server_renderer: Optional[SubprocessRenderer] = None  # 持続するレンダラーインスタンス
+_server_scene_hash: Optional[str] = None               # シーン変更検出用ハッシュ
 
 
 def get_server_renderer() -> Optional[SubprocessRenderer]:
@@ -34,16 +55,29 @@ def get_server_renderer() -> Optional[SubprocessRenderer]:
 
 
 def start_server_renderer(config: RenderConfig) -> bool:
-    """Start or restart the server renderer with given config."""
+    """
+    Start or restart the server renderer with given config.
+    
+    サーバーモードのレンダラープロセスを起動します。
+    すでに起動済みで動作中なら何もしません。
+    
+    Args:
+        config: レンダリング設定 (backend, algorithm, max_depth)
+    
+    Returns:
+        起動成功なら True
+    """
     global _server_renderer, _server_scene_hash
     
+    # 既存のインスタンスをチェック
     if _server_renderer is not None:
         if _server_renderer.is_running():
-            return True
-        _server_renderer.stop()
+            return True  # すでに起動済み
+        _server_renderer.stop()  # 停止済みなら再起動
     
+    # 新しいインスタンスを作成して起動
     _server_renderer = SubprocessRenderer()
-    _server_scene_hash = None
+    _server_scene_hash = None  # シーンキャッシュをクリア
     
     success = _server_renderer.start(config)
     if success:
@@ -64,7 +98,24 @@ def stop_server_renderer():
         print("[DIYRenderer] Server mode stopped")
 
 
+# =============================================================================
+# DIYRenderEngine クラス
+# =============================================================================
+
 class DIYRenderEngine(bpy.types.RenderEngine):
+    """
+    Blender カスタムレンダーエンジン。
+    
+    Blender に登録される RenderEngine のサブクラスです。
+    F12 レンダリング (render) とビューポートレンダリング (view_update/view_draw)
+    の両方を実装しています。
+    
+    Attributes:
+        bl_idname: エンジンの内部識別子
+        bl_label: UI に表示される名前
+        bl_use_preview: マテリアルプレビューをサポート
+        bl_use_shading_nodes: シェーディングノードをサポート
+    """
     bl_idname = "DIY_RENDER_MINIMAL"
     bl_label = "DIY Renderer (Minimal)"
     bl_use_preview = True
@@ -72,22 +123,31 @@ class DIYRenderEngine(bpy.types.RenderEngine):
     bl_use_shading_nodes_custom = False
 
     def _init_async_render(self):
-        """Lazy initialization of async rendering infrastructure for viewport"""
+        """
+        ビューポートレンダリング用の非同期インフラを遅延初期化。
+        
+        ビューポートではバックグラウンドスレッドでレンダリングを行い、
+        UI をブロックしないようにします。
+        """
         if not hasattr(self, 'render_queue'):
-            self.render_queue = queue.Queue(maxsize=1)
-            self.result_queue = queue.Queue()
-            self.render_thread = None
-            self.stop_thread = False
-            self.rendering_in_progress = False
-            self.high_res_complete = False
-            self.accumulated_samples = {}
-            self.last_camera_matrix = None
-            self.last_view_perspective = None
-            self.viewport_thread_running = False
-            self.current_render_cancelled = False
+            self.render_queue = queue.Queue(maxsize=1)    # レンダリングジョブキュー
+            self.result_queue = queue.Queue()              # 結果キュー
+            self.render_thread = None                      # レンダリングスレッド
+            self.stop_thread = False                       # スレッド停止フラグ
+            self.rendering_in_progress = False             # レンダリング中フラグ
+            self.high_res_complete = False                 # 高解像度完了フラグ
+            self.accumulated_samples = {}                  # サンプル累積データ
+            self.last_camera_matrix = None                 # カメラ変更検出用
+            self.last_view_perspective = None              # ビュー変更検出用
+            self.viewport_thread_running = False           # スレッド実行中フラグ
+            self.current_render_cancelled = False          # キャンセルフラグ
 
     def _render_gradient(self, width, height):
-        """Generate a gradient pattern for fallback rendering."""
+        """
+        フォールバック用のグラデーションパターンを生成。
+        
+        シーンエクスポートに失敗した場合などに使用します。
+        """
         pixels = []
         for y in range(height):
             fy = y / (height - 1) if height > 1 else 0.0
@@ -96,21 +156,39 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 pixels.append([fx, fy, 0.2, 1.0])
         return pixels
 
+    # =========================================================================
+    # サーバーモード関連メソッド
+    # =========================================================================
+
     def _use_server_mode(self, scene) -> bool:
-        """Check if server mode should be used."""
+        """
+        サーバーモードを使用すべきか判定。
+        
+        ユーザー設定の use_server_mode プロパティを参照します。
+        """
         return scene.diy_renderer.use_server_mode
 
     def _ensure_server_started(self, scene) -> bool:
-        """Ensure server renderer is started with correct config."""
+        """
+        サーバーレンダラーが起動済みか確認し、必要なら起動。
+        
+        ユーザー設定から RenderConfig を構築して start_server_renderer() を呼びます。
+        
+        Args:
+            scene: Blender シーン (設定読み取り用)
+        
+        Returns:
+            サーバーが利用可能なら True
+        """
         global _server_renderer, _server_scene_hash
         
         diy = scene.diy_renderer
         
-        # Map algorithm setting
+        # アルゴリズム設定をマッピング
         algo_map = {
-            'simple': AlgorithmType.NAIVE,
-            'nee': AlgorithmType.NEE,
-            'mis': AlgorithmType.MIS
+            'simple': AlgorithmType.NAIVE,  # 単純なパストレーシング
+            'nee': AlgorithmType.NEE,       # Next Event Estimation (直接光サンプリング)
+            'mis': AlgorithmType.MIS        # Multiple Importance Sampling
         }
         algorithm = algo_map.get(diy.sampling_algorithm, AlgorithmType.NEE)
         
@@ -123,13 +201,24 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         return start_server_renderer(config)
 
     def _update_server_scene(self, scene_file: str) -> bool:
-        """Update scene on server if needed."""
+        """
+        サーバーにシーンデータを送信（必要な場合のみ）。
+        
+        MD5 ハッシュでシーンの変更を検出し、変更がなければスキップします。
+        これにより、カメラ移動のみの場合などにシーン再送信を避けられます。
+        
+        Args:
+            scene_file: JSON シーンファイルのパス
+        
+        Returns:
+            成功なら True
+        """
         global _server_renderer, _server_scene_hash
         
         if _server_renderer is None:
             return False
         
-        # Read scene JSON
+        # JSON ファイルを読み込み
         try:
             with open(scene_file, 'r') as f:
                 scene_json = f.read()
@@ -138,17 +227,18 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             print(f"[DIYRenderer] Failed to read scene file: {e}")
             return False
         
-        # Compute hash to avoid resending same scene
+        # ハッシュで変更検出
         import hashlib
         scene_hash = hashlib.md5(scene_json.encode()).hexdigest()
         
         if scene_hash == _server_scene_hash:
             print("[DIYRenderer] Scene unchanged, skipping update")
-            return True  # Scene unchanged
+            return True  # 変更なし
         
+        # サーバーに送信
         print("[DIYRenderer] Sending scene to server...")
         if _server_renderer.update_scene(scene_json):
-            _server_scene_hash = scene_hash
+            _server_scene_hash = scene_hash  # ハッシュを保存
             print("[DIYRenderer] Scene update successful")
             return True
         print("[DIYRenderer] Scene update failed")
@@ -156,15 +246,36 @@ class DIYRenderEngine(bpy.types.RenderEngine):
 
     def _render_with_server(self, depsgraph, width, height, cam_params, 
                             scene_file, target_samples, diy):
-        """Render using server mode."""
+        """
+        サーバーモードでレンダリングを実行。
+        
+        プログレッシブレンダリングを実装しています。
+        サンプル数を [1, 2, 4, 8, 16, 32, 64, ...] と増やしながら、
+        各反復ごとに画像を更新してユーザーに表示します。
+        
+        Args:
+            depsgraph: Blender の依存関係グラフ
+            width, height: 出力解像度
+            cam_params: カメラパラメータ dict
+            scene_file: JSON シーンファイルパス
+            target_samples: 目標サンプル数
+            diy: DIY Renderer 設定オブジェクト
+        
+        Returns:
+            成功時は累積ピクセルデータ、失敗時は None
+        """
         global _server_renderer
         
-        # Update scene
+        # ---------------------------------------------------------------------
+        # Step 1: シーンデータ更新
+        # ---------------------------------------------------------------------
         if not self._update_server_scene(scene_file):
             print("[DIYRenderer] Failed to update scene on server")
             return None
         
-        # Update camera
+        # ---------------------------------------------------------------------
+        # Step 2: カメラパラメータ送信
+        # ---------------------------------------------------------------------
         camera = RICameraParams(
             pos=(cam_params['pos'].x, cam_params['pos'].y, cam_params['pos'].z),
             dir=(cam_params['dir'].x, cam_params['dir'].y, cam_params['dir'].z),
@@ -176,7 +287,10 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             print("[DIYRenderer] Failed to update camera on server")
             return None
         
-        # Generate sample iterations (same as legacy)
+        # ---------------------------------------------------------------------
+        # Step 3: プログレッシブレンダリングのサンプル分割を計算
+        # ---------------------------------------------------------------------
+        # 例: target_samples=128 → [1, 2, 4, 8, 16, 32, 64, 1]
         sample_iterations = []
         current = 1
         total = 0
@@ -190,15 +304,20 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         
         print(f"[DIYRenderer] Server mode - sample iterations: {sample_iterations}")
         
-        accumulated_pixels = None
-        total_samples = 0
-        max_samples = sum(sample_iterations)
+        # ---------------------------------------------------------------------
+        # Step 4: プログレッシブレンダリングループの初期化
+        # ---------------------------------------------------------------------
+        accumulated_pixels = None      # 累積ピクセルデータ
+        total_samples = 0              # 累積サンプル数
+        max_samples = sum(sample_iterations)  # 合計サンプル数
         render_start_time = time.time()
         
         def check_cancel():
+            """ユーザーによるキャンセルをチェック"""
             return self.test_break() or self._render_cancelled
         
         def format_time(seconds):
+            """秒数を読みやすい形式にフォーマット"""
             if seconds < 60:
                 return f"{seconds:.0f}s"
             elif seconds < 3600:
@@ -206,12 +325,17 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             else:
                 return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60):02d}m"
         
+        # ---------------------------------------------------------------------
+        # Step 5: プログレッシブレンダリングループ
+        # ---------------------------------------------------------------------
         for idx, iteration_samples in enumerate(sample_iterations):
+            # キャンセルチェック
             if check_cancel():
                 _server_renderer.cancel()
                 print("[DIYRenderer] Render cancelled by user")
                 break
             
+            # 進捗と残り時間を計算して表示
             elapsed = time.time() - render_start_time
             if total_samples > 0:
                 time_per_sample = elapsed / total_samples
@@ -223,13 +347,15 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             self.update_progress(total_samples / max_samples)
             self.update_stats("", f"Path Tracing (Server): {total_samples}/{max_samples} samples | {time_str}")
             
-            # Render tile using server
+            # -----------------------------------------------------------------
+            # Step 5a: C++ レンダラーにタイルレンダリング要求
+            # -----------------------------------------------------------------
             tile = TileParams(
-                tile_x=0, tile_y=0,
-                tile_w=width, tile_h=height,
-                full_w=width, full_h=height,
-                samples=iteration_samples,
-                sample_offset=total_samples
+                tile_x=0, tile_y=0,             # タイル位置 (全体を1タイルとして扱う)
+                tile_w=width, tile_h=height,   # タイルサイズ
+                full_w=width, full_h=height,   # 画像全体サイズ
+                samples=iteration_samples,      # この反復でのサンプル数
+                sample_offset=total_samples     # RNG シード用の累積オフセット
             )
             
             result = _server_renderer.render_tile(tile)
@@ -248,7 +374,11 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 print(f"[DIYRenderer] Invalid pixel count: {len(iteration_pixels)} vs {expected_len}")
                 continue
             
-            # Accumulate
+            # -----------------------------------------------------------------
+            # Step 5b: ピクセルデータを累積
+            # -----------------------------------------------------------------
+            # C++ からは "累積値" が返ってくる (平均ではない)
+            # 各反復の累積値を足し合わせて、表示時に平均化する
             if accumulated_pixels is None:
                 accumulated_pixels = array.array('f', iteration_pixels)
                 total_samples = iteration_samples
@@ -257,17 +387,20 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                     accumulated_pixels[i] += iteration_pixels[i]
                 total_samples += iteration_samples
             
-            # Display
+            # -----------------------------------------------------------------
+            # Step 5c: 平均化して Blender に表示
+            # -----------------------------------------------------------------
             inv_samples = 1.0 / total_samples
             display_pixels = []
             for i in range(0, len(accumulated_pixels), 4):
                 display_pixels.append([
-                    accumulated_pixels[i] * inv_samples,
-                    accumulated_pixels[i+1] * inv_samples,
-                    accumulated_pixels[i+2] * inv_samples,
-                    1.0
+                    accumulated_pixels[i] * inv_samples,      # R
+                    accumulated_pixels[i+1] * inv_samples,    # G
+                    accumulated_pixels[i+2] * inv_samples,    # B
+                    1.0                                        # A
                 ])
             
+            # Blender のレンダー結果に書き込み
             result_obj = self.begin_result(0, 0, width, height)
             combined = result_obj.layers[0].passes["Combined"]
             combined.rect = display_pixels
@@ -277,11 +410,24 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         print(f"[DIYRenderer] Server render complete ({total_samples} samples) in {format_time(total_elapsed)}")
         return accumulated_pixels
 
+    # =========================================================================
+    # メインレンダリングメソッド
+    # =========================================================================
+
     def render(self, depsgraph):
         """
-        Main render function for F12 rendering.
-        Implements progressive rendering with cancellation support.
+        F12 レンダリングのメインエントリーポイント。
+        
+        Blender がレンダリングを開始するとこのメソッドが呼ばれます。
+        サーバーモードとレガシーモードの両方をサポートし、
+        プログレッシブレンダリングとキャンセル機能を実装しています。
+        
+        Args:
+            depsgraph: Blender の依存関係グラフ (評価済みシーンを含む)
         """
+        # ---------------------------------------------------------------------
+        # Phase 1: 基本パラメータの取得
+        # ---------------------------------------------------------------------
         scene = depsgraph.scene_eval
         scale = scene.render.resolution_percentage / 100.0
         width = int(scene.render.resolution_x * scale)
