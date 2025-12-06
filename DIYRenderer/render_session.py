@@ -1,26 +1,23 @@
 """
-Backend - C++ レンダラーへのインターフェース
+RenderSession - レンダリングセッション管理
 ==========================================
 
-このモジュールは pybind11 経由で C++ レンダラーを呼び出す
-ためのラッパークラスを提供します。
+このモジュールは各 RenderEngine インスタンスに対応する
+レンダリングセッションを管理します。
+
+設計思想（ADR 003 参照）:
+- 各 RenderEngine インスタンスが独自の RenderSession を持つ
+- シングルトンを廃止し、マルチインスタンス対応
+- SceneSync と連携して効率的な差分更新を実現
 
 主要クラス:
-- RendererBackend: C++ レンダラーのラッパー
-
-責務:
-- pybind11 モジュールの初期化と管理
-- スレッドプールの管理
-- 非同期レンダリングジョブの管理
-- キャンセル処理
-- シーンのロードとカメラ設定
+- RenderSession: レンダリングセッション
 
 使用例:
-    backend = RendererBackend()
-    backend.load_scene(scene_json)
-    backend.set_camera(camera_params)
-    future = backend.render_tile_async(params)
-    result = future.result()
+    session = RenderSession()
+    session.load_scene_if_changed(scene_hash, json_str)
+    session.set_camera(camera_params)
+    result = session.render_tile(params)
 """
 
 from __future__ import annotations
@@ -28,11 +25,11 @@ from __future__ import annotations
 import os
 import sys
 import hashlib
-import warnings
-from typing import Optional, Callable, Any
+from typing import Optional, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, Future
 
-from .state import CameraParams, RenderParams, RenderResult
+from .state import CameraParams, RenderParams, RenderResult, ViewportState
+from .scene_sync import SceneSync, UpdateFlags
 
 
 # =============================================================================
@@ -51,46 +48,84 @@ for _path in _pybind_paths:
 try:
     import diyrenderer
     PYBIND_AVAILABLE = True
-    print(f"[RendererBackend] pybind11 module loaded: version {diyrenderer.__version__}, OpenMP={diyrenderer.openmp_enabled}")
 except ImportError as e:
     diyrenderer = None
     PYBIND_AVAILABLE = False
-    print(f"[RendererBackend] pybind11 module not available: {e}")
+    print(f"[RenderSession] pybind11 module not available: {e}")
 
 
 # =============================================================================
-# RendererBackend クラス
+# RenderSession クラス
 # =============================================================================
 
-class RendererBackend:
-    """C++ レンダラーへのインターフェース
+class RenderSession:
+    """レンダリングセッション
     
-    pybind11 経由で C++ レンダラーを呼び出します。
-    スレッドプールを管理し、非同期レンダリングをサポートします。
+    1つの RenderEngine インスタンスに対応するセッションです。
+    各セッションは独自の C++ Renderer インスタンスを持ち、
+    他のセッションと完全に分離されています。
     
     Attributes:
         is_available: pybind11 モジュールが利用可能か
+        scene_sync: シーン同期マネージャー
+        state: ビューポート状態
     """
+    
+    # セッション ID の自動採番
+    _session_counter: int = 0
     
     def __init__(self):
         """初期化"""
+        # セッション ID を割り当て
+        RenderSession._session_counter += 1
+        self._session_id = RenderSession._session_counter
+        
+        # C++ レンダラーインスタンス（セッション固有）
         self._renderer: Any = None
         self._executor: Optional[ThreadPoolExecutor] = None
+        
+        # シーン管理
         self._scene_hash: Optional[str] = None
+        self._scene_sync = SceneSync()
+        
+        # ビューポート状態（セッション固有）
+        self._state = ViewportState()
+        
+        # ジョブ管理
         self._job_id: int = 0
         
+        # 初期化
         if PYBIND_AVAILABLE:
             self._renderer = diyrenderer.Renderer()
             self._executor = ThreadPoolExecutor(max_workers=1)
-            print("[RendererBackend] Initialized with pybind11 renderer")
+            print(f"[RenderSession #{self._session_id}] Created with pybind11 renderer")
+        else:
+            print(f"[RenderSession #{self._session_id}] Created (pybind11 not available)")
+    
+    @property
+    def session_id(self) -> int:
+        """セッション ID"""
+        return self._session_id
     
     @property
     def is_available(self) -> bool:
         """pybind11 モジュールが利用可能か"""
         return PYBIND_AVAILABLE and self._renderer is not None
     
+    @property
+    def scene_sync(self) -> SceneSync:
+        """シーン同期マネージャー"""
+        return self._scene_sync
+    
+    @property
+    def state(self) -> ViewportState:
+        """ビューポート状態"""
+        return self._state
+    
     def shutdown(self) -> None:
         """シャットダウン処理"""
+        print(f"[RenderSession #{self._session_id}] Shutting down...")
+        
         if self._renderer is not None:
             self._renderer.cancel()
         
@@ -100,38 +135,50 @@ class RendererBackend:
         
         self._renderer = None
         self._scene_hash = None
-        print("[RendererBackend] Shutdown complete")
+        
+        print(f"[RenderSession #{self._session_id}] Shutdown complete")
     
     # =========================================================================
     # シーン管理
     # =========================================================================
     
-    def load_scene_json(self, scene_json: str) -> bool:
-        """JSON 文字列からシーンを読み込み
-        
-        シーンハッシュをチェックし、変更がある場合のみロードします。
+    def load_scene_if_changed(self, scene_hash: str, json_str: str) -> bool:
+        """シーンが変更された場合のみロード
         
         Args:
-            scene_json: シーンの JSON 文字列
+            scene_hash: シーンのハッシュ
+            json_str: シーンの JSON 文字列
             
         Returns:
-            成功した場合 True
+            bool: 成功した場合 True
         """
         if not self.is_available:
             return False
         
-        # ハッシュをチェック
-        scene_hash = hashlib.md5(scene_json.encode()).hexdigest()
+        # ハッシュが同じなら何もしない
         if scene_hash == self._scene_hash:
-            return True  # 変更なし
-        
-        # シーンをロード
-        if self._renderer.load_scene_json(scene_json):
-            self._scene_hash = scene_hash
             return True
         
-        print("[RendererBackend] Failed to load scene")
+        # シーンをロード
+        if self._renderer.load_scene_json(json_str):
+            self._scene_hash = scene_hash
+            print(f"[RenderSession #{self._session_id}] Scene loaded (hash={scene_hash[:8]}...)")
+            return True
+        
+        print(f"[RenderSession #{self._session_id}] Failed to load scene")
         return False
+    
+    def load_scene_json(self, json_str: str) -> bool:
+        """JSON 文字列からシーンをロード（ハッシュを自動計算）
+        
+        Args:
+            json_str: シーンの JSON 文字列
+            
+        Returns:
+            bool: 成功した場合 True
+        """
+        scene_hash = hashlib.md5(json_str.encode()).hexdigest()
+        return self.load_scene_if_changed(scene_hash, json_str)
     
     def load_scene_file(self, scene_file: str) -> bool:
         """ファイルからシーンを読み込み
@@ -140,19 +187,46 @@ class RendererBackend:
             scene_file: シーンファイルのパス
             
         Returns:
-            成功した場合 True
+            bool: 成功した場合 True
         """
         try:
             with open(scene_file, 'r') as f:
-                scene_json = f.read()
-            return self.load_scene_json(scene_json)
+                json_str = f.read()
+            return self.load_scene_json(json_str)
         except Exception as e:
-            print(f"[RendererBackend] Failed to read scene file: {e}")
+            print(f"[RenderSession #{self._session_id}] Failed to read scene file: {e}")
             return False
     
-    def invalidate_scene_cache(self) -> None:
+    def invalidate_scene(self) -> None:
         """シーンキャッシュを無効化"""
         self._scene_hash = None
+        self._scene_sync.reset()
+    
+    # =========================================================================
+    # シーン同期（SceneSync 経由）
+    # =========================================================================
+    
+    def sync_scene(self, depsgraph: Any) -> UpdateFlags:
+        """depsgraph からシーンを同期
+        
+        SceneSync を使用して変更を検出し、必要に応じてシーンを更新します。
+        
+        Args:
+            depsgraph: Blender の依存関係グラフ
+            
+        Returns:
+            UpdateFlags: 検出された変更フラグ
+        """
+        flags = self._scene_sync.detect_changes(depsgraph)
+        
+        if flags != UpdateFlags.NONE:
+            self._scene_sync.sync(depsgraph, self, flags)
+            
+            # 累積サンプルをリセット
+            if self._scene_sync.needs_render_reset(flags):
+                self._state.reset_accumulation()
+        
+        return flags
     
     # =========================================================================
     # カメラ設定
@@ -175,7 +249,7 @@ class RendererBackend:
         )
     
     def set_camera_from_dict(self, cam_params: dict) -> None:
-        """辞書形式でカメラを設定（後方互換性用）
+        """辞書形式でカメラを設定
         
         Args:
             cam_params: {'pos': Vector, 'dir': Vector, 'up': Vector, 'fov': float}
@@ -275,7 +349,7 @@ class RendererBackend:
         params: RenderParams,
         scene_file: str,
         camera: CameraParams
-    ) -> Optional[Future]:
+    ) -> Optional[Any]:
         """タイルを非同期でレンダリング
         
         Args:
@@ -326,52 +400,12 @@ class RendererBackend:
         """キャンセルフラグをリセット"""
         if self._renderer is not None:
             self._renderer.reset_cancel()
-
-
-# =============================================================================
-# シングルトンインスタンス (非推奨)
-# =============================================================================
-#
-# ⚠️ 非推奨 (DEPRECATED) - ADR 003 によりシングルトンパターンは非推奨 ⚠️
-#
-# 代わりに render_session.py の RenderSession を使用してください。
-# RenderSession は各インスタンスが独自の RendererBackend を持ちます。
-#
-# これらの関数は後方互換のために残されていますが、新しいコードでは
-# 使用しないでください。
-
-_backend_instance: Optional[RendererBackend] = None
-
-
-def get_backend() -> RendererBackend:
-    """グローバルな RendererBackend インスタンスを取得
     
-    ⚠️ 非推奨: RenderSession を使用してください。
-    """
-    warnings.warn(
-        "get_backend() is deprecated. Use RenderSession instead. "
-        "See ADR 003 for details.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    global _backend_instance
-    if _backend_instance is None:
-        _backend_instance = RendererBackend()
-    return _backend_instance
-
-
-def shutdown_backend() -> None:
-    """グローバルな RendererBackend をシャットダウン
+    # =========================================================================
+    # デバッグ情報
+    # =========================================================================
     
-    ⚠️ 非推奨: RenderSession.shutdown() を使用してください。
-    """
-    warnings.warn(
-        "shutdown_backend() is deprecated. Use RenderSession.shutdown() instead. "
-        "See ADR 003 for details.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    global _backend_instance
-    if _backend_instance is not None:
-        _backend_instance.shutdown()
-        _backend_instance = None
+    def __repr__(self) -> str:
+        """文字列表現"""
+        status = "available" if self.is_available else "unavailable"
+        return f"<RenderSession #{self._session_id} ({status})>"

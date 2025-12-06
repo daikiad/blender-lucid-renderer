@@ -2,19 +2,26 @@
 Coordinator - レンダリングの調整役
 ==================================
 
-このモジュールはレンダリング全体の調整を担当します。
-状態管理を一元化し、ビューポート/F12 レンダリングの切り替えを管理します。
+⚠️ 非推奨 (DEPRECATED) - ADR 003 により RenderSession に移行 ⚠️
 
-主要クラス:
-- RenderCoordinator: レンダリング調整のメインクラス
+このモジュールはシングルトンパターンを使用しており、マルチインスタンス問題
+（複数ビューポート、マテリアルプレビュー）を引き起こします。
 
-責務:
+代わりに以下を使用してください:
+- render_session.py: RenderSession クラス（インスタンスごと）
+- scene_sync.py: SceneSync クラス（変更検出）
+
+このモジュールは後方互換のために残されていますが、新しいコードでは
+使用しないでください。将来のバージョンで削除される可能性があります。
+
+旧アーキテクチャ:
+================
 - 状態管理の一元化
 - ビューポート/F12 の切り替え
 - シーン変更の通知処理
 - シャットダウン処理
 
-使用例:
+使用例 (非推奨):
     coordinator = RenderCoordinator()
     coordinator.render_viewport(context, depsgraph)
     coordinator.render_f12(depsgraph)
@@ -22,6 +29,15 @@ Coordinator - レンダリングの調整役
 
 from __future__ import annotations
 
+import warnings
+warnings.warn(
+    "coordinator.py is deprecated. Use render_session.py instead. "
+    "See ADR 003 for details.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
+import math
 import time
 import array
 from typing import Optional, Any, TYPE_CHECKING
@@ -29,10 +45,65 @@ from typing import Optional, Any, TYPE_CHECKING
 if TYPE_CHECKING:
     import bpy
 
-from .state import ViewportState, RenderParams, CameraParams, RENDER_CONSTANTS
+from mathutils import Vector
+
+from .state import ViewportState, RenderParams
 from .backend import RendererBackend, get_backend, shutdown_backend
 from .viewport import ViewportRenderer
 from .scene_export import get_scene_cache
+
+
+# =============================================================================
+# カメラパラメータ計算
+# =============================================================================
+
+def compute_camera_params(scene, width: int, height: int) -> Optional[dict]:
+    """
+    外部レンダラー用のカメラパラメータを計算します。
+    
+    Blender のカメラオブジェクトから以下を抽出:
+    - 位置（ワールド座標）
+    - 視線方向（正規化ベクトル）
+    - 上方向ベクトル（正規化）
+    - 視野角（度）
+    
+    Args:
+        scene: Blender シーン
+        width: レンダリング幅
+        height: レンダリング高さ
+    
+    Returns:
+        dict: {'pos': Vector, 'dir': Vector, 'up': Vector, 'fov': float}
+        または、カメラがない場合 None
+    """
+    cam = scene.camera
+    if not cam:
+        print("[RenderCoordinator] WARNING: No camera in scene!")
+        return None
+    
+    # カメラのワールド変換行列から位置と方向を取得
+    cam_matrix = cam.matrix_world
+    pos = cam_matrix.translation
+    
+    # カメラのローカル -Z がワールド空間の視線方向
+    # カメラのローカル +Y がワールド空間の上方向
+    forward = cam_matrix.to_3x3() @ Vector((0, 0, -1))
+    up = cam_matrix.to_3x3() @ Vector((0, 1, 0))
+    forward.normalize()
+    up.normalize()
+    
+    # 視野角を計算: FOV = 2 * atan(sensor_width / (2 * focal_length))
+    sensor_w = cam.data.sensor_width
+    lens = cam.data.lens
+    fov_rad = 2.0 * math.atan(sensor_w / (2.0 * lens))
+    fov_deg = math.degrees(fov_rad)
+    
+    return {
+        'pos': pos,
+        'dir': forward,
+        'up': up,
+        'fov': fov_deg
+    }
 
 
 class RenderCoordinator:
@@ -162,7 +233,6 @@ class RenderCoordinator:
             depsgraph: 依存関係グラフ
         """
         from .scene_export import export_scene_to_file
-        from .renderer import compute_camera_params
         
         scene = depsgraph.scene_eval
         scale = scene.render.resolution_percentage / 100.0
@@ -174,6 +244,12 @@ class RenderCoordinator:
         target_samples = diy.samples
         
         print(f"[RenderCoordinator] Starting F12 render ({width} x {height}, samples: {target_samples})")
+        
+        # pybind11 が必要
+        if not self.backend.is_available:
+            print("[RenderCoordinator] ERROR: pybind11 module not available")
+            self._render_fallback(engine, width, height)
+            return
         
         # カメラパラメータを計算
         cam_params = compute_camera_params(scene, width, height)
@@ -188,11 +264,7 @@ class RenderCoordinator:
             return
         
         # pybind11 でレンダリング
-        if self.backend.is_available:
-            self._render_f12_pybind(engine, depsgraph, width, height, cam_params, scene_file, target_samples, diy)
-        else:
-            # レガシーモードへのフォールバック
-            self._render_f12_legacy(engine, depsgraph, width, height, cam_params, scene_file, target_samples, diy)
+        self._render_f12_pybind(engine, depsgraph, width, height, cam_params, scene_file, target_samples, diy)
         
         # シーンファイルを削除
         import os
@@ -278,66 +350,6 @@ class RenderCoordinator:
         
         total_elapsed = time.time() - render_start_time
         print(f"[RenderCoordinator] F12 render complete ({total_samples} samples) in {self._format_time(total_elapsed)}")
-    
-    def _render_f12_legacy(
-        self,
-        engine: Any,
-        depsgraph: Any,
-        width: int,
-        height: int,
-        cam_params: dict,
-        scene_file: str,
-        target_samples: int,
-        diy: Any
-    ) -> None:
-        """レガシーモードでの F12 レンダリング"""
-        from .renderer import call_external_renderer
-        
-        sample_iterations = self._compute_sample_iterations(target_samples)
-        
-        accumulated_pixels = None
-        total_samples = 0
-        max_samples = sum(sample_iterations)
-        render_start_time = time.time()
-        
-        for iteration_samples in sample_iterations:
-            if engine.test_break():
-                print("[RenderCoordinator] Render cancelled")
-                break
-            
-            elapsed = time.time() - render_start_time
-            self._update_progress(engine, total_samples, max_samples, elapsed)
-            
-            debug_mode = diy.debug_mode if diy.debug_mode != 'NONE' else None
-            
-            iteration_pixels = call_external_renderer(
-                scene_file, 0, 0, width, height, width, height, cam_params,
-                samples=iteration_samples,
-                depth=diy.max_bounces,
-                debug_mode=debug_mode,
-                cancel_check=engine.test_break,
-                sample_offset=total_samples,
-                algorithm=diy.sampling_algorithm
-            )
-            
-            if iteration_pixels is None:
-                continue
-            
-            if len(iteration_pixels) != width * height * 4:
-                continue
-            
-            if accumulated_pixels is None:
-                accumulated_pixels = array.array('f', iteration_pixels)
-                total_samples = iteration_samples
-            else:
-                for i in range(len(accumulated_pixels)):
-                    accumulated_pixels[i] += iteration_pixels[i]
-                total_samples += iteration_samples
-            
-            self._update_render_result(engine, width, height, accumulated_pixels, total_samples)
-        
-        total_elapsed = time.time() - render_start_time
-        print(f"[RenderCoordinator] Legacy render complete ({total_samples} samples) in {self._format_time(total_elapsed)}")
     
     def _compute_sample_iterations(self, target_samples: int) -> list:
         """サンプルイテレーションを計算"""

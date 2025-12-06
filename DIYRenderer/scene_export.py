@@ -488,10 +488,22 @@ class SceneCache:
             if obj.type == 'MESH':
                 obj_count += 1
                 hasher.update(obj.name.encode())
+                # トランスフォーム（位置・回転・スケール）をハッシュに含める
+                matrix = obj_instance.matrix_world
+                for row in matrix:
+                    for val in row:
+                        hasher.update(str(round(val, 6)).encode())
                 if obj.data:
                     hasher.update(str(len(obj.data.vertices)).encode())
                 if obj.active_material:
                     hasher.update(obj.active_material.name.encode())
+            elif obj.type == 'LIGHT':
+                # ライトの位置もハッシュに含める
+                hasher.update(obj.name.encode())
+                matrix = obj_instance.matrix_world
+                for row in matrix:
+                    for val in row:
+                        hasher.update(str(round(val, 6)).encode())
         
         hasher.update(str(obj_count).encode())
         return hasher.hexdigest()

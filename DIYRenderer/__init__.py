@@ -3,25 +3,28 @@ DIY Renderer - Custom Path Tracing Renderer for Blender
 ========================================================
 
 このアドオンは、カスタム C++ パストレーサーを Blender のレンダリングシステムに
-統合します。Blender シーンを JSON にエクスポートし、外部の C++ 実行ファイルで
-レンダリングし、結果を Blender のレンダーウィンドウとビューポートに表示します。
+統合します。Blender シーンを JSON にエクスポートし、pybind11 経由で C++ 
+レンダラーを呼び出し、結果を Blender のレンダーウィンドウとビューポートに表示します。
 
-アーキテクチャ:
-==============
-- Python (Blender アドオン): シーンエクスポート、UI、結果表示
-- C++ (外部実行ファイル): レイトレーシング、パストレーシング、マテリアル評価
+アーキテクチャ (ADR 003: イベント駆動 + 差分更新):
+================================================
+- 各 RenderEngine インスタンスは独自の RenderSession を持つ
+- SceneSync による変更検出（depsgraph.id_type_updated() を活用）
+- UpdateFlags による差分更新（GEOMETRY/MATERIALS/LIGHTS）
+- シングルトンを使用しない（マルチインスタンス対応）
 
 モジュール構成:
 ==============
 - __init__.py (このファイル): アドオン登録・解除
 - engine.py: レンダーエンジン本体 (DIYRenderEngine)
+- render_session.py: レンダリングセッション (RenderSession) - インスタンス固有
+- scene_sync.py: シーン変更検出 (SceneSync, UpdateFlags)
+- viewport.py: ビューポートレンダリング (ViewportRenderer)
+- backend.py: C++ レンダラーラッパー (RendererBackend) - 後方互換
+- state.py: 状態データ構造 (ViewportState, RenderParams, etc.)
 - preferences.py: 設定（AddonPreferences, PropertyGroup）
 - panels.py: UI パネル
-- protocol.py: バイナリ通信プロトコル
-- renderer_interface.py: 抽象インターフェース
-- subprocess_renderer.py: サブプロセス通信実装
 - scene_export.py: シーン→JSON エクスポート
-- renderer.py: レガシーモード実装
 
 機能:
 ====
@@ -30,14 +33,14 @@ DIY Renderer - Custom Path Tracing Renderer for Blender
 - デバッグモード: 法線、アルベド、エミッション
 - ビューポートレンダリングと F12 レンダリング
 - 非同期ビューポート更新
-- サーバーモード（持続プロセス）
+- マルチインスタンス対応（複数ビューポート、マテリアルプレビュー）
 
 インストール:
 ============
 1. DIYRenderer フォルダを Blender のアドオンディレクトリにコピー
 2. Edit > Preferences > Add-ons で "DIY Renderer" を有効化
-3. 外部レンダラーのパスを設定
-4. Render Engine を "DIY Render (Minimal)" に変更
+3. Render Engine を "DIY Render (Minimal)" に変更
+4. pybind11 モジュール (diyrenderer) がビルドされていることを確認
 
 Blender アドオン API:
 ====================

@@ -182,6 +182,16 @@ class ViewportState:
         """解像度変更時のリセット"""
         self.accumulated_samples = {}
     
+    def reset_accumulation(self) -> None:
+        """累積サンプルをリセット
+        
+        シーン変更時に呼び出されます。
+        テクスチャは維持し、サンプル累積のみリセットします。
+        """
+        self.accumulated_samples = {}
+        self.last_change_time = time.time()
+        self.scene_update_pending = True
+    
     def get_current_sample_count(self, width: int, height: int) -> int:
         """現在のサンプル数を取得"""
         tile_key = f"{width}x{height}"

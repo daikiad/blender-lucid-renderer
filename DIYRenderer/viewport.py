@@ -18,7 +18,7 @@ Viewport - ビューポートレンダリング専用モジュール
 
 使用例:
     viewport = ViewportRenderer()
-    viewport.render(context, depsgraph, state, backend)
+    viewport.render(context, depsgraph, state, session)
 """
 
 from __future__ import annotations
@@ -26,11 +26,12 @@ from __future__ import annotations
 import math
 import time
 import array
-from typing import Optional, Tuple, Any, TYPE_CHECKING
+from typing import Optional, Tuple, Any, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     import bpy
     from .state import ViewportState
+    from .render_session import RenderSession
     from .backend import RendererBackend
 
 from .state import (
@@ -60,7 +61,7 @@ class ViewportRenderer:
         context: Any,
         depsgraph: Any,
         state: 'ViewportState',
-        backend: 'RendererBackend'
+        session: Union['RenderSession', 'RendererBackend']
     ) -> None:
         """ビューポートをレンダリング
         
@@ -70,7 +71,7 @@ class ViewportRenderer:
             context: Blender コンテキスト
             depsgraph: 依存関係グラフ
             state: ビューポート状態
-            backend: レンダラーバックエンド
+            session: レンダリングセッション（または後方互換の RendererBackend）
         """
         import gpu
         from gpu_extras.presets import draw_texture_2d
@@ -96,7 +97,7 @@ class ViewportRenderer:
             
             # 最終モード中に変更された場合はキャンセル
             if was_in_final_mode:
-                backend.cancel()
+                session.cancel()
         
         # 4. モード判定
         mode = self._determine_mode(current_time, state, change_type)
@@ -110,15 +111,15 @@ class ViewportRenderer:
             state.reset_for_resolution_change()
         
         # 7. 結果をポーリング
-        self._poll_results(state, backend, current_time)
+        self._poll_results(state, session, current_time)
         
         # 8. 非同期エクスポートの完了をチェック
-        self._check_export_completion(context, depsgraph, state, backend)
+        self._check_export_completion(context, depsgraph, state, session)
         
         # 9. 新しいレンダリングを開始（必要な場合）
         content_changed = (change_type == ChangeType.CONTENT)
         self._maybe_start_render(
-            context, depsgraph, state, backend,
+            context, depsgraph, state, session,
             params, camera, mode, content_changed, current_time
         )
         
@@ -321,7 +322,7 @@ class ViewportRenderer:
     def _poll_results(
         self,
         state: 'ViewportState',
-        backend: 'RendererBackend',
+        session: Union['RenderSession', 'RendererBackend'],
         current_time: float
     ) -> None:
         """レンダリング結果をポーリング"""
@@ -420,7 +421,7 @@ class ViewportRenderer:
         context: Any,
         depsgraph: Any,
         state: 'ViewportState',
-        backend: 'RendererBackend'
+        session: Union['RenderSession', 'RendererBackend']
     ) -> None:
         """非同期エクスポートの完了をチェック"""
         if state.export_future is None:
@@ -436,6 +437,17 @@ class ViewportRenderer:
             if scene_file and state.pending_export_data:
                 data = state.pending_export_data
                 state.pending_export_data = None
+                
+                # 既存のレンダリングをキャンセルして完了を待つ
+                # （シーンロード中にレンダリングスレッドがアクセスするとセグフォするため）
+                if state.render_future is not None:
+                    session.cancel()
+                    try:
+                        state.render_future.result(timeout=0.1)
+                    except Exception:
+                        pass
+                    state.render_future = None
+                    session.reset_cancel()
                 
                 # レンダリングを開始
                 camera = CameraParams(
@@ -454,7 +466,7 @@ class ViewportRenderer:
                     debug_mode=data['debug_mode']
                 )
                 
-                future = backend.render_tile_async(params, scene_file, camera)
+                future = session.render_tile_async(params, scene_file, camera)
                 if future:
                     state.render_future = future
                     
@@ -472,7 +484,7 @@ class ViewportRenderer:
         context: Any,
         depsgraph: Any,
         state: 'ViewportState',
-        backend: 'RendererBackend',
+        session: Union['RenderSession', 'RendererBackend'],
         params: RenderParams,
         camera: Optional[CameraParams],
         mode: RenderMode,
@@ -480,8 +492,6 @@ class ViewportRenderer:
         current_time: float
     ) -> None:
         """必要に応じてレンダリングを開始"""
-        from concurrent.futures import ThreadPoolExecutor
-        
         if camera is None:
             return
         
@@ -501,9 +511,6 @@ class ViewportRenderer:
         state.last_render_width = params.width
         state.last_render_height = params.height
         
-        diy = context.scene.diy_renderer
-        target_samples = diy.viewport_samples
-        
         if content_changed:
             # 内容が変わったので非同期エクスポート
             if not state.is_exporting():
@@ -521,11 +528,9 @@ class ViewportRenderer:
                     'is_editing': (mode == RenderMode.EDITING),
                 }
                 
-                # グローバルの executor を使用
-                from .backend import get_backend
-                _backend = get_backend()
-                if _backend._executor:
-                    state.export_future = _backend._executor.submit(
+                # セッションの executor を使用
+                if hasattr(session, '_executor') and session._executor:
+                    state.export_future = session._executor.submit(
                         export_scene_to_file, depsgraph
                     )
                 state.last_scene_export_time = current_time
@@ -537,7 +542,7 @@ class ViewportRenderer:
                 state.last_scene_export_time = current_time
             
             if scene_file:
-                future = backend.render_tile_async(params, scene_file, camera)
+                future = session.render_tile_async(params, scene_file, camera)
                 if future:
                     state.render_future = future
         else:
@@ -547,8 +552,8 @@ class ViewportRenderer:
             
             if scene_file:
                 # 前回をキャンセル
-                backend.cancel()
-                future = backend.render_tile_async(params, scene_file, camera)
+                session.cancel()
+                future = session.render_tile_async(params, scene_file, camera)
                 if future:
                     state.render_future = future
     
