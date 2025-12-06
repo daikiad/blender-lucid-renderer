@@ -375,16 +375,56 @@ def _export_light(obj, matrix_world):
     # ライトのローカル -Z がワールド空間の方向
     direction = (matrix_world.to_3x3() @ Vector((0, 0, -1))).normalized()
     
-    # 色とパワー
-    color = list(light.color)
+    # 色とパワーを取得
+    # 基本の色（light.color）
+    base_color = list(light.color)
     energy = light.energy  # Watts (Blender 2.8+)
+    
+    # 最終的な色を計算（デフォルトは基本色）
+    final_color = base_color[:]
+    
+    # ノードを使用している場合、Emissionノードの色を取得
+    if light.use_nodes and light.node_tree:
+        nodes = light.node_tree.nodes
+        # Emission ノードを探す
+        for node in nodes:
+            if node.type == 'EMISSION':
+                # Emission ノードの Color 入力
+                color_input = node.inputs.get('Color')
+                if color_input and not color_input.is_linked:
+                    node_color = list(color_input.default_value)[:3]
+                    # ノードの色と基本色を乗算
+                    final_color = [
+                        base_color[0] * node_color[0],
+                        base_color[1] * node_color[1],
+                        base_color[2] * node_color[2]
+                    ]
+                # Strength 入力も確認
+                strength_input = node.inputs.get('Strength')
+                if strength_input and not strength_input.is_linked:
+                    # ノードの Strength は energy と乗算
+                    energy = energy * strength_input.default_value
+                break
+            elif node.type == 'BLACKBODY':
+                # Blackbody ノード（色温度）
+                temp_input = node.inputs.get('Temperature')
+                if temp_input and not temp_input.is_linked:
+                    # 色温度から RGB に変換（簡易版）
+                    temp = temp_input.default_value
+                    bb_color = _kelvin_to_rgb(temp)
+                    final_color = [
+                        base_color[0] * bb_color[0],
+                        base_color[1] * bb_color[1],
+                        base_color[2] * bb_color[2]
+                    ]
+                break
     
     light_data = {
         "name": obj.name,
         "type": light.type,  # 'POINT', 'SUN', 'SPOT', 'AREA'
         "position": [position.x, position.y, position.z],
         "direction": [direction.x, direction.y, direction.z],
-        "color": color,
+        "color": final_color,
         "energy": energy,
     }
     
@@ -414,6 +454,38 @@ def _export_light(obj, matrix_world):
         light_data["up"] = [up.x, up.y, up.z]
     
     return light_data
+
+
+def _kelvin_to_rgb(temperature):
+    """色温度（ケルビン）からRGBに変換（簡易版）"""
+    # Tanner Helland's algorithm
+    temp = temperature / 100.0
+    
+    # Red
+    if temp <= 66:
+        r = 1.0
+    else:
+        r = 1.29293618606 * ((temp - 60) ** -0.1332047592)
+        r = max(0.0, min(1.0, r))
+    
+    # Green
+    if temp <= 66:
+        g = 0.390081578769 * (temp - 2) ** 0.1332047592 if temp > 2 else 0
+        g = max(0.0, min(1.0, g))
+    else:
+        g = 1.12989086089 * ((temp - 60) ** -0.0755148492)
+        g = max(0.0, min(1.0, g))
+    
+    # Blue
+    if temp >= 66:
+        b = 1.0
+    elif temp <= 19:
+        b = 0.0
+    else:
+        b = 0.543206789110 * (temp - 10) ** 0.0755148492 if temp > 10 else 0
+        b = max(0.0, min(1.0, b))
+    
+    return [r, g, b]
 
 
 def export_scene_to_json(depsgraph):
