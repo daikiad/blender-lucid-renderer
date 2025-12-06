@@ -121,6 +121,12 @@ class DIYRenderEngine(bpy.types.RenderEngine):
     各インスタンスは独自の RenderSession を持ち、
     他のインスタンス（別のビューポート、マテリアルプレビュー等）と完全に分離されています。
     
+    公式の RenderEngine パターンに従い：
+    - __init__: インスタンス変数を初期化
+    - __del__: クリーンアップして super().__del__() を呼ぶ
+    - view_update: Blender データを読み取る（同じスレッドで）
+    - view_draw: 描画のみ（重い処理はしない）
+    
     Attributes:
         bl_idname: エンジンの内部識別子
         bl_label: UI に表示される名前
@@ -132,6 +138,38 @@ class DIYRenderEngine(bpy.types.RenderEngine):
     bl_use_preview = True
     bl_use_shading_nodes = True
     bl_use_shading_nodes_custom = False
+
+    # =========================================================================
+    # ライフサイクル
+    # =========================================================================
+    
+    def __init__(self, *args, **kwargs):
+        """コンストラクタ - 公式パターンに従う"""
+        super().__init__(*args, **kwargs)
+        
+        # インスタンス変数を明示的に初期化
+        self._session: Optional[RenderSession] = None
+        self._viewport_renderer: Optional[ViewportRenderer] = None
+        
+        print("[DIYRenderEngine] __init__ called")
+    
+    def __del__(self):
+        """デストラクタ - 公式パターンに従う"""
+        # Blender が StructRNA を既に削除している場合があるので try-except で保護
+        try:
+            if self._session is not None:
+                print(f"[DIYRenderEngine] Destroying session: {self._session}")
+                self._session.shutdown()
+                self._session = None
+        except (ReferenceError, AttributeError):
+            # Blender が既にオブジェクトを削除している場合は無視
+            pass
+        
+        # 公式パターン: 必ず super().__del__() を呼ぶ
+        try:
+            super().__del__()
+        except (ReferenceError, AttributeError):
+            pass
 
     # =========================================================================
     # セッション管理
@@ -147,28 +185,16 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         Returns:
             RenderSession: このインスタンス専用のセッション
         """
-        if not hasattr(self, '_session') or self._session is None:
+        if self._session is None:
             self._session = RenderSession()
             print(f"[DIYRenderEngine] Created new session: {self._session}")
         return self._session
     
     def _get_viewport_renderer(self) -> ViewportRenderer:
         """ViewportRenderer を取得（遅延初期化）"""
-        if not hasattr(self, '_viewport_renderer') or self._viewport_renderer is None:
+        if self._viewport_renderer is None:
             self._viewport_renderer = ViewportRenderer()
         return self._viewport_renderer
-    
-    def __del__(self):
-        """デストラクタ"""
-        # Blender が StructRNA を既に削除している場合があるので try-except で保護
-        try:
-            if hasattr(self, '_session') and self._session is not None:
-                print(f"[DIYRenderEngine] Destroying session: {self._session}")
-                self._session.shutdown()
-                self._session = None
-        except ReferenceError:
-            # Blender が既にオブジェクトを削除している場合は無視
-            pass
 
     # =========================================================================
     # ビューポートレンダリング
@@ -178,9 +204,18 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         """
         ビューポートモードでシーンが変更された時に呼ばれます。
         
-        注意: ここではシーンの同期を行わず、フラグを立てるのみ。
-        実際のシーンロードは view_draw() -> viewport.render() の非同期処理で行う。
-        （レンダリング中にシーンを変更するとセグフォの原因になるため）
+        公式パターンとの違いについて:
+        Blender の公式ドキュメントでは view_update でシーンデータを読み取り、
+        view_draw では描画のみを行うことが推奨されています。
+        
+        しかし、本レンダラーでは以下の理由から view_update ではフラグを立てるのみとしています：
+        1. pybind11 レンダラーは非同期でレンダリングを行う
+        2. レンダリング中にシーンを変更するとセグメンテーション違反の原因となる
+        3. シーンのエクスポートと読み込みは viewport.render() 内で、
+           前回のレンダリング完了後に安全に行う必要がある
+        
+        このアプローチにより、ビューポートの応答性を維持しながら
+        安全にシーンを更新できます。
         
         Args:
             context: Blender コンテキスト
@@ -203,6 +238,19 @@ class DIYRenderEngine(bpy.types.RenderEngine):
     def view_draw(self, context, depsgraph):
         """
         ビューポートレンダリングのエントリーポイント。
+        
+        公式パターンとの違いについて:
+        Blender の公式ドキュメントでは view_draw は描画のみを行い、
+        重い処理は view_update で行うことが推奨されています。
+        
+        本実装では、viewport.render() が以下を行います：
+        1. 前回のレンダリング結果があれば即座に描画（高速）
+        2. シーン更新フラグがあれば、前回レンダリング完了後に
+           シーンを再エクスポート・再ロードして新規レンダリングを開始
+        3. OpenGL を使用して結果をビューポートに描画
+        
+        この設計により、レンダリング中でもビューポートは応答し続け、
+        シーン更新は安全なタイミングで行われます。
         
         Args:
             context: Blender コンテキスト
