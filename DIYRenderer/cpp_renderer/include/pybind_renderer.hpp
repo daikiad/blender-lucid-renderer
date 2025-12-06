@@ -419,6 +419,20 @@ private:
                 }
             }
             
+            // Per-triangle UV coordinates
+            std::vector<std::array<Vec2, 3>> triangle_uvs;
+            bool has_triangle_uvs = false;
+            if (mesh_j.contains("triangle_uvs")) {
+                has_triangle_uvs = true;
+                for (const auto& tuv : mesh_j["triangle_uvs"]) {
+                    std::array<Vec2, 3> uvs;
+                    uvs[0] = Vec2(tuv[0][0], tuv[0][1]);
+                    uvs[1] = Vec2(tuv[1][0], tuv[1][1]);
+                    uvs[2] = Vec2(tuv[2][0], tuv[2][1]);
+                    triangle_uvs.push_back(uvs);
+                }
+            }
+            
             bool smooth_shading = mesh_j.contains("smooth") && mesh_j["smooth"].get<bool>();
             
             // Triangles
@@ -437,6 +451,16 @@ private:
                         tri.smooth = smooth_shading;
                     } else {
                         tri.smooth = false;
+                    }
+                    
+                    // Parse UV coordinates
+                    if (has_triangle_uvs && static_cast<size_t>(tri_index) < triangle_uvs.size()) {
+                        tri.uv0 = triangle_uvs[tri_index][0];
+                        tri.uv1 = triangle_uvs[tri_index][1];
+                        tri.uv2 = triangle_uvs[tri_index][2];
+                        tri.hasUV = true;
+                    } else {
+                        tri.hasUV = false;
                     }
                     
                     m.triangles.push_back(tri);

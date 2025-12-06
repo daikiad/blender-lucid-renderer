@@ -3,6 +3,7 @@
 #include <iostream>
 #include <map>
 #include <set>
+#include <cmath>
 
 using json = nlohmann::json;
 
@@ -154,6 +155,7 @@ NodeTree parseNodeTree(const json &nodeTreeJson) {
  * @param tree The node tree containing all nodes
  * @param nodeName Name of the node to evaluate
  * @param socketName Name of the output socket to read
+ * @param uv UV coordinates for texture lookups
  * @return RGB color value from the socket
  * 
  * This function follows socket connections recursively:
@@ -162,7 +164,7 @@ NodeTree parseNodeTree(const json &nodeTreeJson) {
  * 3. If connected: recursively evaluate the linked node
  * 4. If not connected: use the socket's default value
  */
-Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::string &socketName) {
+Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::string &socketName, const Vec2 &uv) {
     const MaterialNode *node = tree.findNode(nodeName);
     if(!node) {
         std::cerr << "[NodeEval] Node not found: " << nodeName << "\n";
@@ -197,7 +199,7 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
             
             if(baseColorSocket->is_linked) {
                 // Follow connection
-                return evaluateNode(tree, baseColorSocket->linked_node, baseColorSocket->linked_socket);
+                return evaluateNode(tree, baseColorSocket->linked_node, baseColorSocket->linked_socket, uv);
             } else {
                 // Use default value
                 if(baseColorSocket->default_value.type == SocketValue::VEC4) {
@@ -232,7 +234,7 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
             // Evaluate color (can be connected or constant)
             if(colorSocket) {
                 if(colorSocket->is_linked) {
-                    color = evaluateNode(tree, colorSocket->linked_node, colorSocket->linked_socket);
+                    color = evaluateNode(tree, colorSocket->linked_node, colorSocket->linked_socket, uv);
                 } else if(colorSocket->default_value.type == SocketValue::VEC4) {
                     color = colorSocket->default_value.v4;  // RGBA → use v4 field
                 } else if(colorSocket->default_value.type == SocketValue::VEC3) {
@@ -281,7 +283,7 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
         
         if(aSocket) {
             if(aSocket->is_linked) {
-                colorA = evaluateNode(tree, aSocket->linked_node, aSocket->linked_socket);
+                colorA = evaluateNode(tree, aSocket->linked_node, aSocket->linked_socket, uv);
             } else if(aSocket->default_value.type == SocketValue::VEC4) {
                 colorA = aSocket->default_value.v4;
             } else if(aSocket->default_value.type == SocketValue::VEC3) {
@@ -291,7 +293,7 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
         
         if(bSocket) {
             if(bSocket->is_linked) {
-                colorB = evaluateNode(tree, bSocket->linked_node, bSocket->linked_socket);
+                colorB = evaluateNode(tree, bSocket->linked_node, bSocket->linked_socket, uv);
             } else if(bSocket->default_value.type == SocketValue::VEC4) {
                 colorB = bSocket->default_value.v4;
             } else if(bSocket->default_value.type == SocketValue::VEC3) {
@@ -303,18 +305,18 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
         return colorA * (1.0f - fac) + colorB * fac;
     } else if(node->type == "ShaderNodeTexChecker") {
         // ===== Checker Texture Node =====
-        // Procedural checkerboard pattern
-        // Since we don't have UV coords here, return a blend of the two colors
-        // or use a default pattern
+        // Procedural checkerboard pattern using UV coordinates
         const NodeSocket *color1Socket = node->findInput("Color1");
         const NodeSocket *color2Socket = node->findInput("Color2");
+        const NodeSocket *scaleSocket = node->findInput("Scale");
         
         Vec3 color1(0.8f, 0.8f, 0.8f);  // Default white
         Vec3 color2(0.2f, 0.2f, 0.2f);  // Default black
+        float scale = 5.0f;  // Default scale
         
         if(color1Socket) {
             if(color1Socket->is_linked) {
-                color1 = evaluateNode(tree, color1Socket->linked_node, color1Socket->linked_socket);
+                color1 = evaluateNode(tree, color1Socket->linked_node, color1Socket->linked_socket, uv);
             } else if(color1Socket->default_value.type == SocketValue::VEC4) {
                 color1 = color1Socket->default_value.v4;
             } else if(color1Socket->default_value.type == SocketValue::VEC3) {
@@ -324,7 +326,7 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
         
         if(color2Socket) {
             if(color2Socket->is_linked) {
-                color2 = evaluateNode(tree, color2Socket->linked_node, color2Socket->linked_socket);
+                color2 = evaluateNode(tree, color2Socket->linked_node, color2Socket->linked_socket, uv);
             } else if(color2Socket->default_value.type == SocketValue::VEC4) {
                 color2 = color2Socket->default_value.v4;
             } else if(color2Socket->default_value.type == SocketValue::VEC3) {
@@ -332,15 +334,29 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
             }
         }
         
-        // For material preview, return average of both colors
-        // (proper UV-based checker pattern would need UV coordinates)
-        return (color1 + color2) * 0.5f;
+        if(scaleSocket && !scaleSocket->is_linked) {
+            if(scaleSocket->default_value.type == SocketValue::FLOAT) {
+                scale = scaleSocket->default_value.f;
+            }
+        }
+        
+        // Checkerboard pattern: alternate colors based on UV coordinates
+        float u = uv.x * scale;
+        float v = uv.y * scale;
+        int checkerU = static_cast<int>(std::floor(u)) % 2;
+        int checkerV = static_cast<int>(std::floor(v)) % 2;
+        // Handle negative values
+        if(checkerU < 0) checkerU += 2;
+        if(checkerV < 0) checkerV += 2;
+        
+        bool isColor1 = (checkerU + checkerV) % 2 == 0;
+        return isColor1 ? color1 : color2;
     } else if(node->type == "ShaderNodeOutputMaterial") {
         // ===== Material Output Node =====
         // This is the final output node - traverse to Surface input
         const NodeSocket *surfaceSocket = node->findInput("Surface");
         if(surfaceSocket && surfaceSocket->is_linked) {
-            return evaluateNode(tree, surfaceSocket->linked_node, surfaceSocket->linked_socket);
+            return evaluateNode(tree, surfaceSocket->linked_node, surfaceSocket->linked_socket, uv);
         }
     }
     
@@ -356,6 +372,7 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
  * getAlbedoFromNodeTree: Extract base color (diffuse albedo) from node graph
  * 
  * @param tree The material node tree to evaluate
+ * @param uv UV coordinates for texture lookups
  * @return RGB albedo color (diffuse reflectance)
  * 
  * Algorithm:
@@ -367,7 +384,7 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
  * This is called once per ray-surface intersection to determine
  * the surface's diffuse color for path tracing calculations.
  */
-Vec3 getAlbedoFromNodeTree(const NodeTree &tree) {
+Vec3 getAlbedoFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
     static int callCount = 0;
     if(++callCount <= 3) {
         std::cerr << "[NodeEval] getAlbedoFromNodeTree called, valid=" << tree.valid << "\n";
@@ -397,7 +414,7 @@ Vec3 getAlbedoFromNodeTree(const NodeTree &tree) {
     }
     
     // Evaluate connected BSDF node
-    Vec3 result = evaluateNode(tree, surfaceSocket->linked_node, surfaceSocket->linked_socket);
+    Vec3 result = evaluateNode(tree, surfaceSocket->linked_node, surfaceSocket->linked_socket, uv);
     
     if(callCount <= 3) {
         std::cerr << "[NodeEval] Result: (" << result.x << "," << result.y << "," << result.z << ")\n";
@@ -410,6 +427,7 @@ Vec3 getAlbedoFromNodeTree(const NodeTree &tree) {
  * getEmissionFromNodeTree: Extract emission (light) from node graph
  * 
  * @param tree The material node tree to evaluate
+ * @param uv UV coordinates for texture lookups
  * @return RGB emission color (light emitted by surface)
  * 
  * Algorithm:
@@ -422,7 +440,7 @@ Vec3 getAlbedoFromNodeTree(const NodeTree &tree) {
  * This determines if a surface emits light (acts as a light source).
  * Used to implement area lights in path tracing.
  */
-Vec3 getEmissionFromNodeTree(const NodeTree &tree) {
+Vec3 getEmissionFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
     if(!tree.valid) {
         return Vec3(0.0f, 0.0f, 0.0f);  // No emission
     }
@@ -442,7 +460,7 @@ Vec3 getEmissionFromNodeTree(const NodeTree &tree) {
     // Check if connected node is Emission shader
     const MaterialNode *shaderNode = tree.findNode(surfaceSocket->linked_node);
     if(shaderNode && shaderNode->type == "ShaderNodeEmission") {
-        return evaluateNode(tree, surfaceSocket->linked_node, "Emission");
+        return evaluateNode(tree, surfaceSocket->linked_node, "Emission", uv);
     }
     
     // Principled BSDF also supports emission (for glowing objects)
@@ -455,7 +473,7 @@ Vec3 getEmissionFromNodeTree(const NodeTree &tree) {
         
         if(emissionSocket) {
             if(emissionSocket->is_linked) {
-                Vec3 emissionColor = evaluateNode(tree, emissionSocket->linked_node, emissionSocket->linked_socket);
+                Vec3 emissionColor = evaluateNode(tree, emissionSocket->linked_node, emissionSocket->linked_socket, uv);
                 // Apply emission strength
                 const NodeSocket *strengthSocket = shaderNode->findInput("Emission Strength");
                 float strength = 0.0f;
@@ -490,6 +508,7 @@ Vec3 getEmissionFromNodeTree(const NodeTree &tree) {
  * getTransmissionFromNodeTree: Extract transmission (glass/transparency) from node graph
  * 
  * @param tree The material node tree to evaluate
+ * @param uv UV coordinates (unused for transmission, but kept for API consistency)
  * @return Transmission value (0.0 = opaque, 1.0 = fully transparent)
  * 
  * Algorithm:
@@ -497,7 +516,8 @@ Vec3 getEmissionFromNodeTree(const NodeTree &tree) {
  * 2. Follow its Surface input connection
  * 3. If connected to Principled BSDF, get its Transmission socket
  */
-float getTransmissionFromNodeTree(const NodeTree &tree) {
+float getTransmissionFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
+    (void)uv;  // Unused for now
     if(!tree.valid) {
         return 0.0f;  // No transmission (opaque)
     }
@@ -538,6 +558,7 @@ float getTransmissionFromNodeTree(const NodeTree &tree) {
  * getIORFromNodeTree: Extract Index of Refraction from node graph
  * 
  * @param tree The material node tree to evaluate
+ * @param uv UV coordinates (unused for IOR, but kept for API consistency)
  * @return IOR value (1.0 = air, 1.45 = glass, 1.33 = water, 2.42 = diamond)
  * 
  * Algorithm:
@@ -545,7 +566,8 @@ float getTransmissionFromNodeTree(const NodeTree &tree) {
  * 2. Follow its Surface input connection
  * 3. If connected to Principled BSDF, get its IOR socket
  */
-float getIORFromNodeTree(const NodeTree &tree) {
+float getIORFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
+    (void)uv;  // Unused for now
     if(!tree.valid) {
         return 1.45f;  // Default glass IOR
     }
@@ -581,9 +603,11 @@ float getIORFromNodeTree(const NodeTree &tree) {
  * getMetallicFromNodeTree: Extract metallic value from node graph
  * 
  * @param tree The material node tree to evaluate
+ * @param uv UV coordinates (unused for metallic, but kept for API consistency)
  * @return Metallic value (0.0 = dielectric, 1.0 = metal)
  */
-float getMetallicFromNodeTree(const NodeTree &tree) {
+float getMetallicFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
+    (void)uv;  // Unused for now
     if(!tree.valid) {
         return 0.0f;  // Default dielectric
     }
@@ -619,9 +643,11 @@ float getMetallicFromNodeTree(const NodeTree &tree) {
  * getRoughnessFromNodeTree: Extract roughness value from node graph
  * 
  * @param tree The material node tree to evaluate
+ * @param uv UV coordinates (unused for roughness, but kept for API consistency)
  * @return Roughness value (0.0 = smooth/mirror, 1.0 = rough/diffuse)
  */
-float getRoughnessFromNodeTree(const NodeTree &tree) {
+float getRoughnessFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
+    (void)uv;  // Unused for now
     if(!tree.valid) {
         return 0.5f;  // Default roughness
     }

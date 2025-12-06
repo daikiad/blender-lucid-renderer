@@ -775,7 +775,8 @@ struct SceneLights {
             // Check if mesh has emission
             Vec3 emission = mesh.material.emission;
             if (mesh.material.useNodes && mesh.material.nodeTree.valid) {
-                emission = getEmissionFromNodeTree(mesh.material.nodeTree);
+                // Use dummy UV (0,0) for light intensity evaluation
+                emission = getEmissionFromNodeTree(mesh.material.nodeTree, Vec2(0.0f, 0.0f));
             }
             
             float emissionStrength = emission.x + emission.y + emission.z;
@@ -887,11 +888,11 @@ inline Vec3 traceSimple(const Scene& scene, const Ray& ray, int maxDepth) {
         mat.ior = hit.material.ior;
         
         if (hit.material.useNodes && hit.material.nodeTree.valid) {
-            mat.albedo = getAlbedoFromNodeTree(hit.material.nodeTree);
-            mat.metallic = getMetallicFromNodeTree(hit.material.nodeTree);
-            mat.roughness = getRoughnessFromNodeTree(hit.material.nodeTree);
-            mat.transmission = getTransmissionFromNodeTree(hit.material.nodeTree);
-            mat.ior = getIORFromNodeTree(hit.material.nodeTree);
+            mat.albedo = getAlbedoFromNodeTree(hit.material.nodeTree, hit.uv);
+            mat.metallic = getMetallicFromNodeTree(hit.material.nodeTree, hit.uv);
+            mat.roughness = getRoughnessFromNodeTree(hit.material.nodeTree, hit.uv);
+            mat.transmission = getTransmissionFromNodeTree(hit.material.nodeTree, hit.uv);
+            mat.ior = getIORFromNodeTree(hit.material.nodeTree, hit.uv);
         }
         
         // Enforce minimum roughness to avoid delta distributions
@@ -900,7 +901,7 @@ inline Vec3 traceSimple(const Scene& scene, const Ray& ray, int maxDepth) {
         // Get emission
         Vec3 emission = hit.material.emission;
         if (hit.material.useNodes && hit.material.nodeTree.valid) {
-            emission = getEmissionFromNodeTree(hit.material.nodeTree);
+            emission = getEmissionFromNodeTree(hit.material.nodeTree, hit.uv);
         }
         
         // Add emission (always, no MIS)
@@ -1016,11 +1017,11 @@ inline Vec3 traceNEE(const Scene& scene, const SceneLights& sceneLights,
         mat.ior = hit.material.ior;
         
         if (hit.material.useNodes && hit.material.nodeTree.valid) {
-            mat.albedo = getAlbedoFromNodeTree(hit.material.nodeTree);
-            mat.metallic = getMetallicFromNodeTree(hit.material.nodeTree);
-            mat.roughness = getRoughnessFromNodeTree(hit.material.nodeTree);
-            mat.transmission = getTransmissionFromNodeTree(hit.material.nodeTree);
-            mat.ior = getIORFromNodeTree(hit.material.nodeTree);
+            mat.albedo = getAlbedoFromNodeTree(hit.material.nodeTree, hit.uv);
+            mat.metallic = getMetallicFromNodeTree(hit.material.nodeTree, hit.uv);
+            mat.roughness = getRoughnessFromNodeTree(hit.material.nodeTree, hit.uv);
+            mat.transmission = getTransmissionFromNodeTree(hit.material.nodeTree, hit.uv);
+            mat.ior = getIORFromNodeTree(hit.material.nodeTree, hit.uv);
         }
         
         // Enforce minimum roughness to avoid delta distributions
@@ -1029,7 +1030,7 @@ inline Vec3 traceNEE(const Scene& scene, const SceneLights& sceneLights,
         // Get emission
         Vec3 emission = hit.material.emission;
         if (hit.material.useNodes && hit.material.nodeTree.valid) {
-            emission = getEmissionFromNodeTree(hit.material.nodeTree);
+            emission = getEmissionFromNodeTree(hit.material.nodeTree, hit.uv);
         }
         
         // Setup normals
@@ -1179,11 +1180,11 @@ inline Vec3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
         mat.ior = hit.material.ior;
         
         if (hit.material.useNodes && hit.material.nodeTree.valid) {
-            mat.albedo = getAlbedoFromNodeTree(hit.material.nodeTree);
-            mat.metallic = getMetallicFromNodeTree(hit.material.nodeTree);
-            mat.roughness = getRoughnessFromNodeTree(hit.material.nodeTree);
-            mat.transmission = getTransmissionFromNodeTree(hit.material.nodeTree);
-            mat.ior = getIORFromNodeTree(hit.material.nodeTree);
+            mat.albedo = getAlbedoFromNodeTree(hit.material.nodeTree, hit.uv);
+            mat.metallic = getMetallicFromNodeTree(hit.material.nodeTree, hit.uv);
+            mat.roughness = getRoughnessFromNodeTree(hit.material.nodeTree, hit.uv);
+            mat.transmission = getTransmissionFromNodeTree(hit.material.nodeTree, hit.uv);
+            mat.ior = getIORFromNodeTree(hit.material.nodeTree, hit.uv);
         }
         
         // Enforce minimum roughness to avoid delta distributions
@@ -1192,7 +1193,7 @@ inline Vec3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
         // Get emission
         Vec3 emission = hit.material.emission;
         if (hit.material.useNodes && hit.material.nodeTree.valid) {
-            emission = getEmissionFromNodeTree(hit.material.nodeTree);
+            emission = getEmissionFromNodeTree(hit.material.nodeTree, hit.uv);
         }
         
         // Setup normals

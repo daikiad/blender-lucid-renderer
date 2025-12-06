@@ -367,14 +367,24 @@ struct Material {
 
 struct Ray { Vec3 o; Vec3 d; };
 
+struct Vec2 {
+    float x, y;
+    Vec2() : x(0), y(0) {}
+    Vec2(float x, float y) : x(x), y(y) {}
+    Vec2 operator+(const Vec2 &o) const { return Vec2(x + o.x, y + o.y); }
+    Vec2 operator*(float s) const { return Vec2(x * s, y * s); }
+};
+
 struct Triangle { 
     int i0, i1, i2;         // Vertex indices
     Vec3 faceNormal;        // Face normal (flat shading)
     Vec3 n0, n1, n2;        // Vertex normals (smooth shading)
+    Vec2 uv0, uv1, uv2;     // UV coordinates per vertex
     Vec3 centroid;          // For BVH construction
     bool smooth;            // Use smooth shading?
+    bool hasUV;             // Does triangle have UV coordinates?
     
-    Triangle() : i0(0), i1(0), i2(0), smooth(false) {}
+    Triangle() : i0(0), i1(0), i2(0), smooth(false), hasUV(false) {}
 };
 
 // ========== BVH (Bounding Volume Hierarchy) ==========
@@ -492,8 +502,10 @@ struct Hit {
     float t;            // Distance along ray to hit point
     Vec3 point;         // 3D position of hit point
     Vec3 normal;        // Surface normal at hit point
+    Vec2 uv;            // UV coordinates at hit point
+    bool hasUV;         // Does hit have valid UV?
     Material material;  // Material properties of hit surface
-    Hit() : hit(false), t(1e30f) {}
+    Hit() : hit(false), t(1e30f), hasUV(false) {}
 };
 
 // Forward declaration for Light (defined in pbr.hpp)
@@ -660,12 +672,17 @@ inline void intersectBVH(const Mesh &mesh, const Ray &ray, const Vec3 &invDir, H
                     result.hit = true;
                     result.point = ray.o + ray.d * t;
                     // Smooth shading: interpolate vertex normals
+                    float w = 1.0f - u - v;
                     if(tri.smooth) {
-                        float w = 1.0f - u - v;
                         result.normal = tri.n0 * w + tri.n1 * u + tri.n2 * v;
                         result.normal.normalize();
                     } else {
                         result.normal = tri.faceNormal;
+                    }
+                    // Interpolate UV coordinates
+                    if(tri.hasUV) {
+                        result.uv = tri.uv0 * w + tri.uv1 * u + tri.uv2 * v;
+                        result.hasUV = true;
                     }
                     result.material = mesh.material;
                 }
@@ -710,25 +727,25 @@ inline Hit intersectScene(const Scene &scene, const Ray &ray, bool useAABB = tru
 // These functions are implemented in node_evaluator.cpp
 
 // Evaluate a single node (recursive for connected inputs)
-Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::string &socketName);
+Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::string &socketName, const Vec2 &uv);
 
 // Get albedo from node tree (follows connections from Material Output)
-Vec3 getAlbedoFromNodeTree(const NodeTree &tree);
+Vec3 getAlbedoFromNodeTree(const NodeTree &tree, const Vec2 &uv);
 
 // Get emission from node tree
-Vec3 getEmissionFromNodeTree(const NodeTree &tree);
+Vec3 getEmissionFromNodeTree(const NodeTree &tree, const Vec2 &uv);
 
 // Get transmission (glass) from node tree (0.0 = opaque, 1.0 = fully transparent)
-float getTransmissionFromNodeTree(const NodeTree &tree);
+float getTransmissionFromNodeTree(const NodeTree &tree, const Vec2 &uv);
 
 // Get Index of Refraction from node tree (default 1.45 for glass)
-float getIORFromNodeTree(const NodeTree &tree);
+float getIORFromNodeTree(const NodeTree &tree, const Vec2 &uv);
 
 // Get metallic value from node tree (0.0 = dielectric, 1.0 = metal)
-float getMetallicFromNodeTree(const NodeTree &tree);
+float getMetallicFromNodeTree(const NodeTree &tree, const Vec2 &uv);
 
 // Get roughness value from node tree (0.0 = mirror, 1.0 = diffuse)
-float getRoughnessFromNodeTree(const NodeTree &tree);
+float getRoughnessFromNodeTree(const NodeTree &tree, const Vec2 &uv);
 
 // ========== Debug Rendering Functions ==========
 
@@ -753,7 +770,7 @@ inline Vec3 traceAlbedo(const Scene &scene, const Ray &ray, bool useAABB = true)
         }
         // Use node tree if available, otherwise legacy properties
         if(hit.material.useNodes && hit.material.nodeTree.valid) {
-            return getAlbedoFromNodeTree(hit.material.nodeTree);
+            return getAlbedoFromNodeTree(hit.material.nodeTree, hit.uv);
         }
         return hit.material.albedo;
     }
@@ -766,7 +783,7 @@ inline Vec3 traceEmission(const Scene &scene, const Ray &ray, bool useAABB = tru
     if(hit.hit){
         // Use node tree if available, otherwise legacy properties
         if(hit.material.useNodes && hit.material.nodeTree.valid) {
-            return getEmissionFromNodeTree(hit.material.nodeTree);
+            return getEmissionFromNodeTree(hit.material.nodeTree, hit.uv);
         }
         return hit.material.emission;
     }
@@ -822,12 +839,12 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
     
     if(hit.material.useNodes && hit.material.nodeTree.valid) {
         // Use node-based material evaluation
-        albedo = getAlbedoFromNodeTree(hit.material.nodeTree);
-        emission = getEmissionFromNodeTree(hit.material.nodeTree);
-        transmission = getTransmissionFromNodeTree(hit.material.nodeTree);
-        ior = getIORFromNodeTree(hit.material.nodeTree);
-        metallic = getMetallicFromNodeTree(hit.material.nodeTree);
-        roughness = getRoughnessFromNodeTree(hit.material.nodeTree);
+        albedo = getAlbedoFromNodeTree(hit.material.nodeTree, hit.uv);
+        emission = getEmissionFromNodeTree(hit.material.nodeTree, hit.uv);
+        transmission = getTransmissionFromNodeTree(hit.material.nodeTree, hit.uv);
+        ior = getIORFromNodeTree(hit.material.nodeTree, hit.uv);
+        metallic = getMetallicFromNodeTree(hit.material.nodeTree, hit.uv);
+        roughness = getRoughnessFromNodeTree(hit.material.nodeTree, hit.uv);
     }
     
     // Debug: print glass material info (only first few times)

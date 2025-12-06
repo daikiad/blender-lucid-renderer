@@ -419,8 +419,14 @@ def export_scene_to_json(depsgraph):
                 print(f"[DIYRenderer] Warning: Could not get corner normals: {e}")
                 use_smooth = False
         
+        # Get UV layer if available
+        uv_layer = None
+        if mesh.uv_layers:
+            uv_layer = mesh.uv_layers.active
+        
         triangles = []
         triangle_normals = []
+        triangle_uvs = []  # UV per triangle vertex
         
         for poly in mesh.polygons:
             v_indices = list(poly.vertices)
@@ -443,6 +449,17 @@ def export_scene_to_json(depsgraph):
                         [n0.x, n0.y, n0.z],
                         [n1.x, n1.y, n1.z],
                         [n2.x, n2.y, n2.z]
+                    ])
+                
+                # Export UV coordinates for this triangle
+                if uv_layer:
+                    uv0 = uv_layer.data[loop_indices[0]].uv
+                    uv1 = uv_layer.data[loop_indices[i]].uv
+                    uv2 = uv_layer.data[loop_indices[i+1]].uv
+                    triangle_uvs.append([
+                        [uv0.x, uv0.y],
+                        [uv1.x, uv1.y],
+                        [uv2.x, uv2.y]
                     ])
         
         mat_props = get_material_properties(obj)
@@ -527,6 +544,9 @@ def export_scene_to_json(depsgraph):
         if use_smooth and triangle_normals:
             mesh_data["triangle_normals"] = triangle_normals
             mesh_data["smooth"] = True
+        
+        if triangle_uvs:
+            mesh_data["triangle_uvs"] = triangle_uvs
         
         scene_data["meshes"].append(mesh_data)
         eval_obj.to_mesh_clear()
