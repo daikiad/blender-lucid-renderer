@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from .backend import RendererBackend
 
 from .state import (
-    RenderMode, ChangeType, CameraParams, RenderParams, 
+    RenderMode, CameraParams, RenderParams, 
     RenderResult, RENDER_CONSTANTS
 )
 from .scene_export import export_scene_to_file, get_scene_cache
@@ -62,7 +62,7 @@ class ViewportRenderer:
         depsgraph: Any,
         state: 'ViewportState',
         session: Union['RenderSession', 'RendererBackend']
-    ) -> None:
+    ) -> Tuple[int, int]:
         """ビューポートをレンダリング
         
         view_draw から呼び出されるメインメソッド。
@@ -72,6 +72,9 @@ class ViewportRenderer:
             depsgraph: 依存関係グラフ
             state: ビューポート状態
             session: レンダリングセッション（または後方互換の RendererBackend）
+        
+        Returns:
+            (current_samples, target_samples) のタプル
         """
         import gpu
         from gpu_extras.presets import draw_texture_2d
@@ -84,80 +87,93 @@ class ViewportRenderer:
         height = region.height
         current_time = time.time()
         
-        # 1. 変更検出
-        change_type = self._detect_changes(context, depsgraph, state)
+        # 1. カメラ変更をチェック（ビューポート操作用）
+        camera_changed = self._check_camera_changed(context, state)
         
-        # 2. シーン変更フラグを処理
-        if state.scene_update_pending:
+        # 2. シーン変更フラグを処理（engine.view_update から）
+        content_changed = state.scene_update_pending
+        if content_changed:
             state.scene_update_pending = False
-            if change_type == ChangeType.NONE:
-                change_type = ChangeType.CONTENT
         
-        # 3. 変更があった場合の処理
+        # 3. 何か変更があった場合の処理
+        any_change = camera_changed or content_changed
         was_in_final_mode = (current_time - state.last_change_time) >= RENDER_CONSTANTS.EDITING_TIMEOUT
-        if change_type != ChangeType.NONE:
-            state.reset_for_scene_change()
+        if any_change:
+            # 累積サンプルをリセット、時間を更新
+            state.accumulated_samples = {}
+            state.last_change_time = time.time()
             
             # 最終モード中に変更された場合はキャンセル
             if was_in_final_mode:
                 session.cancel()
         
         # 4. モード判定
-        mode = self._determine_mode(current_time, state, change_type)
+        mode = self._determine_mode(current_time, state, any_change)
         
-        # 5. レンダリングパラメータを計算
-        params, camera = self._compute_params(context, mode, width, height)
+        # 5. レンダリングパラメータを計算（累積サンプリング用オフセットを取得）
+        # FINALモードでは累積サンプル数をオフセットとして使用
+        sample_offset = 0
+        if mode == RenderMode.FINAL:
+            # 現在の解像度でのサンプル数を取得（仮の解像度で計算）
+            diy = context.scene.diy_renderer
+            scale_factor = diy.viewport_scale_final
+            render_width = max(1, width // scale_factor)
+            render_height = max(1, height // scale_factor)
+            # accumulated_samples は (array, count) のタプルを保持
+            acc_data = state.accumulated_samples.get((render_width, render_height))
+            if acc_data is not None:
+                sample_offset = acc_data[1]  # count
+        
+        params, camera = self._compute_params(context, mode, width, height, sample_offset)
         
         # 6. 解像度変更チェック
         if (state.last_render_width != params.width or 
             state.last_render_height != params.height):
             state.reset_for_resolution_change()
         
-        # 7. 結果をポーリング
-        self._poll_results(state, session, current_time)
+        # 7. 結果をポーリング（テクスチャ更新があったかを取得）
+        texture_updated = self._poll_results(state, session, current_time)
         
         # 8. 非同期エクスポートの完了をチェック
         self._check_export_completion(context, depsgraph, state, session)
         
         # 9. 新しいレンダリングを開始（必要な場合）
-        content_changed = (change_type == ChangeType.CONTENT)
         self._maybe_start_render(
             context, depsgraph, state, session,
             params, camera, mode, content_changed, current_time,
             session_id
         )
         
-        # 10. 再描画をスケジュール
-        self._schedule_redraw(context, state, mode, params)
+        # 10. 再描画をスケジュール（テクスチャ更新時は必ず再描画）
+        self._schedule_redraw(context, state, mode, params, texture_updated)
         
         # 11. テクスチャを描画
-        self._draw_texture(context, state, width, height)
+        current_samples, target_samples = self._draw_texture(context, state, width, height)
+        
+        return current_samples, target_samples
     
     # =========================================================================
-    # 変更検出
+    # カメラ変更検出
     # =========================================================================
     
-    def _detect_changes(
+    def _check_camera_changed(
         self,
         context: Any,
-        depsgraph: Any,
         state: 'ViewportState'
-    ) -> ChangeType:
+    ) -> bool:
         """カメラ（ビュー）の変更を検出
         
-        注意: シーンコンテンツの変更検出は engine.view_update() で行い、
-        state.scene_update_pending フラグで通知されます。
-        このメソッドはカメラ（ビューマトリクス）の変更のみを検出します。
-        
-        Blender の view_update はカメラ操作（回転、パン、ズーム）では
+        Blender の view_update はビューポートのカメラ操作（回転、パン、ズーム）では
         呼び出されないため、view_draw 内で毎フレーム検出する必要があります。
         
+        シーンコンテンツの変更検出は engine.view_update() で行い、
+        state.scene_update_pending フラグで通知されます。
+        
         Returns:
-            変更の種類（CAMERA_ONLY または NONE）
+            カメラが変更された場合 True
         """
         camera_changed = False
         
-        # カメラ（ビュー）の変更検出
         region_data = context.region_data
         if region_data is not None:
             current_matrix = region_data.view_matrix.copy()
@@ -189,11 +205,7 @@ class ViewportRenderer:
                 state.last_view_perspective = current_perspective
                 state.last_view_distance = current_distance
         
-        # 結果を返す（カメラ変更のみ検出）
-        if camera_changed:
-            return ChangeType.CAMERA_ONLY
-        else:
-            return ChangeType.NONE
+        return camera_changed
     
     # =========================================================================
     # モード判定
@@ -203,16 +215,21 @@ class ViewportRenderer:
         self,
         current_time: float,
         state: 'ViewportState',
-        change_type: ChangeType
+        any_change: bool
     ) -> RenderMode:
         """レンダリングモードを判定
+        
+        Args:
+            current_time: 現在時刻
+            state: ビューポート状態
+            any_change: 何か変更があったか（カメラまたはシーン）
         
         Returns:
             編集モードまたは最終モード
         """
         time_since_change = current_time - state.last_change_time
         
-        if change_type != ChangeType.NONE or time_since_change < RENDER_CONSTANTS.EDITING_TIMEOUT:
+        if any_change or time_since_change < RENDER_CONSTANTS.EDITING_TIMEOUT:
             return RenderMode.EDITING
         else:
             return RenderMode.FINAL
@@ -226,9 +243,13 @@ class ViewportRenderer:
         context: Any,
         mode: RenderMode,
         width: int,
-        height: int
+        height: int,
+        sample_offset: int = 0
     ) -> Tuple[RenderParams, Optional[CameraParams]]:
         """レンダリングパラメータを計算
+        
+        Args:
+            sample_offset: 累積サンプリング用のオフセット（FINALモード用）
         
         Returns:
             (RenderParams, CameraParams) のタプル
@@ -257,7 +278,8 @@ class ViewportRenderer:
             samples=1,
             max_bounces=max_bounces,
             algorithm=diy.sampling_algorithm,
-            debug_mode=debug_mode
+            debug_mode=debug_mode,
+            sample_offset=sample_offset
         )
         
         # カメラパラメータ
@@ -320,15 +342,19 @@ class ViewportRenderer:
         state: 'ViewportState',
         session: Union['RenderSession', 'RendererBackend'],
         current_time: float
-    ) -> None:
-        """レンダリング結果をポーリング"""
+    ) -> bool:
+        """レンダリング結果をポーリング
+        
+        Returns:
+            テクスチャが更新された場合 True
+        """
         import gpu
         
         if state.render_future is None:
-            return
+            return False
         
         if not state.render_future.done():
-            return
+            return False
         
         try:
             result: RenderResult = state.render_future.result()
@@ -336,11 +362,11 @@ class ViewportRenderer:
             state.last_render_complete_time = current_time
             
             if result.cancelled or not result.pixels:
-                return
+                return False
             
             expected_len = result.width * result.height * 4
             if len(result.pixels) != expected_len:
-                return
+                return False
             
             # サンプル累積
             self._accumulate_samples(state, result)
@@ -348,50 +374,56 @@ class ViewportRenderer:
             # テクスチャ更新
             self._update_texture(state, result)
             
+            return True
+            
         except Exception as e:
             print(f"[ViewportRenderer] Render error: {e}")
             import traceback
             traceback.print_exc()
             state.render_future = None
+            return False
     
     def _accumulate_samples(
         self,
         state: 'ViewportState',
         result: RenderResult
     ) -> None:
-        """サンプルを累積"""
-        if state.pending_camera_update:
-            return
-        
-        tile_key = f"{result.width}x{result.height}"
+        """サンプルを累積（重み付き平均）"""
+        tile_key = (result.width, result.height)
         
         if tile_key in state.accumulated_samples:
             acc_array, prev_count = state.accumulated_samples[tile_key]
             new_count = prev_count + result.samples
+            
+            # 重み付き平均: new = (old * old_count + new * new_samples) / total_count
+            # 累積バッファは既に平均化されているので、まず合計に戻す
             for i in range(len(acc_array)):
-                acc_array[i] += result.pixels[i]
-            state.accumulated_samples[tile_key] = (acc_array, new_count)
+                old_sum = acc_array[i] * prev_count
+                new_sum = result.pixels[i] * result.samples
+                acc_array[i] = (old_sum + new_sum) / new_count
         else:
+            # 最初のサンプル
             acc_array = array.array('f', result.pixels)
-            state.accumulated_samples[tile_key] = (acc_array, result.samples)
+            new_count = result.samples
+        
+        state.accumulated_samples[tile_key] = (acc_array, new_count)
     
     def _update_texture(
         self,
         state: 'ViewportState',
         result: RenderResult
     ) -> None:
-        """テクスチャを更新"""
+        """テクスチャを更新（累積バッファから）"""
         import gpu
         
-        tile_key = f"{result.width}x{result.height}"
+        tile_key = (result.width, result.height)
+        acc_data = state.accumulated_samples.get(tile_key)
         
-        if tile_key in state.accumulated_samples:
-            acc_array, count = state.accumulated_samples[tile_key]
-            inv_count = 1.0 / count
-            display_pixels = [v * inv_count for v in acc_array]
-        else:
-            inv_samples = 1.0 / result.samples
-            display_pixels = [v * inv_samples for v in result.pixels]
+        if acc_data is None:
+            return
+        
+        acc_array, _ = acc_data
+        display_pixels = list(acc_array)
         
         expected_len = result.width * result.height * 4
         buffer = gpu.types.Buffer('FLOAT', expected_len, display_pixels)
@@ -457,6 +489,7 @@ class ViewportRenderer:
                     width=data['render_width'],
                     height=data['render_height'],
                     samples=data['samples'],
+                    sample_offset=data.get('sample_offset', 0),
                     max_bounces=data['max_bounces'],
                     algorithm=data['algorithm'],
                     debug_mode=data['debug_mode']
@@ -500,11 +533,6 @@ class ViewportRenderer:
         if state.is_rendering():
             return
         
-        # カメラ更新待ちをクリア
-        if state.pending_camera_update:
-            state.pending_camera_update = False
-            state.accumulated_samples = {}
-        
         state.last_render_width = params.width
         state.last_render_height = params.height
         
@@ -519,6 +547,7 @@ class ViewportRenderer:
                     'render_width': params.width,
                     'render_height': params.height,
                     'samples': params.samples,
+                    'sample_offset': params.sample_offset,
                     'max_bounces': params.max_bounces,
                     'algorithm': params.algorithm,
                     'debug_mode': params.debug_mode,
@@ -545,13 +574,13 @@ class ViewportRenderer:
                 if future:
                     state.render_future = future
         else:
-            # 最終プレビュー: 常に再エクスポート
-            scene_file = export_scene_to_file(depsgraph, session_id=session_id)
-            state.last_scene_export_time = current_time
+            # 最終プレビュー: キャッシュを使用（シーンが変わっていなければ再エクスポート不要）
+            scene_file = get_scene_cache(session_id).get_cached_file_fast()
+            if not scene_file:
+                scene_file = export_scene_to_file(depsgraph, session_id=session_id)
+                state.last_scene_export_time = current_time
             
             if scene_file:
-                # 前回をキャンセル
-                session.cancel()
                 future = session.render_tile_async(params, scene_file, camera)
                 if future:
                     state.render_future = future
@@ -595,10 +624,7 @@ class ViewportRenderer:
                 target_samples = 64
             
             current_samples = state.get_current_sample_count(params.width, params.height)
-            return (
-                state.pending_camera_update or
-                current_samples < target_samples
-            )
+            return current_samples < target_samples
     
     # =========================================================================
     # 再描画スケジュール
@@ -609,7 +635,8 @@ class ViewportRenderer:
         context: Any,
         state: 'ViewportState',
         mode: RenderMode,
-        params: RenderParams
+        params: RenderParams,
+        texture_updated: bool = False
     ) -> None:
         """再描画をスケジュール"""
         current_samples = state.get_current_sample_count(params.width, params.height)
@@ -621,6 +648,7 @@ class ViewportRenderer:
             target_samples = 64
         
         should_redraw = (
+            texture_updated or  # テクスチャが更新された場合は必ず再描画
             state.is_rendering() or
             state.is_exporting() or
             mode == RenderMode.EDITING or
@@ -642,12 +670,26 @@ class ViewportRenderer:
         state: 'ViewportState',
         width: int,
         height: int
-    ) -> None:
-        """テクスチャを描画"""
+    ) -> Tuple[int, int]:
+        """テクスチャを描画
+        
+        Returns:
+            (current_samples, target_samples) のタプル
+        """
         import gpu
         from gpu_extras.presets import draw_texture_2d
         
+        # OpenGL ステートを設定
+        gpu.state.blend_set('ALPHA_PREMULT')
+        
+        current_samples = 0
+        target_samples = 64
+        
         if state.texture is not None:
+            # 現在の累積サンプル数を確認
+            tile_key = (state.texture_width, state.texture_height)
+            acc_data = state.accumulated_samples.get(tile_key)
+            current_samples = acc_data[1] if acc_data else 0
             draw_texture_2d(state.texture, (0, 0), width, height)
         else:
             # プレースホルダーを描画
@@ -659,3 +701,15 @@ class ViewportRenderer:
                     (placeholder_size, placeholder_size), format='RGBA16F', data=placeholder_buffer
                 )
             draw_texture_2d(state.placeholder_texture, (0, 0), width, height)
+        
+        # ブレンドをリセット
+        gpu.state.blend_set('NONE')
+        
+        # ターゲットサンプル数を取得
+        try:
+            diy = context.scene.diy_renderer
+            target_samples = diy.viewport_samples
+        except Exception:
+            pass
+        
+        return current_samples, target_samples

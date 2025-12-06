@@ -263,7 +263,10 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             return
         
         viewport = self._get_viewport_renderer()
-        viewport.render(context, depsgraph, session.state, session)
+        current_samples, target_samples = viewport.render(context, depsgraph, session.state, session)
+        
+        # ヘッダーにサンプル数を表示
+        self.update_stats("", f"Samples: {current_samples}/{target_samples}")
     
     def _draw_unavailable_message(self, context) -> None:
         """pybind11 が利用不可の場合のメッセージを描画"""

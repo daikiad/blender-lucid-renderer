@@ -37,13 +37,6 @@ class RenderMode(Enum):
     F12 = auto()          # F12 レンダリング
 
 
-class ChangeType(Enum):
-    """シーン変更の種類"""
-    NONE = auto()         # 変更なし
-    CAMERA_ONLY = auto()  # カメラのみ変更
-    CONTENT = auto()      # シーン内容が変更
-
-
 # =============================================================================
 # カメラパラメータ
 # =============================================================================
@@ -160,9 +153,7 @@ class ViewportState:
     last_view_distance: Optional[float] = None
     
     # --- フラグ ---
-    pending_camera_update: bool = False
     scene_update_pending: bool = False
-    content_changed: bool = False
     
     # --- 非同期処理 ---
     render_future: Optional[Future] = None
@@ -173,10 +164,9 @@ class ViewportState:
     job_id: int = 0
     
     def reset_for_scene_change(self) -> None:
-        """シーン変更時のリセット"""
+        """シーン変更時のリセット（後方互換用、非推奨）"""
         self.accumulated_samples = {}
         self.last_change_time = time.time()
-        self.pending_camera_update = True
     
     def reset_for_resolution_change(self) -> None:
         """解像度変更時のリセット"""
@@ -194,7 +184,7 @@ class ViewportState:
     
     def get_current_sample_count(self, width: int, height: int) -> int:
         """現在のサンプル数を取得"""
-        tile_key = f"{width}x{height}"
+        tile_key = (width, height)
         if tile_key in self.accumulated_samples:
             return self.accumulated_samples[tile_key][1]
         return 0

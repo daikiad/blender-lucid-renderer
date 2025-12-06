@@ -100,6 +100,7 @@ class SceneSync:
         
         # 初回は全更新
         if self._first_sync:
+            self._first_sync = False
             return UpdateFlags.FULL_SCENE
         
         # --- 高レベル API: id_type_updated() ---
@@ -126,19 +127,25 @@ class SceneSync:
             flags |= UpdateFlags.MATERIALS
         
         # オブジェクトの変更（追加/削除/移動/変形）
+        # 注意: id_type_updated('OBJECT') は選択変更でも True を返すので、
+        # 詳細な updates をチェックして本当に変更があったかを確認する
         if depsgraph.id_type_updated('OBJECT'):
-            # 詳細をチェック: ジオメトリ変更かトランスフォームのみか
             for update in depsgraph.updates:
-                if update.is_updated_geometry:
+                obj = update.id
+                # オブジェクト以外の更新（シーンなど）はスキップ
+                if not hasattr(obj, 'type'):
+                    continue
+                # ジオメトリが変更された場合のみ
+                if update.is_updated_geometry and obj.type in {'MESH', 'LIGHT', 'CAMERA'}:
+                    print(f"[SceneSync] Geometry updated: {obj.name} ({obj.type})")
                     flags |= UpdateFlags.GEOMETRY
                     break
-                if update.is_updated_transform:
-                    # トランスフォームはジオメトリ変更として扱う
-                    # （オブジェクト位置が変わると BVH も変わる）
-                    obj = update.id
-                    if hasattr(obj, 'type') and obj.type in {'MESH', 'LIGHT'}:
-                        flags |= UpdateFlags.GEOMETRY
-                        break
+                # トランスフォームが変更された場合のみ
+                if update.is_updated_transform and obj.type in {'MESH', 'LIGHT'}:
+                    print(f"[SceneSync] Transform updated: {obj.name} ({obj.type})")
+                    flags |= UpdateFlags.GEOMETRY
+                    break
+            # 選択変更のみの場合は flags は NONE のまま
         
         # カメラの変更
         if depsgraph.id_type_updated('CAMERA'):
