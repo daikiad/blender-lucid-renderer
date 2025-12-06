@@ -154,8 +154,6 @@ def serialize_node_tree(node_tree):
                 'default_value': serialize_socket_value(socket),
                 'is_linked': socket.is_linked
             }
-            if socket.name == "Base Color" and node.bl_idname == "ShaderNodeBsdfPrincipled":
-                print(f"[DIYRenderer] Exporting Base Color socket: default_value={socket_data['default_value']}, is_linked={socket.is_linked}")
             node_data['inputs'].append(socket_data)
         
         # Serialize output sockets
@@ -279,8 +277,6 @@ def get_material_properties(obj):
             emission_color[1] * emission_strength,
             emission_color[2] * emission_strength
         ]
-        
-        print(f"[DIYRenderer] Material '{mat.name}': emission_color={emission_color}, strength={emission_strength}, final={result['legacy_properties']['emission']}")
     else:
         result['legacy_properties'] = {
             'base_color': [0.8, 0.8, 0.8],
@@ -308,7 +304,6 @@ def export_scene_to_json(depsgraph):
             base_dir = export_dir
     
     path = os.path.join(base_dir, "diy_scene_debug.json")
-    print(f"[DIYRenderer] Exporting scene to: {path}")
     
     scene_data = {
         "version": "1.0",
@@ -386,7 +381,6 @@ def export_scene_to_json(depsgraph):
                 "ior": mat_props['legacy_properties'].get('ior', 1.45),
                 "node_tree": mat_props['node_tree']
             }
-            print(f"[DIYRenderer] Mesh '{obj.name}': emission={material['emission']}, base_color={material['base_color']}, transmission={material['transmission']}, ior={material['ior']}")
         else:
             material = {
                 "name": "default",
@@ -462,7 +456,6 @@ def export_scene_to_json(depsgraph):
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(scene_data, f, indent=2)
     
-    print(f"[DIYRenderer] Exported {len(scene_data['meshes'])} meshes to JSON: {path}")
     return path
 
 
@@ -513,16 +506,12 @@ class SceneCache:
             self.scene_hash == current_hash):
             return self.cached_file
         
-        import time
-        start = time.time()
-        
         path = export_scene_to_json(depsgraph)
-        
-        elapsed = time.time() - start
-        print(f"[DIYRenderer] Scene export took {elapsed*1000:.1f}ms")
         
         self.cached_file = path
         self.scene_hash = current_hash
+        
+        import time
         self.last_export_time = time.time()
         
         return path
@@ -536,7 +525,6 @@ class SceneCache:
     def invalidate(self):
         """Force re-export on next request."""
         self.scene_hash = None
-        print("[DIYRenderer] Scene cache invalidated")
 
 
 def get_scene_cache():

@@ -290,7 +290,6 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         
         # 前回のレンダリングをキャンセル（指定された場合のみ）
         if cancel_previous:
-            print("[DIYRenderer] Cancelling previous render (cancel_previous=True)")
             renderer.cancel()
         
         # 前回の Future が完了するのを待つ（短時間で終わるはず）
@@ -387,14 +386,10 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             self.pybind_accumulated_samples = {}
             
             # 最終プレビューモード中に変更された場合のみキャンセル
-            # ★重要: 編集中モードに切り替わった後は、低解像度レンダリングを完了させるため
-            #         ここでキャンセルするのは最初の変更時のみ
             if was_in_final_mode:
-                print(f"[DIYRenderer] Cancelling from final mode (time_since={time_since_last_change:.3f}s)")
                 renderer = get_pybind_renderer()
                 if renderer is not None:
                     renderer.cancel()
-                # テクスチャはクリアしない（前回の結果を保持）
             
             # 次のレンダリングが必要なことを記録
             self._pending_camera_update = True
@@ -418,8 +413,6 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             samples_per_iteration = 1
             viewport_bounces = 4
             is_editing = True
-            if scene_changed:
-                print(f"[DIYRenderer] is_editing=True (scene_changed)")
         else:
             # 最終プレビュー: 高解像度で品質重視
             scale_factor = final_scale
@@ -508,8 +501,6 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                     if scene_file and self._pending_export_data:
                         data = self._pending_export_data
                         self._pending_export_data = None
-                        
-                        print(f"[DIYRenderer] Async export done, starting render: {data['render_width']}x{data['render_height']}")
                         self._start_pybind_viewport_render(
                             context, depsgraph, 
                             data['render_width'], data['render_height'],
@@ -543,37 +534,20 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                               not self._export_future.done())
         
         if is_editing:
-            # 編集中は、以下の場合のみ新しいレンダリングを開始:
-            # 1. テクスチャがない（初回）
-            # 2. レンダリング中でなく、前回のエクスポートから200ms以上経過
-            # 3. エクスポート中でない
+            # 編集中は以下の条件でレンダリング開始を制御:
+            # - テクスチャがない（初回）
+            # - エクスポート/レンダリング中でない
+            # - スロットリング間隔を経過
             if self.pybind_texture is None and not export_in_progress:
                 needs_new_render = True
-                throttle_reason = "no_texture"
-            elif export_in_progress:
-                # 非同期エクスポート中 → 完了を待つ（既存テクスチャを維持）
+            elif export_in_progress or rendering_in_progress:
                 needs_new_render = False
-                throttle_reason = "export_in_progress"
-            elif rendering_in_progress:
-                needs_new_render = False
-                throttle_reason = "rendering_in_progress"
             elif time_since_render_complete < RENDER_COOLDOWN:
                 needs_new_render = False
-                throttle_reason = "cooldown"
             elif self._content_changed and time_since_last_export < EXPORT_THROTTLE_INTERVAL:
-                # 内容変更があるがスロットリング中 → 待つ
                 needs_new_render = False
-                throttle_reason = f"throttle({time_since_last_export:.3f}s < {EXPORT_THROTTLE_INTERVAL}s)"
             else:
                 needs_new_render = True
-                throttle_reason = f"ready(export_elapsed={time_since_last_export:.3f}s)"
-            
-            # デバッグ: スロットリング状態を定期的にログ
-            if not hasattr(self, '_last_throttle_log_time'):
-                self._last_throttle_log_time = 0
-            if current_time - self._last_throttle_log_time > 0.5:  # 500msごとにログ
-                print(f"[Throttle] needs={needs_new_render}, reason={throttle_reason}, content_changed={self._content_changed}")
-                self._last_throttle_log_time = current_time
         else:
             needs_new_render = (
                 self.pybind_texture is None or
@@ -656,7 +630,6 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                         scene_file = export_scene_to_file(depsgraph)
                         self._last_scene_export_time = current_time
                     if scene_file:
-                        print(f"[DIYRenderer] Starting render (camera only): {render_width}x{render_height}")
                         self._start_pybind_viewport_render(
                             context, depsgraph, render_width, render_height,
                             cam_params, samples_per_iteration, max_bounces, algorithm, debug_mode,
@@ -667,7 +640,6 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                     scene_file = export_scene_to_file(depsgraph)
                     self._last_scene_export_time = current_time
                     if scene_file:
-                        print(f"[DIYRenderer] Starting render (final): {render_width}x{render_height}")
                         self._start_pybind_viewport_render(
                             context, depsgraph, render_width, render_height,
                             cam_params, samples_per_iteration, max_bounces, algorithm, debug_mode,
@@ -1083,28 +1055,23 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             
             if update.is_updated_geometry:
                 needs_reset = True
-                print(f"[DIYRenderer] Geometry changed: {obj.name if hasattr(obj, 'name') else type(obj)}")
                 break
             
             if update.is_updated_transform:
                 if hasattr(obj, 'type') and obj.type in {'MESH', 'LIGHT', 'CAMERA'}:
                     needs_reset = True
-                    print(f"[DIYRenderer] Transform changed: {obj.name}")
                     break
             
             if isinstance(obj, bpy.types.Material):
                 needs_reset = True
-                print(f"[DIYRenderer] Material changed: {obj.name}")
                 break
             
             if isinstance(obj, bpy.types.World):
                 needs_reset = True
-                print("[DIYRenderer] World changed")
                 break
             
             if isinstance(obj, bpy.types.Light):
                 needs_reset = True
-                print(f"[DIYRenderer] Light changed: {obj.name}")
                 break
         
         if not needs_reset:
@@ -1113,23 +1080,10 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         # シーンキャッシュを無効化
         get_scene_cache().invalidate()
         
-        # ★ view_update でのキャンセルは行わない
-        # view_draw で編集中モードを検出し、低解像度レンダリングを完了させる
-        # キャンセルは view_draw の最終プレビューモード移行時のみ行う
-        
         # シーンが変更されたことを記録（view_draw で使用）
         self._scene_update_pending = True
         
-        # pybind11 レンダラーをキャンセル（最終プレビュー中の場合のみ）
-        # ★注: これは以前のコード。編集中モードのサポートのため削除
-        # if PYBIND_AVAILABLE:
-        #     renderer = get_pybind_renderer()
-        #     if renderer is not None:
-        #         renderer.cancel()
-        
-        # ★重要: テクスチャはリセットしない！
-        # 新しいレンダリング結果が来るまで既存のテクスチャを維持することで
-        # ちらつきを防ぐ。累積サンプルのみリセット（新しいシーンなので）
+        # 累積サンプルのみリセット（テクスチャは維持してちらつき防止）
         if hasattr(self, 'pybind_accumulated_samples'):
             self.pybind_accumulated_samples = {}
 
