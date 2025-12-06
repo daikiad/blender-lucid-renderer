@@ -7,23 +7,25 @@ F12 レンダリングとビューポートレンダリングの両方を処理�
 処理フロー:
 1. Blender が render() または view_update()/view_draw() を呼び出す
 2. シーンをエクスポート (scene_export.py)
-3. サーバーモードまたはレガシーモードでレンダリング
+3. pybind11 で C++ レンダラーを直接呼び出し
 4. 結果を Blender に返す
 
 主要クラス:
 - DIYRenderEngine: bpy.types.RenderEngine のサブクラス
 
-グローバル変数:
-- _server_renderer: 持続する SubprocessRenderer インスタンス
-- _server_scene_hash: シーン変更検出用の MD5 ハッシュ
+レンダリングモード:
+- pybind11モード: C++ を直接呼び出し（推奨、即座のキャンセル可能）
+- レガシーモード: 毎回プロセス起動（互換性用フォールバック）
 """
 
 import os
+import sys
 import math
 import time
-import queue
-import threading
 import array
+import hashlib
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import bpy
@@ -31,71 +33,81 @@ from mathutils import Vector
 
 from .scene_export import export_scene_to_file, get_scene_cache
 from .renderer import call_external_renderer, compute_camera_params
-from .subprocess_renderer import SubprocessRenderer
-from .renderer_interface import (
-    RenderConfig, CameraParams as RICameraParams, TileParams,
-    BackendType, AlgorithmType
-)
+
+# =============================================================================
+# pybind11 モジュールのインポート
+# =============================================================================
+# pybind11 でビルドした C++ レンダラーモジュールをインポート
+# ビルドされていない場合は None になり、サーバーモードにフォールバック
+
+_addon_dir = os.path.dirname(os.path.abspath(__file__))
+_pybind_paths = [
+    os.path.join(_addon_dir, 'cpp_renderer', 'build_pybind'),
+    os.path.join(_addon_dir, 'cpp_renderer', 'build'),
+]
+for _path in _pybind_paths:
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+try:
+    import diyrenderer
+    PYBIND_AVAILABLE = True
+    print(f"[DIYRenderer] pybind11 module loaded: version {diyrenderer.__version__}, OpenMP={diyrenderer.openmp_enabled}")
+except ImportError as e:
+    diyrenderer = None
+    PYBIND_AVAILABLE = False
+    print(f"[DIYRenderer] pybind11 module not available: {e}")
 
 
 # =============================================================================
-# グローバル状態 (サーバーモード用)
+# グローバル状態
 # =============================================================================
-# サーバーモードでは、レンダラープロセスを持続させてオーバーヘッドを削減します。
-# これらのグローバル変数でプロセスの状態を管理します。
+# レンダラーの状態を管理するグローバル変数
 
-_server_renderer: Optional[SubprocessRenderer] = None  # 持続するレンダラーインスタンス
-_server_scene_hash: Optional[str] = None               # シーン変更検出用ハッシュ
-
-
-def get_server_renderer() -> Optional[SubprocessRenderer]:
-    """Get the global server renderer instance."""
-    global _server_renderer
-    return _server_renderer
+# pybind11 モード用
+_pybind_renderer = None  # diyrenderer.Renderer インスタンス
+_pybind_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None  # レンダリング用スレッドプール
+_pybind_future: Optional[concurrent.futures.Future] = None  # 現在のレンダリングタスク
+_pybind_scene_hash: Optional[str] = None  # シーン変更検出用ハッシュ
+_pybind_job_id: int = 0  # ジョブ ID（古い結果を破棄するため）
 
 
-def start_server_renderer(config: RenderConfig) -> bool:
-    """
-    Start or restart the server renderer with given config.
+def get_pybind_renderer():
+    """Get or create the global pybind11 renderer instance."""
+    global _pybind_renderer, _pybind_executor
     
-    サーバーモードのレンダラープロセスを起動します。
-    すでに起動済みで動作中なら何もしません。
+    if not PYBIND_AVAILABLE:
+        return None
     
-    Args:
-        config: レンダリング設定 (backend, algorithm, max_depth)
+    if _pybind_renderer is None:
+        _pybind_renderer = diyrenderer.Renderer()
+        _pybind_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        print("[DIYRenderer] pybind11 renderer created")
     
-    Returns:
-        起動成功なら True
-    """
-    global _server_renderer, _server_scene_hash
-    
-    # 既存のインスタンスをチェック
-    if _server_renderer is not None:
-        if _server_renderer.is_running():
-            return True  # すでに起動済み
-        _server_renderer.stop()  # 停止済みなら再起動
-    
-    # 新しいインスタンスを作成して起動
-    _server_renderer = SubprocessRenderer()
-    _server_scene_hash = None  # シーンキャッシュをクリア
-    
-    success = _server_renderer.start(config)
-    if success:
-        print("[DIYRenderer] Server mode started")
-    else:
-        print("[DIYRenderer] Failed to start server mode")
-        _server_renderer = None
-    return success
+    return _pybind_renderer
 
 
-def stop_server_renderer():
-    """Stop the server renderer if running."""
-    global _server_renderer, _server_scene_hash
-    if _server_renderer is not None:
-        _server_renderer.stop()
-        _server_renderer = None
-        _server_scene_hash = None
-        print("[DIYRenderer] Server mode stopped")
+def stop_pybind_renderer():
+    """Stop and cleanup the pybind11 renderer."""
+    global _pybind_renderer, _pybind_executor, _pybind_future, _pybind_scene_hash
+    
+    if _pybind_renderer is not None:
+        _pybind_renderer.cancel()
+    
+    if _pybind_future is not None:
+        try:
+            _pybind_future.result(timeout=1.0)
+        except Exception:
+            pass
+        _pybind_future = None
+    
+    if _pybind_executor is not None:
+        _pybind_executor.shutdown(wait=False)
+        _pybind_executor = None
+    
+    _pybind_renderer = None
+    _pybind_scene_hash = None
+    print("[DIYRenderer] pybind11 renderer stopped")
 
 
 # =============================================================================
@@ -122,25 +134,410 @@ class DIYRenderEngine(bpy.types.RenderEngine):
     bl_use_shading_nodes = True
     bl_use_shading_nodes_custom = False
 
-    def _init_async_render(self):
+    def _init_pybind_viewport(self):
         """
-        ビューポートレンダリング用の非同期インフラを遅延初期化。
+        pybind11 ビューポートレンダリング用の初期化。
         
-        ビューポートではバックグラウンドスレッドでレンダリングを行い、
-        UI をブロックしないようにします。
+        view_draw から呼び出され、インスタンス変数を初期化します。
         """
-        if not hasattr(self, 'render_queue'):
-            self.render_queue = queue.Queue(maxsize=1)    # レンダリングジョブキュー
-            self.result_queue = queue.Queue()              # 結果キュー
-            self.render_thread = None                      # レンダリングスレッド
-            self.stop_thread = False                       # スレッド停止フラグ
-            self.rendering_in_progress = False             # レンダリング中フラグ
-            self.high_res_complete = False                 # 高解像度完了フラグ
-            self.accumulated_samples = {}                  # サンプル累積データ
-            self.last_camera_matrix = None                 # カメラ変更検出用
-            self.last_view_perspective = None              # ビュー変更検出用
-            self.viewport_thread_running = False           # スレッド実行中フラグ
-            self.current_render_cancelled = False          # キャンセルフラグ
+        global _pybind_executor, _pybind_renderer
+        
+        # Executor の初期化
+        if _pybind_executor is None:
+            _pybind_executor = ThreadPoolExecutor(max_workers=1)
+        
+        # レンダラーの初期化
+        if _pybind_renderer is None:
+            get_pybind_renderer()
+        
+        # インスタンス変数の初期化
+        if not hasattr(self, '_pybind_viewport_future'):
+            self._pybind_viewport_future = None
+        if not hasattr(self, '_pybind_viewport_job_id'):
+            self._pybind_viewport_job_id = 0
+        if not hasattr(self, 'last_camera_matrix'):
+            self.last_camera_matrix = None
+        if not hasattr(self, 'last_view_perspective'):
+            self.last_view_perspective = None
+        if not hasattr(self, 'last_view_distance'):
+            self.last_view_distance = None
+
+    def _render_viewport_pybind(self, context, depsgraph, render_width, render_height,
+                                 cam_params, samples, max_depth, algorithm, debug_mode):
+        """
+        pybind11 を使用してビューポートをレンダリング。
+        
+        協調キャンセルに対応した非同期レンダリングを行います。
+        
+        Args:
+            context: Blender コンテキスト
+            depsgraph: 依存関係グラフ
+            render_width, render_height: レンダリング解像度
+            cam_params: カメラパラメータ
+            samples: サンプル数
+            max_depth: 最大バウンス数
+            algorithm: アルゴリズム名
+            debug_mode: デバッグモード名（None で通常レンダリング）
+        
+        Returns:
+            (pixels, job_id) または None
+        """
+        global _pybind_renderer, _pybind_executor, _pybind_scene_hash, _pybind_job_id
+        
+        renderer = get_pybind_renderer()
+        if renderer is None:
+            return None
+        
+        # シーンをエクスポート
+        scene_file = export_scene_to_file(depsgraph)
+        if not scene_file:
+            return None
+        
+        # JSON を読み込み
+        try:
+            with open(scene_file, 'r') as f:
+                scene_json = f.read()
+        except Exception as e:
+            print(f"[DIYRenderer] Failed to read scene: {e}")
+            return None
+        
+        # シーンハッシュをチェック（hashlib は既にファイル先頭でインポート済み）
+        scene_hash = hashlib.md5(scene_json.encode()).hexdigest()
+        
+        if scene_hash != _pybind_scene_hash:
+            # シーンを更新
+            if not renderer.load_scene_json(scene_json):
+                print("[DIYRenderer] Failed to load scene into pybind renderer")
+                return None
+            _pybind_scene_hash = scene_hash
+        
+        # カメラを設定
+        pos = cam_params['pos']
+        dir_ = cam_params['dir']
+        up = cam_params['up']
+        fov = cam_params['fov']
+        renderer.set_camera(
+            pos[0], pos[1], pos[2],
+            dir_[0], dir_[1], dir_[2],
+            up[0], up[1], up[2],
+            fov
+        )
+        
+        # アルゴリズムを設定
+        renderer.set_algorithm(algorithm)
+        
+        # サンプルオフセットを取得（pybind モードでは pybind_accumulated_samples を使用）
+        tile_key = f"{render_width}x{render_height}"
+        sample_offset = 0
+        if hasattr(self, 'pybind_accumulated_samples') and tile_key in self.pybind_accumulated_samples:
+            sample_offset = self.pybind_accumulated_samples[tile_key][1]
+        
+        # レンダリング実行（GIL 解放されるので他のスレッドも動ける）
+        if debug_mode and debug_mode != 'NONE':
+            debug_map = {'NORMAL': 'normal', 'ALBEDO': 'albedo', 'EMISSION': 'emission'}
+            mode = debug_map.get(debug_mode, 'normal')
+            pixels = renderer.render_debug(
+                0, 0, render_width, render_height,
+                render_width, render_height,
+                mode
+            )
+        else:
+            pixels = renderer.render_tile(
+                0, 0, render_width, render_height,
+                render_width, render_height,
+                samples=samples,
+                sample_offset=sample_offset,
+                max_depth=max_depth
+            )
+        
+        # キャンセルされたかチェック
+        cancelled = renderer.is_cancelled()
+        
+        _pybind_job_id += 1
+        
+        return {
+            'pixels': pixels,
+            'width': render_width,
+            'height': render_height,
+            'samples': samples,
+            'cancelled': cancelled,
+            'job_id': _pybind_job_id
+        }
+
+    def _start_pybind_viewport_render(self, context, depsgraph, render_width, render_height,
+                                       cam_params, samples, max_depth, algorithm, debug_mode):
+        """
+        pybind11 を使用したビューポートレンダリングを非同期で開始。
+        """
+        global _pybind_executor, _pybind_renderer
+        
+        renderer = get_pybind_renderer()
+        if renderer is None or _pybind_executor is None:
+            return
+        
+        # 前回のレンダリングをキャンセル
+        renderer.cancel()
+        
+        # 前回の Future が完了するのを待つ（短時間で終わるはず）
+        if self._pybind_viewport_future is not None:
+            try:
+                self._pybind_viewport_future.result(timeout=0.1)
+            except Exception:
+                pass
+            self._pybind_viewport_future = None
+        
+        # 新しいジョブを開始
+        self._pybind_viewport_job_id += 1
+        
+        def render_task():
+            return self._render_viewport_pybind(
+                context, depsgraph, render_width, render_height,
+                cam_params, samples, max_depth, algorithm, debug_mode
+            )
+        
+        self._pybind_viewport_future = _pybind_executor.submit(render_task)
+
+    def _poll_pybind_viewport_result(self):
+        """
+        pybind11 ビューポートレンダリングの結果をポーリング。
+        
+        Returns:
+            完了していれば result dict、未完了なら None
+        """
+        if self._pybind_viewport_future is None:
+            return None
+        
+        if not self._pybind_viewport_future.done():
+            return None
+        
+        try:
+            result = self._pybind_viewport_future.result()
+            self._pybind_viewport_future = None
+            return result
+        except Exception as e:
+            print(f"[DIYRenderer] pybind viewport render error: {e}")
+            import traceback
+            traceback.print_exc()
+            self._pybind_viewport_future = None
+            return None
+
+    def _view_draw_pybind(self, context, depsgraph):
+        """
+        pybind11 を使用したビューポートレンダリング。
+        
+        協調キャンセル方式により、カメラ移動時に即座にキャンセル可能。
+        """
+        import gpu
+        from gpu_extras.presets import draw_texture_2d
+        
+        region = context.region
+        width = region.width
+        height = region.height
+        target_samples = context.scene.diy_renderer.viewport_samples
+        current_time = time.time()
+        
+        # 初期化
+        if not hasattr(self, 'pybind_viewport_last_change_time'):
+            self.pybind_viewport_last_change_time = current_time
+            self.pybind_last_render_width = 0
+            self.pybind_last_render_height = 0
+            self.pybind_accumulated_samples = {}
+            self.pybind_texture = None
+            self.pybind_texture_width = 0
+            self.pybind_texture_height = 0
+            self._pending_camera_update = False  # カメラ更新待ちフラグ
+            self._was_moving = False  # 前フレームで移動中だったか
+        
+        # 前回のフレームで移動中だったかを記録（カメラ変更検出前に）
+        time_since_last_change = current_time - self.pybind_viewport_last_change_time
+        was_in_high_res_mode = time_since_last_change >= 0.3
+        
+        # カメラ変更検出
+        camera_changed = self._detect_camera_change(context)
+        if camera_changed:
+            self.pybind_viewport_last_change_time = current_time
+            self.pybind_accumulated_samples = {}
+            
+            # 高解像度モード中にカメラが動いた場合のみキャンセル
+            if was_in_high_res_mode:
+                renderer = get_pybind_renderer()
+                if renderer is not None:
+                    renderer.cancel()
+            
+            # 次のレンダリングが必要なことを記録
+            self._pending_camera_update = True
+        
+        time_since_change = current_time - self.pybind_viewport_last_change_time
+        
+        # 解像度とパラメータを決定
+        if time_since_change < 0.3:
+            # 移動中: 低解像度で高速応答
+            scale_factor = 8
+            samples_per_iteration = 1
+            viewport_bounces = 4
+            is_moving = True
+        else:
+            # 静止中: 高解像度で品質重視
+            scale_factor = 2
+            samples_per_iteration = 1
+            viewport_bounces = 8
+            is_moving = False
+        
+        render_width = max(1, width // scale_factor)
+        render_height = max(1, height // scale_factor)
+        
+        # 解像度変更検出
+        resolution_changed = (self.pybind_last_render_width != render_width or 
+                              self.pybind_last_render_height != render_height)
+        if resolution_changed:
+            self.pybind_accumulated_samples = {}
+        
+        tile_key = f"{render_width}x{render_height}"
+        if tile_key in self.pybind_accumulated_samples:
+            current_sample_count = self.pybind_accumulated_samples[tile_key][1]
+        else:
+            current_sample_count = 0
+        
+        # 現在レンダリング中かどうか
+        rendering_in_progress = (self._pybind_viewport_future is not None and 
+                                 not self._pybind_viewport_future.done())
+        
+        # ★まず結果をポーリング（新しいレンダリング開始前に行う）
+        result = self._poll_pybind_viewport_result()
+        if result is not None:
+            ext_pixels = result.get('pixels')
+            result_width = result.get('width', 0)
+            result_height = result.get('height', 0)
+            result_samples = result.get('samples', 1)
+            was_cancelled = result.get('cancelled', False)
+            
+            expected_len = result_width * result_height * 4
+            
+            # キャンセルされていない完了結果のみテクスチャを更新
+            if not was_cancelled and ext_pixels and len(ext_pixels) == expected_len:
+                # カメラ更新待ちがなければサンプル累積
+                if not self._pending_camera_update:
+                    result_tile_key = f"{result_width}x{result_height}"
+                    if result_tile_key in self.pybind_accumulated_samples:
+                        acc_array, prev_count = self.pybind_accumulated_samples[result_tile_key]
+                        new_count = prev_count + result_samples
+                        for i in range(len(acc_array)):
+                            acc_array[i] += ext_pixels[i]
+                        self.pybind_accumulated_samples[result_tile_key] = (acc_array, new_count)
+                        inv_count = 1.0 / new_count
+                        display_pixels = [v * inv_count for v in acc_array]
+                    else:
+                        acc_array = array.array('f', ext_pixels)
+                        self.pybind_accumulated_samples[result_tile_key] = (acc_array, result_samples)
+                        inv_samples = 1.0 / result_samples
+                        display_pixels = [v * inv_samples for v in ext_pixels]
+                else:
+                    # カメラ更新待ち中は累積せず、この結果を表示
+                    inv_samples = 1.0 / result_samples
+                    display_pixels = [v * inv_samples for v in ext_pixels]
+                
+                # テクスチャ更新
+                buffer = gpu.types.Buffer('FLOAT', expected_len, display_pixels)
+                if self.pybind_texture is not None:
+                    try:
+                        del self.pybind_texture
+                    except Exception:
+                        pass
+                self.pybind_texture = gpu.types.GPUTexture(
+                    (result_width, result_height), format='RGBA16F', data=buffer
+                )
+                self.pybind_texture_width = result_width
+                self.pybind_texture_height = result_height
+        
+        # rendering_in_progress を再計算（ポーリング後に Future が None になっている可能性）
+        rendering_in_progress = (self._pybind_viewport_future is not None and 
+                                 not self._pybind_viewport_future.done())
+        
+        # 新しいレンダリングが必要か判定
+        needs_new_render = (
+            self.pybind_texture is None or
+            self._pending_camera_update or  # カメラ更新待ち
+            (not rendering_in_progress and current_sample_count < target_samples)
+        )
+        
+        # ★新しいレンダリングを開始（レンダリング中でなければ）
+        if needs_new_render and not rendering_in_progress:
+            # カメラ更新待ちをクリア
+            if self._pending_camera_update:
+                self._pending_camera_update = False
+                self.pybind_accumulated_samples = {}  # 累積もリセット
+            
+            self.pybind_last_render_width = render_width
+            self.pybind_last_render_height = render_height
+            
+            region_data = context.region_data
+            if region_data is not None:
+                view_matrix_inv = region_data.view_matrix.inverted()
+                
+                cam_pos = view_matrix_inv.translation
+                cam_dir = (view_matrix_inv.to_3x3() @ Vector((0, 0, -1))).normalized()
+                cam_up = (view_matrix_inv.to_3x3() @ Vector((0, 1, 0))).normalized()
+                
+                if region_data.view_perspective == 'CAMERA':
+                    camera = context.scene.camera
+                    if camera and camera.data:
+                        cam_data = camera.data
+                        sensor_width = cam_data.sensor_width
+                        focal_length = cam_data.lens
+                        fov = math.degrees(2 * math.atan(sensor_width / (2 * focal_length)))
+                    else:
+                        fov = 50.0
+                elif region_data.view_perspective == 'PERSP':
+                    fov = 50.0
+                else:
+                    fov = 5.0
+                
+                cam_params = {
+                    'pos': cam_pos,
+                    'dir': cam_dir,
+                    'up': cam_up,
+                    'fov': fov
+                }
+                
+                # シーンエクスポート（移動中はキャッシュを使用）
+                if is_moving:
+                    scene_file = get_scene_cache().get_cached_file_fast()
+                    if not scene_file:
+                        scene_file = export_scene_to_file(depsgraph)
+                else:
+                    scene_file = export_scene_to_file(depsgraph)
+                
+                if scene_file:
+                    diy = context.scene.diy_renderer
+                    debug_mode = diy.debug_mode if diy.debug_mode != 'NONE' else None
+                    max_bounces = viewport_bounces
+                    algorithm = diy.sampling_algorithm
+                    
+                    self._start_pybind_viewport_render(
+                        context, depsgraph, render_width, render_height,
+                        cam_params, samples_per_iteration, max_bounces, algorithm, debug_mode
+                    )
+        
+        # 再描画判定
+        if tile_key in self.pybind_accumulated_samples:
+            current_sample_count = self.pybind_accumulated_samples[tile_key][1]
+        
+        should_redraw = (
+            rendering_in_progress or
+            is_moving or
+            current_sample_count < target_samples
+        )
+        
+        if should_redraw:
+            for area in context.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+        
+        # テクスチャを描画
+        if self.pybind_texture is not None:
+            draw_texture_2d(self.pybind_texture, (0, 0), width, height)
+        else:
+            print("[DIYRenderer] No texture to draw!")
 
     def _render_gradient(self, width, height):
         """
@@ -156,102 +553,13 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 pixels.append([fx, fy, 0.2, 1.0])
         return pixels
 
-    # =========================================================================
-    # サーバーモード関連メソッド
-    # =========================================================================
-
-    def _use_server_mode(self, scene) -> bool:
-        """
-        サーバーモードを使用すべきか判定。
-        
-        ユーザー設定の use_server_mode プロパティを参照します。
-        """
-        return scene.diy_renderer.use_server_mode
-
-    def _ensure_server_started(self, scene) -> bool:
-        """
-        サーバーレンダラーが起動済みか確認し、必要なら起動。
-        
-        ユーザー設定から RenderConfig を構築して start_server_renderer() を呼びます。
-        
-        Args:
-            scene: Blender シーン (設定読み取り用)
-        
-        Returns:
-            サーバーが利用可能なら True
-        """
-        global _server_renderer, _server_scene_hash
-        
-        diy = scene.diy_renderer
-        
-        # アルゴリズム設定をマッピング
-        algo_map = {
-            'simple': AlgorithmType.NAIVE,  # 単純なパストレーシング
-            'nee': AlgorithmType.NEE,       # Next Event Estimation (直接光サンプリング)
-            'mis': AlgorithmType.MIS        # Multiple Importance Sampling
-        }
-        algorithm = algo_map.get(diy.sampling_algorithm, AlgorithmType.NEE)
-        
-        config = RenderConfig(
-            backend=BackendType.CPU,
-            algorithm=algorithm,
-            max_depth=diy.max_bounces
-        )
-        
-        return start_server_renderer(config)
-
-    def _update_server_scene(self, scene_file: str) -> bool:
-        """
-        サーバーにシーンデータを送信（必要な場合のみ）。
-        
-        MD5 ハッシュでシーンの変更を検出し、変更がなければスキップします。
-        これにより、カメラ移動のみの場合などにシーン再送信を避けられます。
-        
-        Args:
-            scene_file: JSON シーンファイルのパス
-        
-        Returns:
-            成功なら True
-        """
-        global _server_renderer, _server_scene_hash
-        
-        if _server_renderer is None:
-            return False
-        
-        # JSON ファイルを読み込み
-        try:
-            with open(scene_file, 'r') as f:
-                scene_json = f.read()
-            print(f"[DIYRenderer] Scene JSON size: {len(scene_json)} bytes")
-        except Exception as e:
-            print(f"[DIYRenderer] Failed to read scene file: {e}")
-            return False
-        
-        # ハッシュで変更検出
-        import hashlib
-        scene_hash = hashlib.md5(scene_json.encode()).hexdigest()
-        
-        if scene_hash == _server_scene_hash:
-            print("[DIYRenderer] Scene unchanged, skipping update")
-            return True  # 変更なし
-        
-        # サーバーに送信
-        print("[DIYRenderer] Sending scene to server...")
-        if _server_renderer.update_scene(scene_json):
-            _server_scene_hash = scene_hash  # ハッシュを保存
-            print("[DIYRenderer] Scene update successful")
-            return True
-        print("[DIYRenderer] Scene update failed")
-        return False
-
-    def _render_with_server(self, depsgraph, width, height, cam_params, 
+    def _render_with_pybind(self, depsgraph, width, height, cam_params,
                             scene_file, target_samples, diy):
         """
-        サーバーモードでレンダリングを実行。
+        pybind11 を使用した F12 レンダリング。
         
-        プログレッシブレンダリングを実装しています。
-        サンプル数を [1, 2, 4, 8, 16, 32, 64, ...] と増やしながら、
-        各反復ごとに画像を更新してユーザーに表示します。
+        協調キャンセル方式により、即座にキャンセル可能。
+        プログレッシブレンダリングを実装。
         
         Args:
             depsgraph: Blender の依存関係グラフ
@@ -262,35 +570,47 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             diy: DIY Renderer 設定オブジェクト
         
         Returns:
-            成功時は累積ピクセルデータ、失敗時は None
+            成功時は True、失敗時は None
         """
-        global _server_renderer
+        global _pybind_renderer, _pybind_scene_hash
         
-        # ---------------------------------------------------------------------
-        # Step 1: シーンデータ更新
-        # ---------------------------------------------------------------------
-        if not self._update_server_scene(scene_file):
-            print("[DIYRenderer] Failed to update scene on server")
+        renderer = get_pybind_renderer()
+        if renderer is None:
             return None
         
-        # ---------------------------------------------------------------------
-        # Step 2: カメラパラメータ送信
-        # ---------------------------------------------------------------------
-        camera = RICameraParams(
-            pos=(cam_params['pos'].x, cam_params['pos'].y, cam_params['pos'].z),
-            dir=(cam_params['dir'].x, cam_params['dir'].y, cam_params['dir'].z),
-            up=(cam_params['up'].x, cam_params['up'].y, cam_params['up'].z),
-            fov=cam_params['fov']
+        # シーンを読み込み
+        try:
+            with open(scene_file, 'r') as f:
+                scene_json = f.read()
+        except Exception as e:
+            print(f"[DIYRenderer] Failed to read scene: {e}")
+            return None
+        
+        # シーンハッシュをチェック
+        scene_hash = hashlib.md5(scene_json.encode()).hexdigest()
+        
+        if scene_hash != _pybind_scene_hash:
+            if not renderer.load_scene_json(scene_json):
+                print("[DIYRenderer] Failed to load scene into pybind renderer")
+                return None
+            _pybind_scene_hash = scene_hash
+        
+        # カメラを設定
+        pos = cam_params['pos']
+        dir_ = cam_params['dir']
+        up = cam_params['up']
+        fov = cam_params['fov']
+        renderer.set_camera(
+            pos[0], pos[1], pos[2],
+            dir_[0], dir_[1], dir_[2],
+            up[0], up[1], up[2],
+            fov
         )
         
-        if not _server_renderer.update_camera(camera):
-            print("[DIYRenderer] Failed to update camera on server")
-            return None
+        # アルゴリズムを設定
+        renderer.set_algorithm(diy.sampling_algorithm)
         
-        # ---------------------------------------------------------------------
-        # Step 3: プログレッシブレンダリングのサンプル分割を計算
-        # ---------------------------------------------------------------------
-        # 例: target_samples=128 → [1, 2, 4, 8, 16, 32, 64, 1]
+        # プログレッシブレンダリング用のサンプル分割
         sample_iterations = []
         current = 1
         total = 0
@@ -302,22 +622,17 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             if current < max_increment:
                 current *= 2
         
-        print(f"[DIYRenderer] Server mode - sample iterations: {sample_iterations}")
+        print(f"[DIYRenderer] pybind11 - sample iterations: {sample_iterations}")
         
-        # ---------------------------------------------------------------------
-        # Step 4: プログレッシブレンダリングループの初期化
-        # ---------------------------------------------------------------------
-        accumulated_pixels = None      # 累積ピクセルデータ
-        total_samples = 0              # 累積サンプル数
-        max_samples = sum(sample_iterations)  # 合計サンプル数
+        accumulated_pixels = None
+        total_samples = 0
+        max_samples = sum(sample_iterations)
         render_start_time = time.time()
         
         def check_cancel():
-            """ユーザーによるキャンセルをチェック"""
             return self.test_break() or self._render_cancelled
         
         def format_time(seconds):
-            """秒数を読みやすい形式にフォーマット"""
             if seconds < 60:
                 return f"{seconds:.0f}s"
             elif seconds < 3600:
@@ -325,17 +640,12 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             else:
                 return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60):02d}m"
         
-        # ---------------------------------------------------------------------
-        # Step 5: プログレッシブレンダリングループ
-        # ---------------------------------------------------------------------
-        for idx, iteration_samples in enumerate(sample_iterations):
-            # キャンセルチェック
+        for iteration_samples in sample_iterations:
             if check_cancel():
-                _server_renderer.cancel()
+                renderer.cancel()
                 print("[DIYRenderer] Render cancelled by user")
                 break
             
-            # 進捗と残り時間を計算して表示
             elapsed = time.time() - render_start_time
             if total_samples > 0:
                 time_per_sample = elapsed / total_samples
@@ -345,40 +655,35 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 time_str = f"Elapsed: {format_time(elapsed)}"
             
             self.update_progress(total_samples / max_samples)
-            self.update_stats("", f"Path Tracing (Server): {total_samples}/{max_samples} samples | {time_str}")
+            self.update_stats("", f"Path Tracing: {total_samples}/{max_samples} samples | {time_str}")
             
-            # -----------------------------------------------------------------
-            # Step 5a: C++ レンダラーにタイルレンダリング要求
-            # -----------------------------------------------------------------
-            tile = TileParams(
-                tile_x=0, tile_y=0,             # タイル位置 (全体を1タイルとして扱う)
-                tile_w=width, tile_h=height,   # タイルサイズ
-                full_w=width, full_h=height,   # 画像全体サイズ
-                samples=iteration_samples,      # この反復でのサンプル数
-                sample_offset=total_samples     # RNG シード用の累積オフセット
-            )
+            # レンダリング実行
+            debug_mode = diy.debug_mode if diy.debug_mode != 'NONE' else None
             
-            result = _server_renderer.render_tile(tile)
+            if debug_mode and debug_mode != 'NONE':
+                debug_map = {'NORMAL': 'normal', 'ALBEDO': 'albedo', 'EMISSION': 'emission'}
+                mode = debug_map.get(debug_mode, 'normal')
+                iteration_pixels = renderer.render_debug(
+                    0, 0, width, height, width, height, mode
+                )
+            else:
+                iteration_pixels = renderer.render_tile(
+                    0, 0, width, height, width, height,
+                    samples=iteration_samples,
+                    sample_offset=total_samples,
+                    max_depth=diy.max_bounces
+                )
             
-            if result is None:
-                if check_cancel():
-                    print("[DIYRenderer] Render cancelled during iteration")
-                    break
-                print("[DIYRenderer] Server render failed")
-                continue
+            if renderer.is_cancelled():
+                print("[DIYRenderer] Render was cancelled")
+                break
             
-            iteration_pixels = result.pixels
             expected_len = width * height * 4
-            
             if len(iteration_pixels) != expected_len:
                 print(f"[DIYRenderer] Invalid pixel count: {len(iteration_pixels)} vs {expected_len}")
                 continue
             
-            # -----------------------------------------------------------------
-            # Step 5b: ピクセルデータを累積
-            # -----------------------------------------------------------------
-            # C++ からは "累積値" が返ってくる (平均ではない)
-            # 各反復の累積値を足し合わせて、表示時に平均化する
+            # ピクセルデータを累積
             if accumulated_pixels is None:
                 accumulated_pixels = array.array('f', iteration_pixels)
                 total_samples = iteration_samples
@@ -387,28 +692,25 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                     accumulated_pixels[i] += iteration_pixels[i]
                 total_samples += iteration_samples
             
-            # -----------------------------------------------------------------
-            # Step 5c: 平均化して Blender に表示
-            # -----------------------------------------------------------------
+            # 平均化して Blender に表示
             inv_samples = 1.0 / total_samples
             display_pixels = []
             for i in range(0, len(accumulated_pixels), 4):
                 display_pixels.append([
-                    accumulated_pixels[i] * inv_samples,      # R
-                    accumulated_pixels[i+1] * inv_samples,    # G
-                    accumulated_pixels[i+2] * inv_samples,    # B
-                    1.0                                        # A
+                    accumulated_pixels[i] * inv_samples,
+                    accumulated_pixels[i+1] * inv_samples,
+                    accumulated_pixels[i+2] * inv_samples,
+                    1.0
                 ])
             
-            # Blender のレンダー結果に書き込み
             result_obj = self.begin_result(0, 0, width, height)
             combined = result_obj.layers[0].passes["Combined"]
             combined.rect = display_pixels
             self.end_result(result_obj)
         
         total_elapsed = time.time() - render_start_time
-        print(f"[DIYRenderer] Server render complete ({total_samples} samples) in {format_time(total_elapsed)}")
-        return accumulated_pixels
+        print(f"[DIYRenderer] pybind11 render complete ({total_samples} samples) in {format_time(total_elapsed)}")
+        return True
 
     # =========================================================================
     # メインレンダリングメソッド
@@ -419,7 +721,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         F12 レンダリングのメインエントリーポイント。
         
         Blender がレンダリングを開始するとこのメソッドが呼ばれます。
-        サーバーモードとレガシーモードの両方をサポートし、
+        pybind11 モードを優先し、フォールバックとしてレガシーモードを使用します。
         プログレッシブレンダリングとキャンセル機能を実装しています。
         
         Args:
@@ -438,9 +740,8 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         original_scene = depsgraph.scene
         target_samples = original_scene.diy_renderer.samples
         diy = original_scene.diy_renderer
-        use_server = self._use_server_mode(original_scene)
         
-        print(f"[DIYRenderer] Starting render ({width} x {height}, samples: {target_samples}, server_mode: {use_server})")
+        print(f"[DIYRenderer] Starting render ({width} x {height}, samples: {target_samples}, pybind11: {PYBIND_AVAILABLE})")
         
         cam_params = compute_camera_params(scene, width, height)
         
@@ -459,24 +760,20 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             self.end_result(result)
             return
         
-        # Server mode rendering
-        if use_server:
-            if not self._ensure_server_started(original_scene):
-                print("[DIYRenderer] Failed to start server, falling back to legacy mode")
-            else:
-                result = self._render_with_server(
-                    depsgraph, width, height, cam_params, 
-                    scene_file, target_samples, diy
-                )
-                if result is not None:
-                    # Cleanup scene file
-                    try:
-                        if scene_file and os.path.isfile(scene_file):
-                            os.remove(scene_file)
-                    except Exception:
-                        pass
-                    return
-                print("[DIYRenderer] Server render failed, falling back to legacy mode")
+        # pybind11 モードでのレンダリング
+        if PYBIND_AVAILABLE:
+            pybind_result = self._render_with_pybind(
+                depsgraph, width, height, cam_params, 
+                scene_file, target_samples, diy
+            )
+            if pybind_result is not None:
+                try:
+                    if scene_file and os.path.isfile(scene_file):
+                        os.remove(scene_file)
+                except Exception:
+                    pass
+                return
+            print("[DIYRenderer] pybind11 render failed, falling back to legacy mode")
         
         # Legacy mode rendering
         # Generate sample iterations
@@ -611,146 +908,8 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         total_elapsed = time.time() - render_start_time
         print(f"[DIYRenderer] Progressive render complete ({total_samples} total samples) in {format_time(total_elapsed)}")
 
-    def async_render_viewport(self, initial_job_data):
-        """Background thread function to render viewport without blocking UI."""
-        try:
-            self.viewport_thread_running = True
-        except ReferenceError:
-            return
-            
-        job_data = initial_job_data
-        accumulated_local = 0
-        
-        while True:
-            try:
-                if self.stop_thread:
-                    break
-                    
-                if self.current_render_cancelled:
-                    self.current_render_cancelled = False
-                    try:
-                        job_data = self.render_queue.get_nowait()
-                        accumulated_local = 0
-                        continue
-                    except queue.Empty:
-                        break
-                
-                scene_file, cam_params, render_width, render_height, job_id, samples_per_iteration, tile_key, target_samples, viewport_bounces, max_bounces, debug_mode, algorithm, is_moving = job_data
-                
-                if not scene_file:
-                    break
-                
-                render_tile_key = (0, 0, render_width, render_height)
-                current_sample_offset = 0
-                try:
-                    if render_tile_key in self.accumulated_samples:
-                        current_sample_offset = self.accumulated_samples[render_tile_key][1]
-                except ReferenceError:
-                    break
-                
-                def should_cancel():
-                    try:
-                        return self.current_render_cancelled or self.stop_thread
-                    except ReferenceError:
-                        return True
-                
-                ext_pixels = call_external_renderer(
-                    scene_file, 0, 0, render_width, render_height,
-                    render_width, render_height, cam_params,
-                    samples=samples_per_iteration,
-                    depth=max_bounces,
-                    debug_mode=debug_mode,
-                    cancel_check=should_cancel,
-                    sample_offset=current_sample_offset,
-                    algorithm=algorithm,
-                    pass_id=-1,
-                    num_passes=1
-                )
-                
-                if ext_pixels and not should_cancel():
-                    try:
-                        self.result_queue.put_nowait({
-                            'pixels': ext_pixels,
-                            'width': render_width,
-                            'height': render_height,
-                            'job_id': job_id,
-                            'samples_per_iteration': samples_per_iteration,
-                            'tile_key': tile_key,
-                            'is_partial': False
-                        })
-                        if not is_moving:
-                            accumulated_local += samples_per_iteration
-                    except (queue.Full, ReferenceError):
-                        pass
-                
-                try:
-                    if self.current_render_cancelled:
-                        self.current_render_cancelled = False
-                        try:
-                            job_data = self.render_queue.get_nowait()
-                            accumulated_local = 0
-                            continue
-                        except queue.Empty:
-                            break
-                except ReferenceError:
-                    break
-                
-                if is_moving:
-                    try:
-                        job_data = self.render_queue.get(timeout=0.2)
-                        accumulated_local = 0
-                        continue
-                    except queue.Empty:
-                        try:
-                            job_data = self.render_queue.get(timeout=0.5)
-                            accumulated_local = 0
-                            continue
-                        except queue.Empty:
-                            break
-                    except ReferenceError:
-                        break
-                
-                try:
-                    should_continue = accumulated_local < target_samples and not self.current_render_cancelled
-                except ReferenceError:
-                    break
-                    
-                if should_continue:
-                    try:
-                        new_job = self.render_queue.get_nowait()
-                        job_data = new_job
-                        accumulated_local = 0
-                    except queue.Empty:
-                        time.sleep(0.01)
-                    except ReferenceError:
-                        break
-                    continue
-                else:
-                    try:
-                        job_data = self.render_queue.get(timeout=0.5)
-                        accumulated_local = 0
-                    except queue.Empty:
-                        break
-                    except ReferenceError:
-                        break
-                    
-            except ReferenceError:
-                break
-            except Exception as e:
-                print(f"[DIYRenderer] Async render error: {e}")
-                import traceback
-                traceback.print_exc()
-                break
-        
-        try:
-            self.viewport_thread_running = False
-            self.rendering_in_progress = False
-        except ReferenceError:
-            pass
-
     def view_update(self, context, depsgraph):
         """Called when the scene is modified in viewport mode."""
-        self._init_async_render()
         
         needs_reset = False
         
@@ -786,26 +945,24 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         if not needs_reset:
             return
         
+        # シーンキャッシュを無効化
         get_scene_cache().invalidate()
         
-        if hasattr(self, 'texture'):
+        # pybind11 レンダラーをキャンセル
+        if PYBIND_AVAILABLE:
+            renderer = get_pybind_renderer()
+            if renderer is not None:
+                renderer.cancel()
+        
+        # ビューポート状態をリセット
+        if hasattr(self, 'pybind_texture'):
             try:
-                del self.texture
+                del self.pybind_texture
             except Exception:
                 pass
-            self.texture = None
-        self.viewport_pixels_cache = None
-        
-        self.viewport_last_change_time = time.time()
-        self.high_res_complete = False
-        self.accumulated_samples = {}
-        self.current_render_cancelled = True
-        
-        try:
-            while not self.render_queue.empty():
-                self.render_queue.get_nowait()
-        except queue.Empty:
-            pass
+            self.pybind_texture = None
+        if hasattr(self, 'pybind_accumulated_samples'):
+            self.pybind_accumulated_samples = {}
 
     def _detect_camera_change(self, context):
         """Detect if the viewport camera has changed."""
@@ -845,249 +1002,25 @@ class DIYRenderEngine(bpy.types.RenderEngine):
 
     def view_draw(self, context, depsgraph):
         """Viewport rendering function - called continuously while viewport is active."""
-        self._init_async_render()
+        # pybind11 モードが利用可能なら使用
+        if PYBIND_AVAILABLE:
+            self._init_pybind_viewport()
+            self._view_draw_pybind(context, depsgraph)
+            return
+        
+        # pybind11 が利用できない場合は警告を表示
+        import gpu
+        import blf
+        
+        # 背景を暗くする
         region = context.region
         width = region.width
         height = region.height
         
-        target_samples = context.scene.diy_renderer.viewport_samples
-        
-        import gpu
-        from gpu_extras.presets import draw_texture_2d
-        
-        if not hasattr(self, 'viewport_last_change_time'):
-            self.viewport_last_change_time = time.time()
-        if not hasattr(self, 'last_render_width'):
-            self.last_render_width = 0
-            self.last_render_height = 0
-        if not hasattr(self, 'last_moving_render_time'):
-            self.last_moving_render_time = 0
-            
-        current_time = time.time()
-        
-        camera_changed = self._detect_camera_change(context)
-        if camera_changed:
-            self.viewport_last_change_time = current_time
-            self.high_res_complete = False
-            self.accumulated_samples = {}
-        
-        time_since_change = current_time - self.viewport_last_change_time
-        
-        MOVING_RENDER_INTERVAL = 0.1
-        
-        if time_since_change < 0.3:
-            scale_factor = 8
-            render_width = width // scale_factor
-            render_height = height // scale_factor
-            samples_per_iteration = 1
-            viewport_bounces = 4
-            is_moving = True
-        else:
-            scale_factor = 2
-            render_width = width // scale_factor
-            render_height = height // scale_factor
-            samples_per_iteration = 1
-            viewport_bounces = 8
-            is_moving = False
-        
-        if not hasattr(self, '_last_debug_state'):
-            self._last_debug_state = None
-            self._last_debug_time = 0
-        debug_state = f"moving={is_moving}, res={render_width}x{render_height}"
-        if debug_state != self._last_debug_state or (current_time - self._last_debug_time > 2.0):
-            if current_time - self._last_debug_time > 5.0:
-                print(f"[DIYRenderer] State: {debug_state}, time_idle={time_since_change:.2f}s")
-            self._last_debug_state = debug_state
-            self._last_debug_time = current_time
-        
-        if not hasattr(self, 'frame_counter'):
-            self.frame_counter = 0
-        self.frame_counter += 1
-        
-        tile_key = f"{render_width}x{render_height}"
-        
-        if tile_key in self.accumulated_samples:
-            current_sample_count = self.accumulated_samples[tile_key][1]
-        else:
-            current_sample_count = 0
-        
-        resolution_changed = (self.last_render_width != render_width or 
-                             self.last_render_height != render_height)
-        
-        if resolution_changed:
-            self.accumulated_samples = {}
-            current_sample_count = 0
-        
-        thread_running = self.render_thread is not None and self.render_thread.is_alive()
-        thread_effectively_running = thread_running and not self.current_render_cancelled
-        
-        time_since_last_moving_render = current_time - self.last_moving_render_time
-        moving_render_allowed = time_since_last_moving_render >= MOVING_RENDER_INTERVAL
-        
-        needs_new_render = (
-            not hasattr(self, 'texture') or self.texture is None or
-            resolution_changed or
-            (is_moving and moving_render_allowed and not thread_effectively_running) or
-            (not is_moving and current_sample_count < target_samples and not thread_effectively_running)
-        )
-        
-        if needs_new_render:
-            self.last_render_width = render_width
-            self.last_render_height = render_height
-            
-            if is_moving:
-                self.last_moving_render_time = current_time
-            
-            region_data = context.region_data
-            if region_data is not None:
-                view_matrix_inv = region_data.view_matrix.inverted()
-                
-                cam_pos = view_matrix_inv.translation
-                cam_dir = (view_matrix_inv.to_3x3() @ Vector((0, 0, -1))).normalized()
-                cam_up = (view_matrix_inv.to_3x3() @ Vector((0, 1, 0))).normalized()
-                
-                if region_data.view_perspective == 'CAMERA':
-                    camera = context.scene.camera
-                    if camera and camera.data:
-                        cam_data = camera.data
-                        sensor_width = cam_data.sensor_width
-                        focal_length = cam_data.lens
-                        fov = math.degrees(2 * math.atan(sensor_width / (2 * focal_length)))
-                    else:
-                        fov = 50.0
-                elif region_data.view_perspective == 'PERSP':
-                    fov = 50.0
-                else:
-                    fov = 5.0
-                
-                cam_params = {
-                    'pos': cam_pos,
-                    'dir': cam_dir,
-                    'up': cam_up,
-                    'fov': fov
-                }
-                
-                if is_moving:
-                    scene_file = get_scene_cache().get_cached_file_fast()
-                    if not scene_file:
-                        scene_file = export_scene_to_file(depsgraph)
-                else:
-                    scene_file = export_scene_to_file(depsgraph)
-                
-                if not scene_file:
-                    return
-                
-                diy = context.scene.diy_renderer
-                debug_mode = diy.debug_mode if diy.debug_mode != 'NONE' else None
-                max_bounces = viewport_bounces if viewport_bounces is not None else diy.max_bounces
-                algorithm = diy.sampling_algorithm
-                
-                if not hasattr(self, 'job_counter'):
-                    self.job_counter = 0
-                self.job_counter += 1
-                job_data = (scene_file, cam_params, render_width, render_height, self.job_counter,
-                           samples_per_iteration, tile_key, target_samples, viewport_bounces,
-                           max_bounces, debug_mode, algorithm, is_moving)
-                
-                try:
-                    while not self.render_queue.empty():
-                        try:
-                            self.render_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                    
-                    self.render_queue.put_nowait(job_data)
-                    self.rendering_in_progress = True
-                    
-                    if not thread_running:
-                        self.stop_thread = False
-                        self.current_render_cancelled = False
-                        self.render_thread = threading.Thread(
-                            target=self.async_render_viewport,
-                            args=(job_data,),
-                            daemon=True
-                        )
-                        self.render_thread.start()
-                    elif self.current_render_cancelled:
-                        print("[DIYRenderer] New job queued, waiting for cancelled thread to pick it up")
-                except queue.Full:
-                    pass
-        
-        results_processed = 0
-        max_results_per_frame = 2
-        while results_processed < max_results_per_frame:
-            try:
-                result = self.result_queue.get_nowait()
-                results_processed += 1
-                ext_pixels = result['pixels']
-                result_width = result['width']
-                result_height = result['height']
-                result_tile_key = result.get('tile_key', '')
-                result_samples = result.get('samples_per_iteration', 1)
-                is_partial = result.get('is_partial', False)
-                
-                expected_len = result_width * result_height * 4
-                if ext_pixels and len(ext_pixels) == expected_len:
-                    if is_partial:
-                        inv_samples = 1.0 / result_samples
-                        display_pixels = [v * inv_samples for v in ext_pixels]
-                        buffer = gpu.types.Buffer('FLOAT', expected_len, display_pixels)
-                        if hasattr(self, 'texture') and self.texture is not None:
-                            try:
-                                del self.texture
-                            except Exception:
-                                pass
-                        self.texture = gpu.types.GPUTexture((result_width, result_height), format='RGBA16F', data=buffer)
-                        self.texture_width = result_width
-                        self.texture_height = result_height
-                    else:
-                        if result_tile_key in self.accumulated_samples:
-                            acc_array, prev_count = self.accumulated_samples[result_tile_key]
-                            new_count = prev_count + result_samples
-                            for i in range(len(acc_array)):
-                                acc_array[i] += ext_pixels[i]
-                            self.accumulated_samples[result_tile_key] = (acc_array, new_count)
-                            inv_count = 1.0 / new_count
-                            display_pixels = [v * inv_count for v in acc_array]
-                            if new_count >= target_samples:
-                                self.high_res_complete = True
-                        else:
-                            acc_array = array.array('f', ext_pixels)
-                            self.accumulated_samples[result_tile_key] = (acc_array, result_samples)
-                            inv_samples = 1.0 / result_samples
-                            display_pixels = [v * inv_samples for v in ext_pixels]
-                        
-                        buffer = gpu.types.Buffer('FLOAT', expected_len, display_pixels)
-                        if hasattr(self, 'texture') and self.texture is not None:
-                            try:
-                                del self.texture
-                            except Exception:
-                                pass
-                        self.texture = gpu.types.GPUTexture((result_width, result_height), format='RGBA16F', data=buffer)
-                        self.texture_width = result_width
-                        self.texture_height = result_height
-                        self.rendering_in_progress = False
-                else:
-                    print(f"[DIYRenderer] Invalid result: pixels={len(ext_pixels) if ext_pixels else 0}, expected={expected_len}")
-                    
-            except queue.Empty:
-                break
-        
-        thread_alive = self.render_thread is not None and self.render_thread.is_alive()
-        
-        if tile_key in self.accumulated_samples:
-            current_sample_count = self.accumulated_samples[tile_key][1]
-        
-        should_redraw = (
-            thread_alive or
-            is_moving or
-            (not is_moving and current_sample_count < target_samples)
-        )
-        
-        if should_redraw:
-            for area in context.screen.areas:
-                if area.type == 'VIEW_3D':
-                    area.tag_redraw()
-        
-        if hasattr(self, 'texture') and self.texture is not None:
-            draw_texture_2d(self.texture, (0, 0), width, height)
+        # 警告メッセージを描画
+        blf.size(0, 20)
+        blf.color(0, 1.0, 0.8, 0.2, 1.0)
+        blf.position(0, 20, height - 40, 0)
+        blf.draw(0, "DIY Renderer: pybind11 module not available")
+        blf.position(0, 20, height - 70, 0)
+        blf.draw(0, "Please build the C++ module with: cmake .. -DBUILD_PYBIND=ON && make")

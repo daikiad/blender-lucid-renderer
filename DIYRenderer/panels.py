@@ -190,11 +190,3 @@ class DIY_RENDER_PT_performance(bpy.types.Panel):
         
         col = layout.column(heading="Backend")
         col.prop(diy, "backend", text="Device")
-        
-        col = layout.column(heading="Server Mode")
-        col.prop(diy, "use_server_mode", text="Persistent Process")
-        
-        if diy.use_server_mode:
-            box = layout.box()
-            box.label(text="Server mode keeps renderer running", icon='INFO')
-            box.label(text="Faster camera updates, experimental")

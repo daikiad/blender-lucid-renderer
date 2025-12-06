@@ -5,6 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# オプション: pybind11 モジュールをビルドするか
+option(BUILD_PYBIND "Build pybind11 Python module" OFF)
+
 # macOS: Help CMake find Homebrew's libomp
 if(APPLE)
     execute_process(
@@ -29,7 +32,6 @@ find_package(OpenMP)
 add_executable(diyrt
     src/main.cpp
     src/node_evaluator.cpp
-    src/server.cpp
 )
 
 target_include_directories(diyrt PRIVATE include)
@@ -51,4 +53,49 @@ if(OpenMP_CXX_FOUND)
     message(STATUS "OpenMP found - multi-threaded rendering enabled")
 else()
     message(STATUS "OpenMP not found - single-threaded rendering")
+endif()
+
+# =============================================================================
+# pybind11 モジュール (オプション)
+# =============================================================================
+if(BUILD_PYBIND)
+    # pybind11 を探す
+    find_package(pybind11 CONFIG)
+    
+    if(NOT pybind11_FOUND)
+        # pybind11 が見つからない場合は FetchContent で取得
+        include(FetchContent)
+        FetchContent_Declare(
+            pybind11
+            GIT_REPOSITORY https://github.com/pybind/pybind11.git
+            GIT_TAG v2.11.1
+        )
+        FetchContent_MakeAvailable(pybind11)
+    endif()
+    
+    # Python モジュールをビルド
+    pybind11_add_module(diyrenderer
+        src/pybind_module.cpp
+        src/node_evaluator.cpp
+    )
+    
+    target_include_directories(diyrenderer PRIVATE include)
+    
+    # 最適化フラグ
+    if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        target_compile_options(diyrenderer PRIVATE 
+            -O3
+            -march=native
+            -ffast-math
+            -funroll-loops
+            -ftree-vectorize
+        )
+    endif()
+    
+    # OpenMP をリンク
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(diyrenderer PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+    
+    message(STATUS "Building pybind11 module: diyrenderer")
 endif()

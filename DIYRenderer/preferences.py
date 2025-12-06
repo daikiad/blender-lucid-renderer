@@ -113,7 +113,6 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
         max_bounces: 光線の最大バウンス（反射）回数
         sampling_algorithm: パストレーシングアルゴリズム
         debug_mode: デバッグ可視化モード
-        use_server_mode: サーバーモード（持続プロセス）を使用するか
         backend: レンダリングバックエンド（CPU/WebGPU）
     """
     
@@ -173,13 +172,6 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
             ('emission', "Emission", "Show emissive surfaces only"),
         ],
         default='NONE'
-    )
-    
-    # サーバーモード: プロセスを持続させて起動オーバーヘッドを削減
-    use_server_mode: bpy.props.BoolProperty(
-        name="Use Server Mode",
-        description="Use persistent renderer process (faster for viewport, experimental)",
-        default=False
     )
     
     # レンダリングバックエンド

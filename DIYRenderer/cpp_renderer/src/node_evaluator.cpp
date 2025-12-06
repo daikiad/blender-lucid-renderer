@@ -1,5 +1,9 @@
 #include "renderer.hpp"
+#include "json.hpp"
 #include <iostream>
+#include <map>
+
+using json = nlohmann::json;
 
 /**
  * ========== Node Graph Evaluation ==========
@@ -23,6 +27,122 @@
  * Previous bug: Code always read v3 field even for VEC4 types,
  * causing all materials to render black. Fixed by checking type enum.
  */
+
+// ========== JSON Parsing Functions ==========
+
+/**
+ * parseSocketValue: Parse JSON value into SocketValue union
+ * 
+ * Handles multiple types:
+ * - Single number → FLOAT
+ * - Array[3] → VEC3 (RGB or vector)
+ * - Array[4] → VEC4 (RGBA)
+ * - Boolean → BOOL
+ * - String → STRING
+ */
+SocketValue parseSocketValue(const json &j) {
+    if(j.is_number()) {
+        return SocketValue::makeFloat(j.get<float>());
+    } else if(j.is_array()) {
+        if(j.size() == 3) {
+            return SocketValue::makeVec3(j[0], j[1], j[2]);
+        } else if(j.size() == 4) {
+            float x = j[0], y = j[1], z = j[2], w = j[3];
+            return SocketValue::makeVec4(x, y, z, w);
+        }
+    } else if(j.is_boolean()) {
+        SocketValue sv;
+        sv.type = SocketValue::BOOL;
+        sv.b = j.get<bool>();
+        return sv;
+    } else if(j.is_string()) {
+        SocketValue sv;
+        sv.type = SocketValue::STRING;
+        sv.s = j.get<std::string>();
+        return sv;
+    }
+    return SocketValue();  // NONE
+}
+
+/**
+ * parseNodeTree: Construct node graph from JSON
+ * 
+ * Builds the material node tree by:
+ * 1. Creating all MaterialNode objects
+ * 2. Parsing input/output sockets for each node
+ * 3. Recording socket connections (linked_node, linked_socket)
+ * 4. Storing default values for unconnected sockets
+ */
+NodeTree parseNodeTree(const json &nodeTreeJson) {
+    NodeTree tree;
+    
+    if(!nodeTreeJson.contains("nodes") || !nodeTreeJson.is_object()) {
+        return tree;  // Invalid
+    }
+    
+    const auto &nodesArray = nodeTreeJson["nodes"];
+    const auto &linksArray = nodeTreeJson.contains("links") ? nodeTreeJson["links"] : json::array();
+    
+    // Build a map of node connections: (to_node, to_socket) -> (from_node, from_socket)
+    std::map<std::pair<std::string, std::string>, std::pair<std::string, std::string>> connections;
+    for(const auto &link : linksArray) {
+        std::string from_node = link["from_node"];
+        std::string from_socket = link["from_socket"];
+        std::string to_node = link["to_node"];
+        std::string to_socket = link["to_socket"];
+        connections[{to_node, to_socket}] = {from_node, from_socket};
+    }
+    
+    // Parse nodes
+    for(const auto &nodeJson : nodesArray) {
+        MaterialNode node;
+        node.name = nodeJson.value("name", "");
+        node.type = nodeJson.value("type", "");
+        node.label = nodeJson.value("label", "");
+        
+        // Parse inputs
+        if(nodeJson.contains("inputs")) {
+            for(const auto &inp : nodeJson["inputs"]) {
+                NodeSocket socket;
+                socket.name = inp.value("name", "");
+                socket.type = inp.value("type", "");
+                if(inp.contains("default_value")) {
+                    socket.default_value = parseSocketValue(inp["default_value"]);
+                }
+                
+                // Check if this socket is connected
+                auto connKey = std::make_pair(node.name, socket.name);
+                if(connections.find(connKey) != connections.end()) {
+                    socket.is_linked = true;
+                    socket.linked_node = connections[connKey].first;
+                    socket.linked_socket = connections[connKey].second;
+                }
+                
+                node.inputs.push_back(socket);
+            }
+        }
+        
+        // Parse outputs
+        if(nodeJson.contains("outputs")) {
+            for(const auto &outp : nodeJson["outputs"]) {
+                NodeSocket socket;
+                socket.name = outp.value("name", "");
+                socket.type = outp.value("type", "");
+                if(outp.contains("default_value")) {
+                    socket.default_value = parseSocketValue(outp["default_value"]);
+                }
+                node.outputs.push_back(socket);
+            }
+        }
+        
+        tree.nodes.push_back(node);
+    }
+    
+    tree.valid = !tree.nodes.empty();
+    return tree;
+}
+
+// ========== Node Evaluation Functions ==========
 
 /**
  * evaluateNode: Recursively evaluate a node's output socket
