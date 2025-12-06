@@ -136,6 +136,26 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
         max=1000
     )
     
+    # ビューポート解像度スケール（移動中）
+    # 値が大きいほど低解像度で高速
+    viewport_scale_moving: bpy.props.IntProperty(
+        name="Moving Scale",
+        description="Resolution divisor while camera is moving (higher = faster, lower quality)",
+        default=8,
+        min=1,
+        max=16
+    )
+    
+    # ビューポート解像度スケール（静止中）
+    # 値が小さいほど高解像度
+    viewport_scale_static: bpy.props.IntProperty(
+        name="Static Scale",
+        description="Resolution divisor when camera is static (lower = higher quality)",
+        default=2,
+        min=1,
+        max=8
+    )
+    
     # 最大バウンス数: 光線が何回反射できるか
     # 多いほどリアルな間接光が計算できるが、時間がかかる
     max_bounces: bpy.props.IntProperty(

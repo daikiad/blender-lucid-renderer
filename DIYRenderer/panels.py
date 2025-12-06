@@ -81,6 +81,8 @@ class DIY_RENDER_PT_sampling(bpy.types.Panel):
         # Viewport section
         col = layout.column(heading="Viewport")
         col.prop(diy, "viewport_samples", text="Viewport Samples")
+        col.prop(diy, "viewport_scale_moving", text="Scale (Moving)")
+        col.prop(diy, "viewport_scale_static", text="Scale (Static)")
         
         # Algorithm section
         col = layout.column(heading="Algorithm")

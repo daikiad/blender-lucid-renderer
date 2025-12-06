@@ -369,16 +369,21 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         
         time_since_change = current_time - self.pybind_viewport_last_change_time
         
+        # シーン設定から解像度スケールを取得
+        diy = context.scene.diy_renderer
+        moving_scale = diy.viewport_scale_moving
+        static_scale = diy.viewport_scale_static
+        
         # 解像度とパラメータを決定
         if time_since_change < 0.3:
             # 移動中: 低解像度で高速応答
-            scale_factor = 8
+            scale_factor = moving_scale
             samples_per_iteration = 1
             viewport_bounces = 4
             is_moving = True
         else:
             # 静止中: 高解像度で品質重視
-            scale_factor = 2
+            scale_factor = static_scale
             samples_per_iteration = 1
             viewport_bounces = 8
             is_moving = False
