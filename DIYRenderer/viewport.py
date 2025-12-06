@@ -143,15 +143,21 @@ class ViewportRenderer:
         depsgraph: Any,
         state: 'ViewportState'
     ) -> ChangeType:
-        """シーンの変更を検出
+        """カメラ（ビュー）の変更を検出
+        
+        注意: シーンコンテンツの変更検出は engine.view_update() で行い、
+        state.scene_update_pending フラグで通知されます。
+        このメソッドはカメラ（ビューマトリクス）の変更のみを検出します。
+        
+        Blender の view_update はカメラ操作（回転、パン、ズーム）では
+        呼び出されないため、view_draw 内で毎フレーム検出する必要があります。
         
         Returns:
-            変更の種類
+            変更の種類（CAMERA_ONLY または NONE）
         """
         camera_changed = False
-        content_changed = False
         
-        # 1. カメラ（ビュー）の変更検出
+        # カメラ（ビュー）の変更検出
         region_data = context.region_data
         if region_data is not None:
             current_matrix = region_data.view_matrix.copy()
@@ -183,22 +189,8 @@ class ViewportRenderer:
                 state.last_view_perspective = current_perspective
                 state.last_view_distance = current_distance
         
-        # 2. シーンコンテンツの変更検出
-        if depsgraph is not None:
-            obj_updated = depsgraph.id_type_updated('OBJECT')
-            mesh_updated = depsgraph.id_type_updated('MESH')
-            mat_updated = depsgraph.id_type_updated('MATERIAL')
-            light_updated = depsgraph.id_type_updated('LIGHT')
-            world_updated = depsgraph.id_type_updated('WORLD')
-            node_updated = depsgraph.id_type_updated('NODETREE')
-            
-            if obj_updated or mesh_updated or mat_updated or light_updated or world_updated or node_updated:
-                content_changed = True
-        
-        # 結果を返す
-        if content_changed:
-            return ChangeType.CONTENT
-        elif camera_changed:
+        # 結果を返す（カメラ変更のみ検出）
+        if camera_changed:
             return ChangeType.CAMERA_ONLY
         else:
             return ChangeType.NONE

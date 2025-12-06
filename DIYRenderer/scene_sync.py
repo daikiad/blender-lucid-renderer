@@ -121,6 +121,10 @@ class SceneSync:
         if depsgraph.id_type_updated('WORLD'):
             flags |= UpdateFlags.WORLD
         
+        # ノードツリーの変更（マテリアルノードの編集など）
+        if depsgraph.id_type_updated('NODETREE'):
+            flags |= UpdateFlags.MATERIALS
+        
         # オブジェクトの変更（追加/削除/移動/変形）
         if depsgraph.id_type_updated('OBJECT'):
             # 詳細をチェック: ジオメトリ変更かトランスフォームのみか
