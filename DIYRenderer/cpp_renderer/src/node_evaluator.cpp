@@ -2,8 +2,12 @@
 #include "json.hpp"
 #include <iostream>
 #include <map>
+#include <set>
 
 using json = nlohmann::json;
+
+// Track already warned node types to avoid log spam
+static std::set<std::string> warnedNodeTypes;
 
 /**
  * ========== Node Graph Evaluation ==========
@@ -297,6 +301,40 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
         
         // Linear interpolation: lerp(A, B, fac) = A * (1 - fac) + B * fac
         return colorA * (1.0f - fac) + colorB * fac;
+    } else if(node->type == "ShaderNodeTexChecker") {
+        // ===== Checker Texture Node =====
+        // Procedural checkerboard pattern
+        // Since we don't have UV coords here, return a blend of the two colors
+        // or use a default pattern
+        const NodeSocket *color1Socket = node->findInput("Color1");
+        const NodeSocket *color2Socket = node->findInput("Color2");
+        
+        Vec3 color1(0.8f, 0.8f, 0.8f);  // Default white
+        Vec3 color2(0.2f, 0.2f, 0.2f);  // Default black
+        
+        if(color1Socket) {
+            if(color1Socket->is_linked) {
+                color1 = evaluateNode(tree, color1Socket->linked_node, color1Socket->linked_socket);
+            } else if(color1Socket->default_value.type == SocketValue::VEC4) {
+                color1 = color1Socket->default_value.v4;
+            } else if(color1Socket->default_value.type == SocketValue::VEC3) {
+                color1 = color1Socket->default_value.v3;
+            }
+        }
+        
+        if(color2Socket) {
+            if(color2Socket->is_linked) {
+                color2 = evaluateNode(tree, color2Socket->linked_node, color2Socket->linked_socket);
+            } else if(color2Socket->default_value.type == SocketValue::VEC4) {
+                color2 = color2Socket->default_value.v4;
+            } else if(color2Socket->default_value.type == SocketValue::VEC3) {
+                color2 = color2Socket->default_value.v3;
+            }
+        }
+        
+        // For material preview, return average of both colors
+        // (proper UV-based checker pattern would need UV coordinates)
+        return (color1 + color2) * 0.5f;
     } else if(node->type == "ShaderNodeOutputMaterial") {
         // ===== Material Output Node =====
         // This is the final output node - traverse to Surface input
@@ -306,8 +344,11 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
         }
     }
     
-    // Unknown node type - return magenta error color
-    std::cerr << "[NodeEval] Unhandled node type: " << node->type << " socket: " << socketName << "\n";
+    // Unknown node type - return magenta error color (warn once per type)
+    if(warnedNodeTypes.find(node->type) == warnedNodeTypes.end()) {
+        warnedNodeTypes.insert(node->type);
+        std::cerr << "[NodeEval] Unhandled node type: " << node->type << " (further warnings suppressed)\n";
+    }
     return Vec3(1.0f, 0.0f, 1.0f);  // Magenta = unimplemented
 }
 

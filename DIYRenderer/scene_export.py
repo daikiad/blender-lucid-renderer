@@ -290,6 +290,75 @@ def get_material_properties(obj):
     return result
 
 
+def _export_light(obj, matrix_world):
+    """
+    Blender のライトオブジェクトをエクスポート
+    
+    サポートするライトタイプ:
+    - POINT: 点光源
+    - SUN: 平行光源（方向のみ、無限遠）
+    - SPOT: スポットライト
+    - AREA: 面光源（矩形/円形）
+    
+    Args:
+        obj: Blender ライトオブジェクト
+        matrix_world: ワールド変換行列
+        
+    Returns:
+        dict: ライトデータ、または None
+    """
+    from mathutils import Vector
+    
+    light = obj.data
+    if not light:
+        return None
+    
+    # 位置と方向を取得
+    position = matrix_world.translation
+    # ライトのローカル -Z がワールド空間の方向
+    direction = (matrix_world.to_3x3() @ Vector((0, 0, -1))).normalized()
+    
+    # 色とパワー
+    color = list(light.color)
+    energy = light.energy  # Watts (Blender 2.8+)
+    
+    light_data = {
+        "name": obj.name,
+        "type": light.type,  # 'POINT', 'SUN', 'SPOT', 'AREA'
+        "position": [position.x, position.y, position.z],
+        "direction": [direction.x, direction.y, direction.z],
+        "color": color,
+        "energy": energy,
+    }
+    
+    # タイプ固有のプロパティ
+    if light.type == 'POINT':
+        light_data["radius"] = light.shadow_soft_size
+        
+    elif light.type == 'SUN':
+        light_data["angle"] = light.angle  # 太陽の角度（ソフトシャドウ用）
+        
+    elif light.type == 'SPOT':
+        light_data["radius"] = light.shadow_soft_size
+        light_data["spot_size"] = light.spot_size  # 円錐角度（ラジアン）
+        light_data["spot_blend"] = light.spot_blend  # エッジのぼかし (0-1)
+        
+    elif light.type == 'AREA':
+        light_data["shape"] = light.shape  # 'SQUARE', 'RECTANGLE', 'DISK', 'ELLIPSE'
+        light_data["size"] = light.size
+        if light.shape in ('RECTANGLE', 'ELLIPSE'):
+            light_data["size_y"] = light.size_y
+        else:
+            light_data["size_y"] = light.size
+        # 面光源の向きベクトル（X, Y軸）
+        right = (matrix_world.to_3x3() @ Vector((1, 0, 0))).normalized()
+        up = (matrix_world.to_3x3() @ Vector((0, 1, 0))).normalized()
+        light_data["right"] = [right.x, right.y, right.z]
+        light_data["up"] = [up.x, up.y, up.z]
+    
+    return light_data
+
+
 def export_scene_to_json(depsgraph):
     """
     Export complete scene to JSON format.
@@ -307,11 +376,20 @@ def export_scene_to_json(depsgraph):
     
     scene_data = {
         "version": "1.0",
-        "meshes": []
+        "meshes": [],
+        "lights": []  # Blender ネイティブライト
     }
     
     for obj_instance in depsgraph.object_instances:
         obj = obj_instance.object
+        
+        # ライトオブジェクトの処理
+        if obj.type == 'LIGHT':
+            light_data = _export_light(obj, obj_instance.matrix_world)
+            if light_data:
+                scene_data["lights"].append(light_data)
+            continue
+        
         if obj.type != 'MESH':
             continue
         

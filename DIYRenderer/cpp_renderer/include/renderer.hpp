@@ -496,8 +496,12 @@ struct Hit {
     Hit() : hit(false), t(1e30f) {}
 };
 
+// Forward declaration for Light (defined in pbr.hpp)
+struct Light;
+
 struct Scene {
     std::vector<Mesh> meshes;
+    std::vector<Light> nativeLights;  // Blender ネイティブライト (Point, Sun, Spot, Area)
 };
 
 inline void finalizeMeshBounds(Mesh &m){

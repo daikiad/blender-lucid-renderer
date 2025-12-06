@@ -478,6 +478,110 @@ private:
             scene.meshes.push_back(std::move(m));
         }
         
+        // Parse native Blender lights
+        if (j.contains("lights") && j["lights"].is_array()) {
+            parseNativeLights(j["lights"], scene);
+        }
+        
         return scene;
+    }
+    
+    static void parseNativeLights(const nlohmann::json& lightsJson, Scene& scene) {
+        for (const auto& lightJson : lightsJson) {
+            Light light;
+            
+            std::string typeStr = lightJson.value("type", "POINT");
+            
+            // Position
+            if (lightJson.contains("position")) {
+                light.position = Vec3(
+                    lightJson["position"][0],
+                    lightJson["position"][1],
+                    lightJson["position"][2]
+                );
+            }
+            
+            // Direction (normal)
+            if (lightJson.contains("direction")) {
+                light.normal = Vec3(
+                    lightJson["direction"][0],
+                    lightJson["direction"][1],
+                    lightJson["direction"][2]
+                );
+            }
+            
+            // Color and energy
+            Vec3 color(1.0f, 1.0f, 1.0f);
+            if (lightJson.contains("color")) {
+                color = Vec3(
+                    lightJson["color"][0],
+                    lightJson["color"][1],
+                    lightJson["color"][2]
+                );
+            }
+            float energy = lightJson.value("energy", 1.0f);
+            
+            // Blender uses physical light units (Watts for point/spot, W/m^2 for sun)
+            // Scale appropriately for our renderer
+            float energyScale = energy / 100.0f;  // Adjust to reasonable range
+            light.emission = color * energyScale;
+            light.energy = energy;
+            
+            // Set light type and type-specific properties
+            if (typeStr == "POINT") {
+                light.type = LightType::POINT;
+                light.radius = lightJson.value("radius", 0.0f);
+                light.area = 4.0f * M_PI * light.radius * light.radius;
+                if (light.area < EPSILON) light.area = 1.0f; // Avoid zero area for point lights
+                
+            } else if (typeStr == "SUN") {
+                light.type = LightType::SUN;
+                light.area = 1.0f;  // Sun is directional, area is symbolic
+                // Sun uses different energy scale
+                light.emission = color * energy * 0.01f;
+                
+            } else if (typeStr == "SPOT") {
+                light.type = LightType::SPOT;
+                light.radius = lightJson.value("radius", 0.0f);
+                light.spotAngle = lightJson.value("spot_size", M_PI / 4.0f);
+                light.spotBlend = lightJson.value("spot_blend", 0.0f);
+                light.area = 1.0f;  // Symbolic for point-like source
+                
+            } else if (typeStr == "AREA") {
+                light.type = LightType::AREA;
+                light.sizeX = lightJson.value("size", 1.0f);
+                light.sizeY = lightJson.value("size_y", light.sizeX);
+                light.area = light.sizeX * light.sizeY;
+                
+                // Get orientation vectors
+                if (lightJson.contains("right")) {
+                    light.right = Vec3(
+                        lightJson["right"][0],
+                        lightJson["right"][1],
+                        lightJson["right"][2]
+                    );
+                }
+                if (lightJson.contains("up")) {
+                    light.up = Vec3(
+                        lightJson["up"][0],
+                        lightJson["up"][1],
+                        lightJson["up"][2]
+                    );
+                }
+                
+                // Area light energy is per unit area in Blender
+                light.emission = color * energy / light.area * 0.1f;
+            }
+            
+            light.meshIndex = -1;
+            light.triangleIndex = -1;
+            
+            // Add to scene's native lights collection
+            scene.nativeLights.push_back(light);
+            
+            std::cerr << "[SceneParser] Added " << typeStr << " light: "
+                      << lightJson.value("name", "unnamed") 
+                      << " energy=" << energy << std::endl;
+        }
     }
 };

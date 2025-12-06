@@ -539,16 +539,39 @@ inline float pdfBSDF(const MaterialParams& mat, const Vec3& wo, const Vec3& wi, 
 
 // ========== Light Sampling ==========
 
+// ライトタイプ
+enum class LightType {
+    EMISSIVE_MESH,  // エミッシブメッシュ（既存）
+    POINT,          // 点光源
+    SUN,            // 平行光源（太陽）
+    SPOT,           // スポットライト
+    AREA            // 面光源（矩形/円形）
+};
+
 struct Light {
-    Vec3 position;      // Center position (for area lights, center of triangle)
-    Vec3 normal;        // Light surface normal
-    Vec3 emission;      // Emission color * strength
-    float area;         // Surface area
-    int meshIndex;      // Index of emissive mesh
-    int triangleIndex;  // Index of emissive triangle
+    LightType type = LightType::EMISSIVE_MESH;
     
-    // Triangle vertices (for area light sampling)
+    Vec3 position;      // Center position (for area lights, center of triangle)
+    Vec3 normal;        // Light surface normal / direction (for SUN/SPOT)
+    Vec3 emission;      // Emission color * strength
+    float area;         // Surface area (for area sampling PDF)
+    int meshIndex;      // Index of emissive mesh (-1 for native lights)
+    int triangleIndex;  // Index of emissive triangle (-1 for native lights)
+    
+    // Triangle vertices (for emissive mesh area light sampling)
     Vec3 v0, v1, v2;
+    
+    // Native light properties
+    float energy = 1.0f;       // Light energy/power (Watts)
+    float radius = 0.0f;       // Soft shadow radius (Point/Spot)
+    float spotAngle = 0.0f;    // Spot cone angle (radians)
+    float spotBlend = 0.0f;    // Spot edge softness (0-1)
+    
+    // Area light properties
+    Vec3 right;         // X axis for area light
+    Vec3 up;            // Y axis for area light
+    float sizeX = 1.0f; // Width
+    float sizeY = 1.0f; // Height
     
     Light() : area(0.0f), meshIndex(-1), triangleIndex(-1) {}
 };
@@ -583,29 +606,122 @@ struct LightSample {
     LightSample() : pdf(0.0f), distance(0.0f) {}
 };
 
+// Sample uniform point on disk (for area lights)
+inline Vec3 sampleDisk(float u1, float u2) {
+    float r = std::sqrt(u1);
+    float theta = 2.0f * M_PI * u2;
+    return Vec3(r * std::cos(theta), r * std::sin(theta), 0.0f);
+}
+
 // Sample a random point on a light source
 inline LightSample sampleLight(const Light& light, const Vec3& shadingPoint, 
                                 float u1, float u2) {
     LightSample sample;
-    
-    // Sample point on triangle
-    sample.position = sampleTrianglePoint(light.v0, light.v1, light.v2, u1, u2);
-    sample.normal = light.normal;
     sample.emission = light.emission;
     
-    // Compute direction and distance
-    Vec3 toLight = sample.position - shadingPoint;
-    sample.distance = toLight.length();
-    sample.direction = toLight * (1.0f / sample.distance);
-    
-    // PDF in solid angle measure:
-    // pdf(ω) = pdf(A) * r² / |cos(θ')|
-    // where pdf(A) = 1 / area
-    float cosLight = std::abs(Vec3::dot(sample.normal, sample.direction * -1.0f));
-    if (cosLight < EPSILON) {
-        sample.pdf = 0.0f;
-    } else {
-        sample.pdf = (sample.distance * sample.distance) / (light.area * cosLight);
+    switch (light.type) {
+        case LightType::POINT: {
+            // Point light: sample from sphere with radius for soft shadows
+            if (light.radius > EPSILON) {
+                // Sample point on sphere surface
+                float z = 1.0f - 2.0f * u1;
+                float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+                float phi = 2.0f * M_PI * u2;
+                Vec3 offset(r * std::cos(phi), r * std::sin(phi), z);
+                sample.position = light.position + offset * light.radius;
+            } else {
+                sample.position = light.position;
+            }
+            sample.normal = Vec3(0, 0, 0); // Point lights don't have normal
+            
+            Vec3 toLight = sample.position - shadingPoint;
+            sample.distance = toLight.length();
+            sample.direction = toLight * (1.0f / sample.distance);
+            
+            // Point light: PDF = 1 (delta distribution, scaled by distance^2 in radiance calc)
+            // For soft point lights, PDF is on sphere surface
+            sample.pdf = 1.0f;
+            break;
+        }
+        
+        case LightType::SUN: {
+            // Sun light: direction is constant, infinite distance
+            sample.direction = light.normal * -1.0f; // normal stores direction
+            sample.position = shadingPoint + sample.direction * 1000000.0f; // Very far
+            sample.normal = light.normal;
+            sample.distance = 1000000.0f;
+            sample.pdf = 1.0f; // Delta distribution
+            break;
+        }
+        
+        case LightType::SPOT: {
+            // Similar to point but with angular falloff
+            sample.position = light.position;
+            sample.normal = light.normal;
+            
+            Vec3 toLight = sample.position - shadingPoint;
+            sample.distance = toLight.length();
+            sample.direction = toLight * (1.0f / sample.distance);
+            
+            // Check if point is within spot cone
+            float cosAngle = Vec3::dot(light.normal, sample.direction * -1.0f);
+            float cosCone = std::cos(light.spotAngle * 0.5f);
+            
+            if (cosAngle < cosCone) {
+                // Outside cone
+                sample.emission = Vec3(0, 0, 0);
+            } else {
+                // Apply spot falloff
+                float blend = light.spotBlend;
+                if (blend > 0.0f) {
+                    float t = (cosAngle - cosCone) / (1.0f - cosCone);
+                    float falloff = std::min(1.0f, t / blend);
+                    sample.emission = sample.emission * falloff;
+                }
+            }
+            sample.pdf = 1.0f;
+            break;
+        }
+        
+        case LightType::AREA: {
+            // Area light: sample point on rectangle
+            float localX = (u1 - 0.5f) * light.sizeX;
+            float localY = (u2 - 0.5f) * light.sizeY;
+            sample.position = light.position + light.right * localX + light.up * localY;
+            sample.normal = light.normal;
+            
+            Vec3 toLight = sample.position - shadingPoint;
+            sample.distance = toLight.length();
+            sample.direction = toLight * (1.0f / sample.distance);
+            
+            // Check if we're on the right side of the light
+            float cosLight = Vec3::dot(sample.normal, sample.direction * -1.0f);
+            if (cosLight < EPSILON) {
+                sample.pdf = 0.0f;
+            } else {
+                sample.pdf = (sample.distance * sample.distance) / (light.area * cosLight);
+            }
+            break;
+        }
+        
+        case LightType::EMISSIVE_MESH:
+        default: {
+            // Original triangle-based sampling
+            sample.position = sampleTrianglePoint(light.v0, light.v1, light.v2, u1, u2);
+            sample.normal = light.normal;
+            
+            Vec3 toLight = sample.position - shadingPoint;
+            sample.distance = toLight.length();
+            sample.direction = toLight * (1.0f / sample.distance);
+            
+            float cosLight = std::abs(Vec3::dot(sample.normal, sample.direction * -1.0f));
+            if (cosLight < EPSILON) {
+                sample.pdf = 0.0f;
+            } else {
+                sample.pdf = (sample.distance * sample.distance) / (light.area * cosLight);
+            }
+            break;
+        }
     }
     
     return sample;
@@ -685,6 +801,24 @@ struct SceneLights {
                     totalArea += light.area;
                 }
             }
+        }
+        
+        // Add native Blender lights (Point, Sun, Spot, Area)
+        for (const Light& nativeLight : scene.nativeLights) {
+            Light light = nativeLight;  // Copy
+            
+            // Ensure area is set for all light types (needed for CDF)
+            if (light.area < EPSILON) {
+                light.area = 1.0f;  // Default for point-like lights
+            }
+            
+            lights.push_back(light);
+            totalArea += light.area;
+        }
+        
+        if (!scene.nativeLights.empty()) {
+            std::cerr << "[SceneLights] Added " << scene.nativeLights.size() 
+                      << " native lights" << std::endl;
         }
         
         // Build CDF for light selection
