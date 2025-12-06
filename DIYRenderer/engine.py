@@ -67,17 +67,45 @@ def compute_camera_params(scene, width: int, height: int) -> Optional[dict]:
     forward.normalize()
     up.normalize()
     
-    # 視野角を計算: FOV = 2 * atan(sensor_width / (2 * focal_length))
-    sensor_w = cam.data.sensor_width
-    lens = cam.data.lens
-    fov_rad = 2.0 * math.atan(sensor_w / (2.0 * lens))
-    fov_deg = math.degrees(fov_rad)
+    # Blender のカメラから垂直 FOV を計算
+    # Blender は sensor_fit で水平/垂直/自動を選択できる
+    cam_data = cam.data
+    
+    # センサーサイズとアスペクト比を取得
+    sensor_width = cam_data.sensor_width
+    sensor_height = cam_data.sensor_height
+    lens = cam_data.lens
+    aspect = width / height
+    
+    # sensor_fit に基づいて実際に使用するセンサー寸法を計算
+    # これは Blender の view3d_utils.py と同じロジック
+    if cam_data.sensor_fit == 'VERTICAL':
+        # 垂直フィット: センサー高さを基準
+        sensor_size = sensor_height
+        vfov_rad = 2.0 * math.atan(sensor_size / (2.0 * lens))
+    elif cam_data.sensor_fit == 'HORIZONTAL':
+        # 水平フィット: センサー幅を基準
+        hfov_rad = 2.0 * math.atan(sensor_width / (2.0 * lens))
+        # 水平 FOV から垂直 FOV に変換
+        vfov_rad = 2.0 * math.atan(math.tan(hfov_rad / 2.0) / aspect)
+    else:  # 'AUTO'
+        # AUTO: アスペクト比により水平か垂直か決まる
+        if aspect >= 1.0:
+            # 横長画像: 水平フィット
+            hfov_rad = 2.0 * math.atan(sensor_width / (2.0 * lens))
+            vfov_rad = 2.0 * math.atan(math.tan(hfov_rad / 2.0) / aspect)
+        else:
+            # 縦長画像: 垂直フィット
+            sensor_size = sensor_width / aspect
+            vfov_rad = 2.0 * math.atan(sensor_size / (2.0 * lens))
+    
+    vfov_deg = math.degrees(vfov_rad)
     
     return {
         'pos': pos,
         'dir': forward,
         'up': up,
-        'fov': fov_deg
+        'fov': vfov_deg  # 垂直 FOV (degrees)
     }
 
 
