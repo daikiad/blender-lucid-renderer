@@ -191,7 +191,7 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
             ('nee', "NEE", "Next Event Estimation (fast direct lighting)"),
             ('mis', "MIS", "Multiple Importance Sampling (best quality)"),
         ],
-        default='nee'
+        default='mis'
     )
     
     # デバッグモード: レンダリングの中間結果を可視化

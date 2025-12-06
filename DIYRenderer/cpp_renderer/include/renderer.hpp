@@ -511,9 +511,16 @@ struct Hit {
 // Forward declaration for Light (defined in pbr.hpp)
 struct Light;
 
+// Environment/World settings
+struct Environment {
+    Vec3 color = Vec3(0.05f, 0.05f, 0.05f);  // Background color
+    float strength = 1.0f;                    // Emission strength multiplier
+};
+
 struct Scene {
     std::vector<Mesh> meshes;
     std::vector<Light> nativeLights;  // Blender ネイティブライト (Point, Sun, Spot, Area)
+    Environment environment;          // World environment settings
 };
 
 inline void finalizeMeshBounds(Mesh &m){
@@ -791,7 +798,13 @@ inline Vec3 traceEmission(const Scene &scene, const Ray &ray, bool useAABB = tru
 }
 
 // Sky/environment color for background
-// Set to black (no environment lighting) to match Cycles with black world
+// Uses the scene's environment settings (color * strength)
+inline Vec3 getEnvironmentColor(const Ray &ray, const Environment& env){
+    // Simple solid color background (scaled by strength)
+    return env.color * env.strength;
+}
+
+// Legacy version for backward compatibility (returns black)
 inline Vec3 getEnvironmentColor(const Ray &ray){
     return Vec3(0.0f, 0.0f, 0.0f);
 }

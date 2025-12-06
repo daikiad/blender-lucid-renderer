@@ -548,6 +548,14 @@ enum class LightType {
     AREA            // 面光源（矩形/円形）
 };
 
+// Area light shape
+enum class AreaLightShape {
+    SQUARE,     // 正方形
+    RECTANGLE,  // 長方形
+    DISK,       // 円形
+    ELLIPSE     // 楕円
+};
+
 struct Light {
     LightType type = LightType::EMISSIVE_MESH;
     
@@ -572,6 +580,7 @@ struct Light {
     Vec3 up;            // Y axis for area light
     float sizeX = 1.0f; // Width
     float sizeY = 1.0f; // Height
+    AreaLightShape shape = AreaLightShape::SQUARE;  // Shape of area light
     
     Light() : area(0.0f), meshIndex(-1), triangleIndex(-1) {}
 };
@@ -606,6 +615,185 @@ struct LightSample {
     LightSample() : pdf(0.0f), distance(0.0f) {}
 };
 
+// ========== Light-Ray Intersection ==========
+// Hit result for native light intersection
+struct LightHit {
+    bool hit = false;
+    float t = 1e30f;          // Distance to hit point
+    Vec3 point;               // Hit position
+    Vec3 normal;              // Surface normal at hit
+    Vec3 emission;            // Light emission at hit point
+    int lightIndex = -1;      // Index into scene.nativeLights
+};
+
+// Intersect ray with a sphere (for soft point lights)
+inline bool intersectSphere(const Ray& ray, const Vec3& center, float radius, 
+                            float& tHit, Vec3& hitNormal) {
+    Vec3 oc = ray.o - center;
+    float a = Vec3::dot(ray.d, ray.d);
+    float b = 2.0f * Vec3::dot(oc, ray.d);
+    float c = Vec3::dot(oc, oc) - radius * radius;
+    float discriminant = b * b - 4.0f * a * c;
+    
+    if (discriminant < 0) return false;
+    
+    float sqrtD = std::sqrt(discriminant);
+    float t = (-b - sqrtD) / (2.0f * a);
+    
+    // If front hit is behind ray origin, try back hit
+    if (t < EPSILON) {
+        t = (-b + sqrtD) / (2.0f * a);
+        if (t < EPSILON) return false;
+    }
+    
+    tHit = t;
+    Vec3 hitPoint = ray.o + ray.d * t;
+    hitNormal = (hitPoint - center) * (1.0f / radius);
+    return true;
+}
+
+// Intersect ray with a rectangle (for area lights)
+// Rectangle defined by center, normal, right/up vectors, and size
+inline bool intersectRectangle(const Ray& ray, const Vec3& center, const Vec3& normal,
+                               const Vec3& right, const Vec3& up, 
+                               float sizeX, float sizeY,
+                               float& tHit, Vec3& hitPoint) {
+    // Check if ray is parallel to plane
+    float denom = Vec3::dot(normal, ray.d);
+    if (std::abs(denom) < EPSILON) return false;
+    
+    // Find intersection with plane
+    float t = Vec3::dot(center - ray.o, normal) / denom;
+    if (t < EPSILON) return false;
+    
+    // Check if hit point is within rectangle bounds
+    hitPoint = ray.o + ray.d * t;
+    Vec3 localHit = hitPoint - center;
+    
+    float x = Vec3::dot(localHit, right);
+    float y = Vec3::dot(localHit, up);
+    
+    float halfX = sizeX * 0.5f;
+    float halfY = sizeY * 0.5f;
+    
+    if (std::abs(x) > halfX || std::abs(y) > halfY) return false;
+    
+    tHit = t;
+    return true;
+}
+
+// Intersect ray with an ellipse/disk (for DISK and ELLIPSE area lights)
+// Ellipse defined by center, normal, right/up vectors, and radii (sizeX/2, sizeY/2)
+inline bool intersectEllipse(const Ray& ray, const Vec3& center, const Vec3& normal,
+                              const Vec3& right, const Vec3& up, 
+                              float radiusX, float radiusY,
+                              float& tHit, Vec3& hitPoint) {
+    // Check if ray is parallel to plane
+    float denom = Vec3::dot(normal, ray.d);
+    if (std::abs(denom) < EPSILON) return false;
+    
+    // Find intersection with plane
+    float t = Vec3::dot(center - ray.o, normal) / denom;
+    if (t < EPSILON) return false;
+    
+    // Check if hit point is within ellipse
+    hitPoint = ray.o + ray.d * t;
+    Vec3 localHit = hitPoint - center;
+    
+    float x = Vec3::dot(localHit, right);
+    float y = Vec3::dot(localHit, up);
+    
+    // Ellipse equation: (x/a)² + (y/b)² <= 1
+    float normalizedX = x / radiusX;
+    float normalizedY = y / radiusY;
+    
+    if (normalizedX * normalizedX + normalizedY * normalizedY > 1.0f) return false;
+    
+    tHit = t;
+    return true;
+}
+
+// Intersect ray with all native lights in the scene
+// depth: current bounce depth (0 = primary ray from camera)
+// Native lights are invisible to camera (depth 0) but visible via reflections (depth > 0)
+inline LightHit intersectNativeLights(const Scene& scene, const Ray& ray, int depth) {
+    LightHit result;
+    
+    // Blender's native lights are invisible to camera rays
+    // They only become visible through reflections/refractions (depth > 0)
+    if (depth == 0) {
+        return result;  // Return no hit for primary rays
+    }
+    
+    for (size_t i = 0; i < scene.nativeLights.size(); ++i) {
+        const Light& light = scene.nativeLights[i];
+        float t;
+        Vec3 hitPoint, hitNormal;
+        
+        switch (light.type) {
+            case LightType::POINT: {
+                // Only intersectable if it has a radius (soft point = sphere)
+                if (light.radius > EPSILON) {
+                    if (intersectSphere(ray, light.position, light.radius, t, hitNormal)) {
+                        if (t < result.t) {
+                            result.hit = true;
+                            result.t = t;
+                            result.point = ray.o + ray.d * t;
+                            result.normal = hitNormal;
+                            result.emission = light.emission;
+                            result.lightIndex = (int)i;
+                        }
+                    }
+                }
+                // True point lights (radius=0) cannot be hit by rays
+                break;
+            }
+            
+            case LightType::AREA: {
+                bool hitLight = false;
+                
+                // Check shape: DISK/ELLIPSE use ellipse intersection, SQUARE/RECTANGLE use rectangle
+                if (light.shape == AreaLightShape::DISK || light.shape == AreaLightShape::ELLIPSE) {
+                    // For DISK/ELLIPSE, sizeX and sizeY are diameters, so radius = size/2
+                    float radiusX = light.sizeX * 0.5f;
+                    float radiusY = light.sizeY * 0.5f;
+                    hitLight = intersectEllipse(ray, light.position, light.normal, 
+                                                light.right, light.up, 
+                                                radiusX, radiusY, t, hitPoint);
+                } else {
+                    // SQUARE/RECTANGLE
+                    hitLight = intersectRectangle(ray, light.position, light.normal, 
+                                                  light.right, light.up, 
+                                                  light.sizeX, light.sizeY, t, hitPoint);
+                }
+                
+                if (hitLight && t < result.t) {
+                    // Only visible from front side of area light
+                    float facing = Vec3::dot(light.normal, ray.d);
+                    if (facing < 0) {  // Ray coming from front side
+                        result.hit = true;
+                        result.t = t;
+                        result.point = hitPoint;
+                        result.normal = light.normal;
+                        result.emission = light.emission;
+                        result.lightIndex = (int)i;
+                    }
+                }
+                break;
+            }
+            
+            case LightType::SUN:
+            case LightType::SPOT:
+            default:
+                // Sun and Spot are not directly intersectable geometry
+                // (Sun is infinitely far, Spot is a point source)
+                break;
+        }
+    }
+    
+    return result;
+}
+
 // Sample uniform point on disk (for area lights)
 inline Vec3 sampleDisk(float u1, float u2) {
     float r = std::sqrt(u1);
@@ -623,39 +811,60 @@ inline LightSample sampleLight(const Light& light, const Vec3& shadingPoint,
         case LightType::POINT: {
             // Point light: sample from sphere with radius for soft shadows
             if (light.radius > EPSILON) {
-                // Sample point on sphere surface
+                // Soft point light: sample point on sphere surface
                 float z = 1.0f - 2.0f * u1;
                 float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
                 float phi = 2.0f * M_PI * u2;
                 Vec3 offset(r * std::cos(phi), r * std::sin(phi), z);
                 sample.position = light.position + offset * light.radius;
+                
+                // Normal points outward from sphere center
+                sample.normal = offset;
             } else {
+                // True point light
                 sample.position = light.position;
+                sample.normal = Vec3(0, 0, 0);
             }
-            sample.normal = Vec3(0, 0, 0); // Point lights don't have normal
             
             Vec3 toLight = sample.position - shadingPoint;
             sample.distance = toLight.length();
             sample.direction = toLight * (1.0f / sample.distance);
             
-            // Point light: PDF = 1 (delta distribution, scaled by distance^2 in radiance calc)
-            // For soft point lights, PDF is on sphere surface
-            sample.pdf = 1.0f;
+            // For true point light: delta distribution
+            // emission already contains I = Power / (4π)
+            // Apply inverse square falloff: radiance = I / r²
+            if (light.radius < EPSILON) {
+                // True point: apply 1/r² to emission
+                float invDistSq = 1.0f / (sample.distance * sample.distance);
+                sample.emission = light.emission * invDistSq;
+                sample.pdf = 1.0f;  // Delta distribution
+            } else {
+                // Soft point (sphere): PDF is uniform on sphere, geometry handled by area sampling
+                // emission is already radiance L = Power / (π * area)
+                float cosLight = Vec3::dot(sample.normal, sample.direction * -1.0f);
+                if (cosLight < EPSILON) {
+                    sample.pdf = 0.0f;
+                } else {
+                    sample.pdf = (sample.distance * sample.distance) / (light.area * cosLight);
+                }
+            }
             break;
         }
         
         case LightType::SUN: {
             // Sun light: direction is constant, infinite distance
+            // No distance falloff for directional lights
             sample.direction = light.normal * -1.0f; // normal stores direction
             sample.position = shadingPoint + sample.direction * 1000000.0f; // Very far
             sample.normal = light.normal;
             sample.distance = 1000000.0f;
-            sample.pdf = 1.0f; // Delta distribution
+            sample.pdf = 1.0f; // Delta distribution (direction)
+            // emission = irradiance (W/m²), no modification needed
             break;
         }
         
         case LightType::SPOT: {
-            // Similar to point but with angular falloff
+            // Spot light: point source with angular falloff
             sample.position = light.position;
             sample.normal = light.normal;
             
@@ -663,15 +872,19 @@ inline LightSample sampleLight(const Light& light, const Vec3& shadingPoint,
             sample.distance = toLight.length();
             sample.direction = toLight * (1.0f / sample.distance);
             
+            // Apply inverse square falloff (same as point light)
+            float invDistSq = 1.0f / (sample.distance * sample.distance);
+            sample.emission = light.emission * invDistSq;
+            
             // Check if point is within spot cone
             float cosAngle = Vec3::dot(light.normal, sample.direction * -1.0f);
             float cosCone = std::cos(light.spotAngle * 0.5f);
             
             if (cosAngle < cosCone) {
-                // Outside cone
+                // Outside cone - no light
                 sample.emission = Vec3(0, 0, 0);
             } else {
-                // Apply spot falloff
+                // Apply smooth falloff at edges
                 float blend = light.spotBlend;
                 if (blend > 0.0f) {
                     float t = (cosAngle - cosCone) / (1.0f - cosCone);
@@ -679,14 +892,27 @@ inline LightSample sampleLight(const Light& light, const Vec3& shadingPoint,
                     sample.emission = sample.emission * falloff;
                 }
             }
-            sample.pdf = 1.0f;
+            sample.pdf = 1.0f; // Delta distribution (point source)
             break;
         }
         
         case LightType::AREA: {
-            // Area light: sample point on rectangle
-            float localX = (u1 - 0.5f) * light.sizeX;
-            float localY = (u2 - 0.5f) * light.sizeY;
+            // Sample point on area light (rectangle or ellipse/disk)
+            float localX, localY;
+            
+            if (light.shape == AreaLightShape::DISK || light.shape == AreaLightShape::ELLIPSE) {
+                // Sample uniform point on disk/ellipse using concentric mapping
+                float r = std::sqrt(u1);
+                float theta = 2.0f * M_PI * u2;
+                // Scale by radius (size/2)
+                localX = r * std::cos(theta) * light.sizeX * 0.5f;
+                localY = r * std::sin(theta) * light.sizeY * 0.5f;
+            } else {
+                // SQUARE/RECTANGLE: uniform sampling
+                localX = (u1 - 0.5f) * light.sizeX;
+                localY = (u2 - 0.5f) * light.sizeY;
+            }
+            
             sample.position = light.position + light.right * localX + light.up * localY;
             sample.normal = light.normal;
             
@@ -872,10 +1098,22 @@ inline Vec3 traceSimple(const Scene& scene, const Ray& ray, int maxDepth) {
     Ray currentRay = ray;
     
     for (int depth = 0; depth < maxDepth; ++depth) {
+        // Intersect with meshes
         Hit hit = intersectScene(scene, currentRay, true);
         
+        // Intersect with native lights (Area lights, soft point lights)
+        // Pass depth so lights are invisible to camera (depth 0)
+        LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
+        
+        // Check if we hit a native light closer than any mesh
+        if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
+            // Hit a native light - add emission and terminate
+            result = result + throughput * lightHit.emission;
+            break;
+        }
+        
         if (!hit.hit) {
-            result = result + throughput * getEnvironmentColor(currentRay);
+            result = result + throughput * getEnvironmentColor(currentRay, scene.environment);
             break;
         }
         
@@ -1001,10 +1239,23 @@ inline Vec3 traceNEE(const Scene& scene, const SceneLights& sceneLights,
     Ray currentRay = ray;
     
     for (int depth = 0; depth < maxDepth; ++depth) {
+        // Intersect with meshes
         Hit hit = intersectScene(scene, currentRay, true);
         
+        // Intersect with native lights (Area lights, soft point lights)
+        // Pass depth so lights are invisible to camera (depth 0)
+        LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
+        
+        // Check if we hit a native light closer than any mesh
+        if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
+            // Hit a native light - add emission and terminate
+            // (For NEE, this handles reflections seeing the light)
+            result = result + throughput * lightHit.emission;
+            break;
+        }
+        
         if (!hit.hit) {
-            result = result + throughput * getEnvironmentColor(currentRay);
+            result = result + throughput * getEnvironmentColor(currentRay, scene.environment);
             break;
         }
         
@@ -1164,10 +1415,32 @@ inline Vec3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
     float lastBsdfPdf = 0.0f;    // PDF of previous BSDF sample (for emission MIS), 0 means first hit
     
     for (int depth = 0; depth < maxDepth; ++depth) {
+        // Intersect with meshes
         Hit hit = intersectScene(scene, currentRay, true);
         
+        // Intersect with native lights (Area lights, soft point lights)
+        // Pass depth so lights are invisible to camera (depth 0)
+        LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
+        
+        // Check if we hit a native light closer than any mesh
+        if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
+            // Hit a native light via reflection - add emission with MIS weight
+            // Note: depth 0 case never reaches here due to intersectNativeLights returning no hit
+            if (lastBsdfPdf < EPSILON) {
+                // First bounce after camera (depth 1) directly sees light - full contribution
+                result = result + throughput * lightHit.emission;
+            } else {
+                // BSDF sampled ray hit a light - compute MIS weight
+                // Light PDF: area sampling converted to solid angle
+                // For now, add with reduced weight (proper MIS would need light geometry info)
+                float misWeight = 0.5f;  // Simplified MIS weight
+                result = result + throughput * lightHit.emission * misWeight;
+            }
+            break;
+        }
+        
         if (!hit.hit) {
-            result = result + throughput * getEnvironmentColor(currentRay);
+            result = result + throughput * getEnvironmentColor(currentRay, scene.environment);
             break;
         }
         

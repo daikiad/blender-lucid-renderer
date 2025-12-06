@@ -167,8 +167,13 @@ NodeTree parseNodeTree(const json &nodeTreeJson) {
 Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::string &socketName, const Vec2 &uv) {
     const MaterialNode *node = tree.findNode(nodeName);
     if(!node) {
-        std::cerr << "[NodeEval] Node not found: " << nodeName << "\n";
-        return Vec3(1.0f, 0.0f, 1.0f);  // Magenta = error
+        // Only warn once per missing node name to avoid log spam
+        static std::set<std::string> warnedNodes;
+        if (warnedNodes.find(nodeName) == warnedNodes.end()) {
+            warnedNodes.insert(nodeName);
+            std::cerr << "[NodeEval] Node not found: " << nodeName << " (warning once)\n";
+        }
+        return Vec3(0.8f, 0.8f, 0.8f);  // Default gray instead of magenta
     }
     
     // ===== Principled BSDF Node =====
@@ -250,6 +255,31 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
             }
             
             return color * strength;  // Multiply color by strength
+        }
+    } else if(node->type == "ShaderNodeBsdfDiffuse") {
+        // ===== Diffuse BSDF Node =====
+        // Returns the diffuse color for the surface
+        // Similar to Principled BSDF but only handles diffuse component
+        if(socketName == "BSDF") {
+            // For BSDF output, evaluate the Color input
+            const NodeSocket *colorSocket = node->findInput("Color");
+            
+            if(!colorSocket) {
+                return Vec3(0.8f, 0.8f, 0.8f);  // Default gray
+            }
+            
+            if(colorSocket->is_linked) {
+                // Follow connection to linked node
+                return evaluateNode(tree, colorSocket->linked_node, colorSocket->linked_socket, uv);
+            } else {
+                // Use default value
+                if(colorSocket->default_value.type == SocketValue::VEC4) {
+                    return colorSocket->default_value.v4;  // RGBA → use v4 field
+                } else if(colorSocket->default_value.type == SocketValue::VEC3) {
+                    return colorSocket->default_value.v3;  // RGB → use v3 field
+                }
+                return Vec3(0.8f, 0.8f, 0.8f);
+            }
         }
     } else if(node->type == "ShaderNodeRGB") {
         // ===== RGB Node =====
@@ -360,12 +390,12 @@ Vec3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::
         }
     }
     
-    // Unknown node type - return magenta error color (warn once per type)
+    // Unknown node type - return gray (warn once per type)
     if(warnedNodeTypes.find(node->type) == warnedNodeTypes.end()) {
         warnedNodeTypes.insert(node->type);
         std::cerr << "[NodeEval] Unhandled node type: " << node->type << " (further warnings suppressed)\n";
     }
-    return Vec3(1.0f, 0.0f, 1.0f);  // Magenta = unimplemented
+    return Vec3(0.8f, 0.8f, 0.8f);  // Default gray for unimplemented nodes
 }
 
 /**

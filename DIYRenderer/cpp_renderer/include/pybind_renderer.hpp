@@ -507,6 +507,27 @@ private:
             parseNativeLights(j["lights"], scene);
         }
         
+        // Parse environment settings
+        if (j.contains("environment") && j["environment"].is_object()) {
+            const auto& envJson = j["environment"];
+            
+            if (envJson.contains("color") && envJson["color"].is_array()) {
+                scene.environment.color = Vec3(
+                    envJson["color"][0].get<float>(),
+                    envJson["color"][1].get<float>(),
+                    envJson["color"][2].get<float>()
+                );
+            }
+            
+            if (envJson.contains("strength")) {
+                scene.environment.strength = envJson["strength"].get<float>();
+            }
+            
+            std::cerr << "[Environment] color=(" << scene.environment.color.x << ", "
+                      << scene.environment.color.y << ", " << scene.environment.color.z 
+                      << "), strength=" << scene.environment.strength << std::endl;
+        }
+        
         return scene;
     }
     
@@ -545,37 +566,92 @@ private:
             }
             float energy = lightJson.value("energy", 1.0f);
             
-            // Blender uses physical light units (Watts for point/spot, W/m^2 for sun)
-            // Scale appropriately for our renderer
-            float energyScale = energy / 100.0f;  // Adjust to reasonable range
-            light.emission = color * energyScale;
+            // =====================================================
+            // Blender Light Units (Physical, since 2.8+):
+            // - Point/Spot: Watts (W) - total radiant flux
+            // - Sun: W/m² - irradiance (directional)
+            // - Area: Watts (W) - total radiant flux over the surface
+            //
+            // Our renderer needs Radiance (W/m²/sr) for integration.
+            // Conversion depends on light type and PDF.
+            // =====================================================
+            
             light.energy = energy;
             
             // Set light type and type-specific properties
             if (typeStr == "POINT") {
                 light.type = LightType::POINT;
                 light.radius = lightJson.value("radius", 0.0f);
+                
+                // For spherical area light (soft shadows)
                 light.area = 4.0f * M_PI * light.radius * light.radius;
-                if (light.area < EPSILON) light.area = 1.0f; // Avoid zero area for point lights
+                if (light.area < EPSILON) light.area = 1.0f;
+                
+                // Point light: I = Power / (4π) [W/sr]
+                // In NEE, contribution = I / r² = Power / (4π * r²)
+                // We store Power / (4π) as emission, apply 1/r² in integration
+                // For soft point (sphere), emission is radiance: Power / (π * area)
+                if (light.radius > EPSILON) {
+                    // Spherical light: Lambertian emitter
+                    // L = Power / (π * surfaceArea) where surfaceArea = 4πr²
+                    // L = Power / (4π²r²)
+                    light.emission = color * (energy / (M_PI * light.area));
+                } else {
+                    // True point light: store intensity I = Power / (4π)
+                    // 1/r² applied during sampling
+                    light.emission = color * (energy / (4.0f * M_PI));
+                }
                 
             } else if (typeStr == "SUN") {
                 light.type = LightType::SUN;
                 light.area = 1.0f;  // Sun is directional, area is symbolic
-                // Sun uses different energy scale
-                light.emission = color * energy * 0.01f;
+                
+                // Sun: energy is already irradiance (W/m²)
+                // Use directly as we treat it as parallel rays
+                light.emission = color * energy;
                 
             } else if (typeStr == "SPOT") {
                 light.type = LightType::SPOT;
                 light.radius = lightJson.value("radius", 0.0f);
                 light.spotAngle = lightJson.value("spot_size", M_PI / 4.0f);
                 light.spotBlend = lightJson.value("spot_blend", 0.0f);
-                light.area = 1.0f;  // Symbolic for point-like source
+                light.area = 1.0f;
+                
+                // Spot light: same as point but concentrated in cone
+                // Blender's spot energy is total power, distributed in cone
+                // Solid angle of cone = 2π(1 - cos(θ/2))
+                float halfAngle = light.spotAngle * 0.5f;
+                float solidAngle = 2.0f * M_PI * (1.0f - std::cos(halfAngle));
+                
+                // Intensity in the cone direction = Power / solidAngle
+                light.emission = color * (energy / solidAngle);
                 
             } else if (typeStr == "AREA") {
                 light.type = LightType::AREA;
                 light.sizeX = lightJson.value("size", 1.0f);
                 light.sizeY = lightJson.value("size_y", light.sizeX);
-                light.area = light.sizeX * light.sizeY;
+                
+                // Parse shape
+                std::string shapeStr = lightJson.value("shape", "SQUARE");
+                if (shapeStr == "DISK") {
+                    light.shape = AreaLightShape::DISK;
+                    // Disk area = π * r², where r = size/2
+                    float radius = light.sizeX * 0.5f;
+                    light.area = M_PI * radius * radius;
+                } else if (shapeStr == "ELLIPSE") {
+                    light.shape = AreaLightShape::ELLIPSE;
+                    // Ellipse area = π * a * b, where a = sizeX/2, b = sizeY/2
+                    float radiusX = light.sizeX * 0.5f;
+                    float radiusY = light.sizeY * 0.5f;
+                    light.area = M_PI * radiusX * radiusY;
+                } else if (shapeStr == "RECTANGLE") {
+                    light.shape = AreaLightShape::RECTANGLE;
+                    light.area = light.sizeX * light.sizeY;
+                } else {
+                    // SQUARE or default
+                    light.shape = AreaLightShape::SQUARE;
+                    light.area = light.sizeX * light.sizeY;
+                }
                 
                 // Get orientation vectors
                 if (lightJson.contains("right")) {
@@ -593,8 +669,13 @@ private:
                     );
                 }
                 
-                // Area light energy is per unit area in Blender
-                light.emission = color * energy / light.area * 0.1f;
+                // Area light: Lambertian emitter
+                // Radiance L = Power / (π * Area) [W/m²/sr]
+                // The π factor accounts for Lambertian cosine distribution
+                light.emission = color * (energy / (M_PI * light.area));
+                
+                std::cerr << "[SceneParser] Area light shape=" << shapeStr 
+                          << " area=" << light.area << std::endl;
             }
             
             light.meshIndex = -1;

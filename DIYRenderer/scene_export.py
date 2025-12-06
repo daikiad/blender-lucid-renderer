@@ -290,6 +290,59 @@ def get_material_properties(obj):
     return result
 
 
+def _export_world_environment(scene):
+    """
+    Export world environment settings (background color, strength).
+    
+    Handles:
+    - Simple background color from world.color
+    - Background node in world shader graph (color + strength)
+    
+    Returns:
+        dict: Environment settings with 'color' [r, g, b] and 'strength' float
+    """
+    # Default: mid-gray environment
+    env_data = {
+        "color": [0.05, 0.05, 0.05],  # Default dark gray
+        "strength": 1.0
+    }
+    
+    world = scene.world
+    if not world:
+        return env_data
+    
+    # Try to get from node tree first
+    if world.use_nodes and world.node_tree:
+        nodes = world.node_tree.nodes
+        
+        # Look for Background node connected to World Output
+        for node in nodes:
+            if node.type == 'BACKGROUND':
+                # Get color input
+                color_input = node.inputs.get('Color')
+                if color_input:
+                    if color_input.is_linked:
+                        # Follow link to get actual color (simplified - only handles direct color)
+                        pass
+                    else:
+                        color = color_input.default_value
+                        env_data["color"] = [color[0], color[1], color[2]]
+                
+                # Get strength input
+                strength_input = node.inputs.get('Strength')
+                if strength_input:
+                    if not strength_input.is_linked:
+                        env_data["strength"] = strength_input.default_value
+                break
+    else:
+        # Fallback to simple world color
+        if hasattr(world, 'color'):
+            color = world.color
+            env_data["color"] = [color[0], color[1], color[2]]
+    
+    return env_data
+
+
 def _export_light(obj, matrix_world):
     """
     Blender のライトオブジェクトをエクスポート
@@ -374,10 +427,14 @@ def export_scene_to_json(depsgraph):
     
     path = os.path.join(base_dir, "diy_scene_debug.json")
     
+    # Get scene for environment export
+    scene = depsgraph.scene
+    
     scene_data = {
         "version": "1.0",
         "meshes": [],
-        "lights": []  # Blender ネイティブライト
+        "lights": [],  # Blender ネイティブライト
+        "environment": _export_world_environment(scene)
     }
     
     for obj_instance in depsgraph.object_instances:
