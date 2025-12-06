@@ -1043,11 +1043,6 @@ struct SceneLights {
             totalArea += light.area;
         }
         
-        if (!scene.nativeLights.empty()) {
-            std::cerr << "[SceneLights] Added " << scene.nativeLights.size() 
-                      << " native lights" << std::endl;
-        }
-        
         // Build CDF for light selection
         cdf.resize(lights.size());
         float cumulative = 0.0f;
