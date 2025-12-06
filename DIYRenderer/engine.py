@@ -574,17 +574,31 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 cam_up = (view_matrix_inv.to_3x3() @ Vector((0, 1, 0))).normalized()
                 
                 if region_data.view_perspective == 'CAMERA':
-                    camera = context.scene.camera
-                    if camera and camera.data:
-                        cam_data = camera.data
-                        sensor_width = cam_data.sensor_width
-                        focal_length = cam_data.lens
-                        fov = math.degrees(2 * math.atan(sensor_width / (2 * focal_length)))
+                    # カメラビュー: window_matrix から実際の表示FOVを取得
+                    # （カメラのズームやセンサーフィットも考慮される）
+                    wm = region_data.window_matrix
+                    if wm[1][1] != 0:
+                        fov = math.degrees(2 * math.atan(1.0 / wm[1][1]))
+                    else:
+                        # フォールバック: カメラ設定から計算
+                        camera = context.scene.camera
+                        if camera and camera.data:
+                            cam_data = camera.data
+                            sensor_width = cam_data.sensor_width
+                            focal_length = cam_data.lens
+                            fov = math.degrees(2 * math.atan(sensor_width / (2 * focal_length)))
+                        else:
+                            fov = 50.0
+                elif region_data.view_perspective == 'PERSP':
+                    # 透視投影: window_matrix から FOV を逆算
+                    # window_matrix[1][1] = 1 / tan(fov/2) （縦方向）
+                    wm = region_data.window_matrix
+                    if wm[1][1] != 0:
+                        fov = math.degrees(2 * math.atan(1.0 / wm[1][1]))
                     else:
                         fov = 50.0
-                elif region_data.view_perspective == 'PERSP':
-                    fov = 50.0
                 else:
+                    # 正射影: FOV は使わないが、小さい値を設定
                     fov = 5.0
                 
                 cam_params = {
