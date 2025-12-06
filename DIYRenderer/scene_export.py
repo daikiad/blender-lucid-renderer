@@ -301,14 +301,15 @@ def _export_world_environment(scene):
     Returns:
         dict: Environment settings with 'color' [r, g, b] and 'strength' float
     """
-    # Default: mid-gray environment
+    # Default: light gray environment for ambient lighting
     env_data = {
-        "color": [0.05, 0.05, 0.05],  # Default dark gray
+        "color": [0.5, 0.5, 0.5],  # Default mid-gray
         "strength": 1.0
     }
     
     world = scene.world
     if not world:
+        print(f"[Environment] No world, using default: color={env_data['color']}, strength={env_data['strength']}")
         return env_data
     
     # Try to get from node tree first
@@ -333,12 +334,15 @@ def _export_world_environment(scene):
                 if strength_input:
                     if not strength_input.is_linked:
                         env_data["strength"] = strength_input.default_value
+                
+                print(f"[Environment] From Background node: color={env_data['color']}, strength={env_data['strength']}")
                 break
     else:
         # Fallback to simple world color
         if hasattr(world, 'color'):
             color = world.color
             env_data["color"] = [color[0], color[1], color[2]]
+        print(f"[Environment] From world.color: color={env_data['color']}, strength={env_data['strength']}")
     
     return env_data
 
@@ -614,23 +618,171 @@ def export_scene_to_json(depsgraph):
     return path
 
 
+def export_scene_to_json_for_session(depsgraph, session_id: int):
+    """
+    Export scene to JSON file with session-specific filename.
+    This prevents file conflicts between different render contexts.
+    
+    Uses the same export logic as export_scene_to_json but with a
+    session-specific output path.
+    """
+    # Session-specific filename
+    path = os.path.join(tempfile.gettempdir(), f'diy_scene_session_{session_id}.json')
+    
+    # Reuse the core export logic from export_scene_to_json
+    # but with a custom path
+    return _export_scene_to_path(depsgraph, path)
+
+
+def _export_scene_to_path(depsgraph, path: str):
+    """
+    Internal function to export scene to a specific path.
+    This is the core export logic shared by all export functions.
+    """
+    scene = depsgraph.scene
+    scene_data = {
+        "version": "1.0",
+        "meshes": [],
+        "native_lights": [],
+        "environment": _export_world_environment(scene)
+    }
+    
+    for obj_instance in depsgraph.object_instances:
+        obj = obj_instance.object
+        if obj.type == 'LIGHT':
+            light_data = _export_light(obj, obj_instance.matrix_world)
+            if light_data:
+                scene_data["native_lights"].append(light_data)
+            continue
+            
+        if obj.type != 'MESH':
+            continue
+            
+        eval_obj = obj.evaluated_get(depsgraph)
+        
+        try:
+            eval_mesh = eval_obj.to_mesh()
+        except RuntimeError:
+            continue
+        
+        if eval_mesh is None:
+            continue
+        
+        matrix = obj_instance.matrix_world
+        
+        # Get vertices in world space
+        verts = []
+        for v in eval_mesh.vertices:
+            world_pos = matrix @ v.co
+            verts.append([world_pos.x, world_pos.y, world_pos.z])
+        
+        # Check for smooth shading
+        use_smooth = False
+        if eval_mesh.polygons:
+            use_smooth = any(p.use_smooth for p in eval_mesh.polygons)
+        
+        # Get UV layer
+        uv_layer = None
+        if eval_mesh.uv_layers.active:
+            uv_layer = eval_mesh.uv_layers.active.data
+        
+        # Triangulate
+        eval_mesh.calc_loop_triangles()
+        tris = []
+        triangle_normals = []
+        triangle_uvs = []
+        
+        normal_matrix = matrix.to_3x3().inverted().transposed()
+        
+        for lt in eval_mesh.loop_triangles:
+            tris.append([lt.vertices[0], lt.vertices[1], lt.vertices[2]])
+            
+            if use_smooth:
+                normals = []
+                for loop_idx in lt.loops:
+                    loop = eval_mesh.loops[loop_idx]
+                    local_normal = eval_mesh.vertices[loop.vertex_index].normal
+                    world_normal = (normal_matrix @ local_normal).normalized()
+                    normals.append([world_normal.x, world_normal.y, world_normal.z])
+                triangle_normals.append(normals)
+            
+            if uv_layer:
+                uvs = []
+                for loop_idx in lt.loops:
+                    uv = uv_layer[loop_idx].uv
+                    uvs.append([uv.x, uv.y])
+                triangle_uvs.append(uvs)
+        
+        # Get material
+        mat_data = {}
+        if obj.active_material:
+            mat_data = get_material_properties(obj)
+        
+        mesh_data = {
+            "name": obj.name,
+            "vertices": verts,
+            "triangles": tris,
+            "material": mat_data
+        }
+        
+        if use_smooth and triangle_normals:
+            mesh_data["triangle_normals"] = triangle_normals
+            mesh_data["smooth"] = True
+        
+        if triangle_uvs:
+            mesh_data["triangle_uvs"] = triangle_uvs
+        
+        scene_data["meshes"].append(mesh_data)
+        eval_obj.to_mesh_clear()
+    
+    print(f"[SceneExport _export_scene_to_path] Exported: {len(scene_data['meshes'])} meshes, {len(scene_data['native_lights'])} lights")
+    
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(scene_data, f, indent=2)
+    
+    return path
+
+
 class SceneCache:
     """
     Cache for exported scene files.
     Tracks scene state and reuses exported files when the scene hasn't changed.
+    
+    Now supports per-session caching to avoid conflicts between:
+    - Viewport rendering
+    - Material preview
+    - F12 rendering
     """
-    _instance = None
+    # グローバルキャッシュ（後方互換用）
+    _global_instance = None
     
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._init()
-        return cls._instance
+    # セッション別キャッシュ: session_id -> SceneCache
+    _session_caches: dict = {}
     
-    def _init(self):
+    def __init__(self, session_id: int = 0):
+        self.session_id = session_id
         self.cached_file = None
         self.scene_hash = None
         self.last_export_time = 0
+    
+    @classmethod
+    def get_for_session(cls, session_id: int) -> 'SceneCache':
+        """セッションID別のキャッシュを取得"""
+        if session_id not in cls._session_caches:
+            cls._session_caches[session_id] = cls(session_id)
+        return cls._session_caches[session_id]
+    
+    @classmethod
+    def clear_session(cls, session_id: int) -> None:
+        """セッションのキャッシュをクリア"""
+        if session_id in cls._session_caches:
+            cache = cls._session_caches.pop(session_id)
+            # キャッシュファイルを削除
+            if cache.cached_file and os.path.isfile(cache.cached_file):
+                try:
+                    os.remove(cache.cached_file)
+                except Exception:
+                    pass
     
     def compute_scene_hash(self, depsgraph):
         """Compute a hash to detect scene changes."""
@@ -673,7 +825,11 @@ class SceneCache:
             self.scene_hash == current_hash):
             return self.cached_file
         
-        path = export_scene_to_json(depsgraph)
+        # セッションIDがある場合はセッション固有のファイルを使用
+        if self.session_id > 0:
+            path = export_scene_to_json_for_session(depsgraph, self.session_id)
+        else:
+            path = export_scene_to_json(depsgraph)
         
         self.cached_file = path
         self.scene_hash = current_hash
@@ -694,18 +850,43 @@ class SceneCache:
         self.scene_hash = None
 
 
-def get_scene_cache():
-    """Get the singleton scene cache instance."""
-    return SceneCache()
+def get_scene_cache(session_id: int = 0):
+    """Get a scene cache instance.
+    
+    Args:
+        session_id: Session ID (0 for global/legacy cache)
+    
+    Returns:
+        SceneCache instance for the given session
+    """
+    if session_id > 0:
+        return SceneCache.get_for_session(session_id)
+    else:
+        # 後方互換: グローバルインスタンス
+        if SceneCache._global_instance is None:
+            SceneCache._global_instance = SceneCache(0)
+        return SceneCache._global_instance
 
 
-def export_scene_to_file(depsgraph, use_cache=True):
-    """Export evaluated meshes - uses cache when possible."""
+def export_scene_to_file(depsgraph, use_cache=True, session_id: int = 0):
+    """Export evaluated meshes - uses cache when possible.
+    
+    Args:
+        depsgraph: Blender dependency graph
+        use_cache: Whether to use caching
+        session_id: Session ID for per-session caching (0 for global)
+    
+    Returns:
+        Path to exported JSON file
+    """
     try:
         if use_cache:
-            return get_scene_cache().get_or_export(depsgraph)
+            return get_scene_cache(session_id).get_or_export(depsgraph)
         else:
-            return export_scene_to_json(depsgraph)
+            if session_id > 0:
+                return export_scene_to_json_for_session(depsgraph, session_id)
+            else:
+                return export_scene_to_json(depsgraph)
     except Exception as e:
         print("[DIYRenderer] Scene export failed:", e)
         import traceback

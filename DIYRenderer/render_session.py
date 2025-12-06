@@ -136,6 +136,10 @@ class RenderSession:
         self._renderer = None
         self._scene_hash = None
         
+        # セッションのシーンキャッシュをクリア
+        from .scene_export import SceneCache
+        SceneCache.clear_session(self._session_id)
+        
         print(f"[RenderSession #{self._session_id}] Shutdown complete")
     
     # =========================================================================

@@ -502,8 +502,12 @@ private:
             scene.meshes.push_back(std::move(m));
         }
         
-        // Parse native Blender lights
-        if (j.contains("lights") && j["lights"].is_array()) {
+        // Parse native Blender lights (exported as "native_lights" in JSON)
+        if (j.contains("native_lights") && j["native_lights"].is_array()) {
+            parseNativeLights(j["native_lights"], scene);
+        }
+        // Also check for "lights" for backward compatibility
+        else if (j.contains("lights") && j["lights"].is_array()) {
             parseNativeLights(j["lights"], scene);
         }
         

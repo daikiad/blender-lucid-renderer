@@ -198,7 +198,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             session.state.scene_update_pending = True
             # シーンキャッシュを無効化（次回のエクスポートで再生成）
             from .scene_export import get_scene_cache
-            get_scene_cache().invalidate()
+            get_scene_cache(session.session_id).invalidate()
 
     def view_draw(self, context, depsgraph):
         """
@@ -267,8 +267,8 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             self._render_fallback(width, height)
             return
         
-        # シーンをエクスポート
-        scene_file = export_scene_to_file(depsgraph, use_cache=False)
+        # シーンをエクスポート（セッションIDを渡してファイル分離）
+        scene_file = export_scene_to_file(depsgraph, use_cache=False, session_id=session.session_id)
         if not scene_file:
             self._render_fallback(width, height)
             return

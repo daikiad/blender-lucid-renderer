@@ -76,6 +76,9 @@ class ViewportRenderer:
         import gpu
         from gpu_extras.presets import draw_texture_2d
         
+        # セッションIDを取得（セッション分離用）
+        session_id = getattr(session, 'session_id', 0)
+        
         region = context.region
         width = region.width
         height = region.height
@@ -120,7 +123,8 @@ class ViewportRenderer:
         content_changed = (change_type == ChangeType.CONTENT)
         self._maybe_start_render(
             context, depsgraph, state, session,
-            params, camera, mode, content_changed, current_time
+            params, camera, mode, content_changed, current_time,
+            session_id
         )
         
         # 10. 再描画をスケジュール
@@ -489,7 +493,8 @@ class ViewportRenderer:
         camera: Optional[CameraParams],
         mode: RenderMode,
         content_changed: bool,
-        current_time: float
+        current_time: float,
+        session_id: int = 0
     ) -> None:
         """必要に応じてレンダリングを開始"""
         if camera is None:
@@ -530,15 +535,17 @@ class ViewportRenderer:
                 
                 # セッションの executor を使用
                 if hasattr(session, '_executor') and session._executor:
+                    # セッションIDを渡すためにラムダを使用
+                    sid = session_id
                     state.export_future = session._executor.submit(
-                        export_scene_to_file, depsgraph
+                        lambda dg, s=sid: export_scene_to_file(dg, session_id=s), depsgraph
                     )
                 state.last_scene_export_time = current_time
         elif mode == RenderMode.EDITING:
             # カメラのみ変更で編集中: キャッシュを使用
-            scene_file = get_scene_cache().get_cached_file_fast()
+            scene_file = get_scene_cache(session_id).get_cached_file_fast()
             if not scene_file:
-                scene_file = export_scene_to_file(depsgraph)
+                scene_file = export_scene_to_file(depsgraph, session_id=session_id)
                 state.last_scene_export_time = current_time
             
             if scene_file:
@@ -547,7 +554,7 @@ class ViewportRenderer:
                     state.render_future = future
         else:
             # 最終プレビュー: 常に再エクスポート
-            scene_file = export_scene_to_file(depsgraph)
+            scene_file = export_scene_to_file(depsgraph, session_id=session_id)
             state.last_scene_export_time = current_time
             
             if scene_file:
