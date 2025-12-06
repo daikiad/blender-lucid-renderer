@@ -376,12 +376,33 @@ def _export_light(obj, matrix_world):
     direction = (matrix_world.to_3x3() @ Vector((0, 0, -1))).normalized()
     
     # 色とパワーを取得
-    # 基本の色（light.color）
-    base_color = list(light.color)
+    # Color tint（light.color）
+    color_tint = list(light.color)
     energy = light.energy  # Watts (Blender 2.8+)
     
-    # 最終的な色を計算（デフォルトは基本色）
-    final_color = base_color[:]
+    # 最終的な色を計算
+    # Temperature（色温度）を使用している場合: Temperature × Color tint
+    # 使用していない場合: Color tint のみ
+    use_temp = getattr(light, 'use_temperature', False)
+    if use_temp:
+        # Blenderが計算済みの temperature_color を使用（存在する場合）
+        temp_color_prop = getattr(light, 'temperature_color', None)
+        if temp_color_prop is not None:
+            temp_color = list(temp_color_prop)[:3]
+        else:
+            # フォールバック: 自前で計算
+            temp = getattr(light, 'temperature', 6500)
+            temp_color = _kelvin_to_rgb(temp)
+        
+        # Temperature × Color tint
+        final_color = [
+            temp_color[0] * color_tint[0],
+            temp_color[1] * color_tint[1],
+            temp_color[2] * color_tint[2]
+        ]
+        print(f"[Light] {obj.name}: temp_color={temp_color} × tint={color_tint} -> {final_color}")
+    else:
+        final_color = color_tint[:]
     
     # ノードを使用している場合、Emissionノードの色を取得
     if light.use_nodes and light.node_tree:
@@ -393,11 +414,11 @@ def _export_light(obj, matrix_world):
                 color_input = node.inputs.get('Color')
                 if color_input and not color_input.is_linked:
                     node_color = list(color_input.default_value)[:3]
-                    # ノードの色と基本色を乗算
+                    # ノードの色と現在の色を乗算
                     final_color = [
-                        base_color[0] * node_color[0],
-                        base_color[1] * node_color[1],
-                        base_color[2] * node_color[2]
+                        final_color[0] * node_color[0],
+                        final_color[1] * node_color[1],
+                        final_color[2] * node_color[2]
                     ]
                 # Strength 入力も確認
                 strength_input = node.inputs.get('Strength')
@@ -409,13 +430,13 @@ def _export_light(obj, matrix_world):
                 # Blackbody ノード（色温度）
                 temp_input = node.inputs.get('Temperature')
                 if temp_input and not temp_input.is_linked:
-                    # 色温度から RGB に変換（簡易版）
+                    # 色温度から RGB に変換
                     temp = temp_input.default_value
                     bb_color = _kelvin_to_rgb(temp)
                     final_color = [
-                        base_color[0] * bb_color[0],
-                        base_color[1] * bb_color[1],
-                        base_color[2] * bb_color[2]
+                        final_color[0] * bb_color[0],
+                        final_color[1] * bb_color[1],
+                        final_color[2] * bb_color[2]
                     ]
                 break
     
@@ -457,33 +478,78 @@ def _export_light(obj, matrix_world):
 
 
 def _kelvin_to_rgb(temperature):
-    """色温度（ケルビン）からRGBに変換（簡易版）"""
-    # Tanner Helland's algorithm
-    temp = temperature / 100.0
+    """色温度（ケルビン）からRGBに変換
     
-    # Red
-    if temp <= 66:
-        r = 1.0
-    else:
-        r = 1.29293618606 * ((temp - 60) ** -0.1332047592)
-        r = max(0.0, min(1.0, r))
+    Blender/Cyclesと同じアルゴリズムを使用（ルックアップテーブル + 近似式）
+    Based on: intern/cycles/kernel/svm/math_util.h
+    """
+    # Blender/Cyclesのblackbodyテーブル（Rec.709）
+    blackbody_table_r = [
+        [1.61919106e+03, -2.05010916e-03, 5.02995757e+00],
+        [2.48845471e+03, -1.11330907e-03, 3.22621544e+00],
+        [3.34143193e+03, -4.86551192e-04, 1.76486769e+00],
+        [4.09461742e+03, -1.27446582e-04, 7.25731635e-01],
+        [4.67028036e+03,  2.91258199e-05, 1.26703442e-01],
+        [4.59509185e+03,  2.87495649e-05, 1.50345020e-01],
+        [3.78717450e+03,  9.35907826e-06, 3.99075871e-01],
+    ]
+    blackbody_table_g = [
+        [-4.88999748e+02,  6.04330754e-04, -7.55807526e-01],
+        [-7.55994277e+02,  3.16730098e-04, -4.40022939e-01],
+        [-1.02363977e+03,  1.20223470e-04, -1.16521674e-01],
+        [-1.25941394e+03,  1.07609395e-05,  1.88197550e-01],
+        [-1.40544704e+03, -3.05105987e-05,  4.34915298e-01],
+        [-1.30408023e+03, -4.07830862e-05,  5.40478191e-01],
+        [-9.48935031e+02, -3.56635316e-05,  6.67272956e-01],
+    ]
+    blackbody_table_b = [
+        [5.96945309e-11, -4.85742887e-08, -9.70923490e-06, -1.59495323e-02],
+        [2.40430366e-11,  5.55021075e-08, -1.98503712e-04,  2.89312859e-01],
+        [-1.40949732e-11,  1.89878968e-07, -3.56632824e-04,  9.10767778e-01],
+        [-3.61460868e-11,  2.84822009e-07, -2.18820190e-04,  1.32244834e+00],
+        [-2.50387870e-11,  2.35458441e-07,  6.50414121e-05,  1.59374517e+00],
+        [-1.41317442e-11,  1.64566913e-07,  1.98443702e-04,  1.70908628e+00],
+        [-5.49173793e-12,  9.39127790e-08,  2.33235547e-04,  1.71548295e+00],
+    ]
     
-    # Green
-    if temp <= 66:
-        g = 0.390081578769 * (temp - 2) ** 0.1332047592 if temp > 2 else 0
-        g = max(0.0, min(1.0, g))
-    else:
-        g = 1.12989086089 * ((temp - 60) ** -0.0755148492)
-        g = max(0.0, min(1.0, g))
+    t = temperature
     
-    # Blue
-    if temp >= 66:
-        b = 1.0
-    elif temp <= 19:
-        b = 0.0
+    # 範囲を制限（800K未満は800K、12000K以上は12000Kとして扱う）
+    t = max(800.0, min(12000.0, t))
+    
+    # テーブルインデックスを決定
+    if t >= 6365.0:
+        i = 6
+    elif t >= 3315.0:
+        i = 5
+    elif t >= 1902.0:
+        i = 4
+    elif t >= 1449.0:
+        i = 3
+    elif t >= 1167.0:
+        i = 2
+    elif t >= 965.0:
+        i = 1
     else:
-        b = 0.543206789110 * (temp - 10) ** 0.0755148492 if temp > 10 else 0
-        b = max(0.0, min(1.0, b))
+        i = 0
+    
+    r_coef = blackbody_table_r[i]
+    g_coef = blackbody_table_g[i]
+    b_coef = blackbody_table_b[i]
+    
+    t_inv = 1.0 / t
+    
+    # R と G: a/x + bx + c
+    r = r_coef[0] * t_inv + r_coef[1] * t + r_coef[2]
+    g = g_coef[0] * t_inv + g_coef[1] * t + g_coef[2]
+    
+    # B: ((at + b)t + c)t + d (3次多項式)
+    b = ((b_coef[0] * t + b_coef[1]) * t + b_coef[2]) * t + b_coef[3]
+    
+    # 負の値をクランプ（ただしrec709より広いgamutをサポートするため負も許容される場合あり）
+    r = max(0.0, r)
+    g = max(0.0, g)
+    b = max(0.0, b)
     
     return [r, g, b]
 
