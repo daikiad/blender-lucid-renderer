@@ -55,6 +55,19 @@ def _get_prefs():
     return None
 
 
+def get_scene_settings():
+    """
+    現在のシーンの DIYRenderer 設定を取得します。
+    
+    Returns:
+        DIYRendererSettings オブジェクト、または None
+    """
+    try:
+        return bpy.context.scene.diy_renderer
+    except Exception:
+        return None
+
+
 class DIYRendererPreferences(bpy.types.AddonPreferences):
     """
     アドオン全体の設定（グローバル設定）。
