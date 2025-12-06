@@ -136,21 +136,21 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
         max=1000
     )
     
-    # ビューポート解像度スケール（移動中）
-    # 値が大きいほど低解像度で高速
-    viewport_scale_moving: bpy.props.IntProperty(
-        name="Moving Scale",
-        description="Resolution divisor while camera is moving (higher = faster, lower quality)",
+    # ビューポート解像度スケール（編集中）
+    # シーン編集中は低解像度で高速応答
+    viewport_scale_editing: bpy.props.IntProperty(
+        name="Editing Scale",
+        description="Resolution divisor while editing scene (higher = faster, lower quality)",
         default=8,
         min=1,
         max=16
     )
     
-    # ビューポート解像度スケール（静止中）
-    # 値が小さいほど高解像度
-    viewport_scale_static: bpy.props.IntProperty(
-        name="Static Scale",
-        description="Resolution divisor when camera is static (lower = higher quality)",
+    # ビューポート解像度スケール（最終プレビュー）
+    # 編集停止後は高解像度で品質重視
+    viewport_scale_final: bpy.props.IntProperty(
+        name="Final Scale",
+        description="Resolution divisor for final preview (lower = higher quality)",
         default=2,
         min=1,
         max=8

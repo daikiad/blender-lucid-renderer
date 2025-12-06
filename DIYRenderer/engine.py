@@ -161,9 +161,15 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             self.last_view_perspective = None
         if not hasattr(self, 'last_view_distance'):
             self.last_view_distance = None
+        # 非同期シーンエクスポート用
+        if not hasattr(self, '_export_future'):
+            self._export_future = None
+        if not hasattr(self, '_pending_export_data'):
+            self._pending_export_data = None  # (cam_params, render_width, render_height, is_editing, ...)
 
     def _render_viewport_pybind(self, context, depsgraph, render_width, render_height,
-                                 cam_params, samples, max_depth, algorithm, debug_mode):
+                                 cam_params, samples, max_depth, algorithm, debug_mode,
+                                 scene_file):
         """
         pybind11 を使用してビューポートをレンダリング。
         
@@ -178,6 +184,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             max_depth: 最大バウンス数
             algorithm: アルゴリズム名
             debug_mode: デバッグモード名（None で通常レンダリング）
+            scene_file: シーンファイルのパス（メインスレッドでエクスポート済み）
         
         Returns:
             (pixels, job_id) または None
@@ -188,9 +195,9 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         if renderer is None:
             return None
         
-        # シーンをエクスポート
-        scene_file = export_scene_to_file(depsgraph)
+        # シーンファイルが渡されていない場合はエラー
         if not scene_file:
+            print("[DIYRenderer] No scene file provided")
             return None
         
         # JSON を読み込み
@@ -265,9 +272,15 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         }
 
     def _start_pybind_viewport_render(self, context, depsgraph, render_width, render_height,
-                                       cam_params, samples, max_depth, algorithm, debug_mode):
+                                       cam_params, samples, max_depth, algorithm, debug_mode,
+                                       scene_file, cancel_previous=True):
         """
         pybind11 を使用したビューポートレンダリングを非同期で開始。
+        
+        Args:
+            scene_file: メインスレッドでエクスポート済みのシーンファイルパス
+            cancel_previous: 前回のレンダリングをキャンセルするか。
+                            編集中モードではFalseにして完了を待つ。
         """
         global _pybind_executor, _pybind_renderer
         
@@ -275,8 +288,10 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         if renderer is None or _pybind_executor is None:
             return
         
-        # 前回のレンダリングをキャンセル
-        renderer.cancel()
+        # 前回のレンダリングをキャンセル（指定された場合のみ）
+        if cancel_previous:
+            print("[DIYRenderer] Cancelling previous render (cancel_previous=True)")
+            renderer.cancel()
         
         # 前回の Future が完了するのを待つ（短時間で終わるはず）
         if self._pybind_viewport_future is not None:
@@ -292,7 +307,8 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         def render_task():
             return self._render_viewport_pybind(
                 context, depsgraph, render_width, render_height,
-                cam_params, samples, max_depth, algorithm, debug_mode
+                cam_params, samples, max_depth, algorithm, debug_mode,
+                scene_file
             )
         
         self._pybind_viewport_future = _pybind_executor.submit(render_task)
@@ -347,46 +363,69 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             self.pybind_texture_height = 0
             self._pending_camera_update = False  # カメラ更新待ちフラグ
             self._was_moving = False  # 前フレームで移動中だったか
+            self._scene_update_pending = False  # view_update からのシーン変更フラグ
         
-        # 前回のフレームで移動中だったかを記録（カメラ変更検出前に）
+        # view_update からのシーン変更フラグをチェック
+        scene_update_from_view_update = getattr(self, '_scene_update_pending', False)
+        if scene_update_from_view_update:
+            self._scene_update_pending = False  # フラグをクリア
+        
+        # 前回のフレームで最終プレビュー中だったかを記録（変更検出前に）
         time_since_last_change = current_time - self.pybind_viewport_last_change_time
-        was_in_high_res_mode = time_since_last_change >= 0.3
+        was_in_final_mode = time_since_last_change >= 0.3
         
-        # カメラ変更検出
-        camera_changed = self._detect_camera_change(context)
-        if camera_changed:
+        # シーン変更検出（カメラ、オブジェクト、マテリアルなど）
+        scene_changed_from_depsgraph, content_changed = self._detect_scene_change(context, depsgraph)
+        
+        # view_update からの変更も考慮
+        scene_changed = scene_changed_from_depsgraph or scene_update_from_view_update
+        if scene_update_from_view_update:
+            content_changed = True  # view_update はシーン内容変更を示す
+        
+        if scene_changed:
             self.pybind_viewport_last_change_time = current_time
             self.pybind_accumulated_samples = {}
             
-            # 高解像度モード中にカメラが動いた場合のみキャンセル
-            if was_in_high_res_mode:
+            # 最終プレビューモード中に変更された場合のみキャンセル
+            # ★重要: 編集中モードに切り替わった後は、低解像度レンダリングを完了させるため
+            #         ここでキャンセルするのは最初の変更時のみ
+            if was_in_final_mode:
+                print(f"[DIYRenderer] Cancelling from final mode (time_since={time_since_last_change:.3f}s)")
                 renderer = get_pybind_renderer()
                 if renderer is not None:
                     renderer.cancel()
+                # テクスチャはクリアしない（前回の結果を保持）
             
             # 次のレンダリングが必要なことを記録
             self._pending_camera_update = True
+        
+        # シーン内容変更フラグを保存（シーンエクスポートの判断に使用）
+        self._content_changed = content_changed
         
         time_since_change = current_time - self.pybind_viewport_last_change_time
         
         # シーン設定から解像度スケールを取得
         diy = context.scene.diy_renderer
-        moving_scale = diy.viewport_scale_moving
-        static_scale = diy.viewport_scale_static
+        editing_scale = diy.viewport_scale_editing
+        final_scale = diy.viewport_scale_final
         
         # 解像度とパラメータを決定
-        if time_since_change < 0.3:
-            # 移動中: 低解像度で高速応答
-            scale_factor = moving_scale
+        # ★ シーン内容が変更された場合は、時間に関係なく編集中モードとして扱う
+        #    （シーンエクスポートに時間がかかるため、時間ベースの判定だけでは不十分）
+        if scene_changed or time_since_change < 0.3:
+            # 編集中: 低解像度で高速応答
+            scale_factor = editing_scale
             samples_per_iteration = 1
             viewport_bounces = 4
-            is_moving = True
+            is_editing = True
+            if scene_changed:
+                print(f"[DIYRenderer] is_editing=True (scene_changed)")
         else:
-            # 静止中: 高解像度で品質重視
-            scale_factor = static_scale
+            # 最終プレビュー: 高解像度で品質重視
+            scale_factor = final_scale
             samples_per_iteration = 1
             viewport_bounces = 8
-            is_moving = False
+            is_editing = False
         
         render_width = max(1, width // scale_factor)
         render_height = max(1, height // scale_factor)
@@ -410,6 +449,11 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         # ★まず結果をポーリング（新しいレンダリング開始前に行う）
         result = self._poll_pybind_viewport_result()
         if result is not None:
+            # レンダリング完了時刻を記録
+            if not hasattr(self, '_last_render_complete_time'):
+                self._last_render_complete_time = 0
+            self._last_render_complete_time = current_time
+            
             ext_pixels = result.get('pixels')
             result_width = result.get('width', 0)
             result_height = result.get('height', 0)
@@ -454,16 +498,88 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 self.pybind_texture_width = result_width
                 self.pybind_texture_height = result_height
         
+        # ★非同期エクスポートの完了をチェックしてレンダリング開始
+        if hasattr(self, '_export_future') and self._export_future is not None:
+            if self._export_future.done():
+                try:
+                    scene_file = self._export_future.result()
+                    self._export_future = None
+                    
+                    if scene_file and self._pending_export_data:
+                        data = self._pending_export_data
+                        self._pending_export_data = None
+                        
+                        print(f"[DIYRenderer] Async export done, starting render: {data['render_width']}x{data['render_height']}")
+                        self._start_pybind_viewport_render(
+                            context, depsgraph, 
+                            data['render_width'], data['render_height'],
+                            data['cam_params'], data['samples'], 
+                            data['max_bounces'], data['algorithm'], data['debug_mode'],
+                            scene_file, cancel_previous=not data['is_editing']
+                        )
+                except Exception as e:
+                    print(f"[DIYRenderer] Async export error: {e}")
+                    self._export_future = None
+                    self._pending_export_data = None
+        
         # rendering_in_progress を再計算（ポーリング後に Future が None になっている可能性）
         rendering_in_progress = (self._pybind_viewport_future is not None and 
                                  not self._pybind_viewport_future.done())
         
         # 新しいレンダリングが必要か判定
-        needs_new_render = (
-            self.pybind_texture is None or
-            self._pending_camera_update or  # カメラ更新待ち
-            (not rendering_in_progress and current_sample_count < target_samples)
-        )
+        # 編集中の場合は、エクスポートのスロットリング間隔（200ms）を考慮
+        last_render_complete = getattr(self, '_last_render_complete_time', 0)
+        time_since_render_complete = current_time - last_render_complete
+        
+        last_export_time = getattr(self, '_last_scene_export_time', 0)
+        time_since_last_export = current_time - last_export_time
+        
+        RENDER_COOLDOWN = 0.05  # 50ms
+        EXPORT_THROTTLE_INTERVAL = 0.2  # 200ms
+        
+        # 非同期エクスポート中かどうか
+        export_in_progress = (hasattr(self, '_export_future') and 
+                              self._export_future is not None and 
+                              not self._export_future.done())
+        
+        if is_editing:
+            # 編集中は、以下の場合のみ新しいレンダリングを開始:
+            # 1. テクスチャがない（初回）
+            # 2. レンダリング中でなく、前回のエクスポートから200ms以上経過
+            # 3. エクスポート中でない
+            if self.pybind_texture is None and not export_in_progress:
+                needs_new_render = True
+                throttle_reason = "no_texture"
+            elif export_in_progress:
+                # 非同期エクスポート中 → 完了を待つ（既存テクスチャを維持）
+                needs_new_render = False
+                throttle_reason = "export_in_progress"
+            elif rendering_in_progress:
+                needs_new_render = False
+                throttle_reason = "rendering_in_progress"
+            elif time_since_render_complete < RENDER_COOLDOWN:
+                needs_new_render = False
+                throttle_reason = "cooldown"
+            elif self._content_changed and time_since_last_export < EXPORT_THROTTLE_INTERVAL:
+                # 内容変更があるがスロットリング中 → 待つ
+                needs_new_render = False
+                throttle_reason = f"throttle({time_since_last_export:.3f}s < {EXPORT_THROTTLE_INTERVAL}s)"
+            else:
+                needs_new_render = True
+                throttle_reason = f"ready(export_elapsed={time_since_last_export:.3f}s)"
+            
+            # デバッグ: スロットリング状態を定期的にログ
+            if not hasattr(self, '_last_throttle_log_time'):
+                self._last_throttle_log_time = 0
+            if current_time - self._last_throttle_log_time > 0.5:  # 500msごとにログ
+                print(f"[Throttle] needs={needs_new_render}, reason={throttle_reason}, content_changed={self._content_changed}")
+                self._last_throttle_log_time = current_time
+        else:
+            needs_new_render = (
+                self.pybind_texture is None or
+                self._pending_camera_update or  # カメラ更新待ち
+                (not rendering_in_progress and current_sample_count < target_samples)
+            )
         
         # ★新しいレンダリングを開始（レンダリング中でなければ）
         if needs_new_render and not rendering_in_progress:
@@ -504,24 +620,59 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                     'fov': fov
                 }
                 
-                # シーンエクスポート（移動中はキャッシュを使用）
-                if is_moving:
+                # シーンエクスポート（内容変更時のみ非同期、それ以外はキャッシュ）
+                if not hasattr(self, '_last_scene_export_time'):
+                    self._last_scene_export_time = 0
+                
+                diy = context.scene.diy_renderer
+                debug_mode = diy.debug_mode if diy.debug_mode != 'NONE' else None
+                max_bounces = viewport_bounces
+                algorithm = diy.sampling_algorithm
+                
+                if self._content_changed:
+                    # 内容が変わったので再エクスポート
+                    # ★非同期エクスポート: UIをブロックしない
+                    if self._export_future is None or self._export_future.done():
+                        # 新しい非同期エクスポートを開始
+                        self._pending_export_data = {
+                            'cam_params': cam_params,
+                            'render_width': render_width,
+                            'render_height': render_height,
+                            'is_editing': is_editing,
+                            'samples': samples_per_iteration,
+                            'max_bounces': max_bounces,
+                            'algorithm': algorithm,
+                            'debug_mode': debug_mode,
+                        }
+                        self._export_future = _pybind_executor.submit(
+                            export_scene_to_file, depsgraph
+                        )
+                        self._last_scene_export_time = current_time
+                    # エクスポート完了待ち → レンダリングは開始しない（既存テクスチャを維持）
+                elif is_editing:
+                    # カメラのみ変更で編集中: キャッシュを使用（同期、高速）
                     scene_file = get_scene_cache().get_cached_file_fast()
                     if not scene_file:
                         scene_file = export_scene_to_file(depsgraph)
+                        self._last_scene_export_time = current_time
+                    if scene_file:
+                        print(f"[DIYRenderer] Starting render (camera only): {render_width}x{render_height}")
+                        self._start_pybind_viewport_render(
+                            context, depsgraph, render_width, render_height,
+                            cam_params, samples_per_iteration, max_bounces, algorithm, debug_mode,
+                            scene_file, cancel_previous=False
+                        )
                 else:
+                    # 最終プレビュー: 常に再エクスポート（同期）
                     scene_file = export_scene_to_file(depsgraph)
-                
-                if scene_file:
-                    diy = context.scene.diy_renderer
-                    debug_mode = diy.debug_mode if diy.debug_mode != 'NONE' else None
-                    max_bounces = viewport_bounces
-                    algorithm = diy.sampling_algorithm
-                    
-                    self._start_pybind_viewport_render(
-                        context, depsgraph, render_width, render_height,
-                        cam_params, samples_per_iteration, max_bounces, algorithm, debug_mode
-                    )
+                    self._last_scene_export_time = current_time
+                    if scene_file:
+                        print(f"[DIYRenderer] Starting render (final): {render_width}x{render_height}")
+                        self._start_pybind_viewport_render(
+                            context, depsgraph, render_width, render_height,
+                            cam_params, samples_per_iteration, max_bounces, algorithm, debug_mode,
+                            scene_file, cancel_previous=True
+                        )
         
         # 再描画判定
         if tile_key in self.pybind_accumulated_samples:
@@ -529,7 +680,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         
         should_redraw = (
             rendering_in_progress or
-            is_moving or
+            is_editing or
             current_sample_count < target_samples
         )
         
@@ -542,7 +693,16 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         if self.pybind_texture is not None:
             draw_texture_2d(self.pybind_texture, (0, 0), width, height)
         else:
-            print("[DIYRenderer] No texture to draw!")
+            # テクスチャがまだない場合は、グレーのプレースホルダーを作成して描画
+            # （初回レンダリング中や、レンダリング完了前の状態）
+            if not hasattr(self, '_placeholder_texture') or self._placeholder_texture is None:
+                placeholder_size = 64
+                placeholder_pixels = [0.2, 0.2, 0.2, 1.0] * (placeholder_size * placeholder_size)
+                placeholder_buffer = gpu.types.Buffer('FLOAT', len(placeholder_pixels), placeholder_pixels)
+                self._placeholder_texture = gpu.types.GPUTexture(
+                    (placeholder_size, placeholder_size), format='RGBA16F', data=placeholder_buffer
+                )
+            draw_texture_2d(self._placeholder_texture, (0, 0), width, height)
 
     def _render_gradient(self, width, height):
         """
@@ -953,57 +1113,81 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         # シーンキャッシュを無効化
         get_scene_cache().invalidate()
         
-        # pybind11 レンダラーをキャンセル
-        if PYBIND_AVAILABLE:
-            renderer = get_pybind_renderer()
-            if renderer is not None:
-                renderer.cancel()
+        # ★ view_update でのキャンセルは行わない
+        # view_draw で編集中モードを検出し、低解像度レンダリングを完了させる
+        # キャンセルは view_draw の最終プレビューモード移行時のみ行う
         
-        # ビューポート状態をリセット
-        if hasattr(self, 'pybind_texture'):
-            try:
-                del self.pybind_texture
-            except Exception:
-                pass
-            self.pybind_texture = None
+        # シーンが変更されたことを記録（view_draw で使用）
+        self._scene_update_pending = True
+        
+        # pybind11 レンダラーをキャンセル（最終プレビュー中の場合のみ）
+        # ★注: これは以前のコード。編集中モードのサポートのため削除
+        # if PYBIND_AVAILABLE:
+        #     renderer = get_pybind_renderer()
+        #     if renderer is not None:
+        #         renderer.cancel()
+        
+        # ★重要: テクスチャはリセットしない！
+        # 新しいレンダリング結果が来るまで既存のテクスチャを維持することで
+        # ちらつきを防ぐ。累積サンプルのみリセット（新しいシーンなので）
         if hasattr(self, 'pybind_accumulated_samples'):
             self.pybind_accumulated_samples = {}
 
-    def _detect_camera_change(self, context):
-        """Detect if the viewport camera has changed."""
+    def _detect_scene_change(self, context, depsgraph):
+        """Detect if viewport camera or scene content has changed.
+        
+        Returns:
+            tuple: (changed, content_changed)
+                - changed: True if anything changed (camera or content)
+                - content_changed: True if scene content changed (needs re-export)
+        """
+        camera_changed = False
+        content_changed = False
+        
+        # 1. カメラ（ビュー）の変更検出
         region_data = context.region_data
-        if region_data is None:
-            return False
+        if region_data is not None:
+            current_matrix = region_data.view_matrix.copy()
+            current_perspective = region_data.view_perspective
+            current_distance = region_data.view_distance
+            
+            if self.last_view_perspective != current_perspective:
+                camera_changed = True
+            
+            if hasattr(self, 'last_view_distance') and self.last_view_distance is not None:
+                if self.last_view_distance > 0:
+                    distance_change = abs(current_distance - self.last_view_distance) / self.last_view_distance
+                    if distance_change > 0.01:
+                        camera_changed = True
+            
+            if self.last_camera_matrix is not None and not camera_changed:
+                max_diff = 0.0
+                for i in range(4):
+                    for j in range(4):
+                        max_diff = max(max_diff, abs(current_matrix[i][j] - self.last_camera_matrix[i][j]))
+                if max_diff > 0.001:
+                    camera_changed = True
+            
+            if camera_changed or self.last_camera_matrix is None:
+                self.last_camera_matrix = current_matrix
+                self.last_view_perspective = current_perspective
+                self.last_view_distance = current_distance
         
-        current_matrix = region_data.view_matrix.copy()
-        current_perspective = region_data.view_perspective
-        current_distance = region_data.view_distance
+        # 2. シーンコンテンツの変更検出（オブジェクト、マテリアル、ライトなど）
+        if depsgraph is not None:
+            # depsgraph.id_type_updated() でタイプ別の更新を検出
+            obj_updated = depsgraph.id_type_updated('OBJECT')
+            mesh_updated = depsgraph.id_type_updated('MESH')
+            mat_updated = depsgraph.id_type_updated('MATERIAL')
+            light_updated = depsgraph.id_type_updated('LIGHT')
+            world_updated = depsgraph.id_type_updated('WORLD')
+            node_updated = depsgraph.id_type_updated('NODETREE')
+            
+            if obj_updated or mesh_updated or mat_updated or light_updated or world_updated or node_updated:
+                content_changed = True
         
-        changed = False
-        
-        if self.last_view_perspective != current_perspective:
-            changed = True
-        
-        if hasattr(self, 'last_view_distance') and self.last_view_distance is not None:
-            if self.last_view_distance > 0:
-                distance_change = abs(current_distance - self.last_view_distance) / self.last_view_distance
-                if distance_change > 0.01:
-                    changed = True
-        
-        if self.last_camera_matrix is not None and not changed:
-            max_diff = 0.0
-            for i in range(4):
-                for j in range(4):
-                    max_diff = max(max_diff, abs(current_matrix[i][j] - self.last_camera_matrix[i][j]))
-            if max_diff > 0.001:
-                changed = True
-        
-        if changed or self.last_camera_matrix is None:
-            self.last_camera_matrix = current_matrix
-            self.last_view_perspective = current_perspective
-            self.last_view_distance = current_distance
-        
-        return changed
+        changed = camera_changed or content_changed
+        return changed, content_changed
 
     def view_draw(self, context, depsgraph):
         """Viewport rendering function - called continuously while viewport is active."""
