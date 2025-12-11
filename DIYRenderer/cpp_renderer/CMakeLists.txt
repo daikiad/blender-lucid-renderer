@@ -1,40 +1,51 @@
-cmake_minimum_required(VERSION 3.15)
-project(diyrenderer LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.25)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
-# macOS: Help CMake find Homebrew's libomp
-if(APPLE)
-    execute_process(
-        COMMAND brew --prefix libomp
-        OUTPUT_VARIABLE HOMEBREW_LIBOMP_PREFIX
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
-    if(HOMEBREW_LIBOMP_PREFIX)
-        set(OpenMP_C_FLAGS "-Xpreprocessor -fopenmp -I${HOMEBREW_LIBOMP_PREFIX}/include")
-        set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp -I${HOMEBREW_LIBOMP_PREFIX}/include")
-        set(OpenMP_C_LIB_NAMES "omp")
-        set(OpenMP_CXX_LIB_NAMES "omp")
-        set(OpenMP_omp_LIBRARY "${HOMEBREW_LIBOMP_PREFIX}/lib/libomp.dylib")
-        message(STATUS "Found Homebrew libomp at ${HOMEBREW_LIBOMP_PREFIX}")
+# =============================================================================
+# Compiler Setup (macOS)
+# =============================================================================
+# Use GCC 15 on macOS because AppleClang has issues with mp-units C++20 templates
+if(APPLE AND NOT DEFINED CMAKE_CXX_COMPILER)
+    find_program(GXX_15 g++-15 PATHS /opt/homebrew/bin /usr/local/bin)
+    find_program(GCC_15 gcc-15 PATHS /opt/homebrew/bin /usr/local/bin)
+    if(GXX_15 AND GCC_15)
+        set(CMAKE_CXX_COMPILER ${GXX_15})
+        set(CMAKE_C_COMPILER ${GCC_15})
+        message(STATUS "Using GCC 15: ${GXX_15}")
+    else()
+        message(WARNING "GCC 15 not found. Install with: brew install gcc@15")
     endif()
 endif()
 
-# Find OpenMP for multi-threading
+project(diyrenderer LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# =============================================================================
+# Python Setup (for Blender compatibility)
+# =============================================================================
+# Use UV's Python 3.11 (Blender uses Python 3.11)
+if(APPLE AND NOT DEFINED Python_EXECUTABLE)
+    file(GLOB UV_PYTHON_PATHS "$ENV{HOME}/.local/share/uv/python/cpython-3.11*-macos-aarch64-none/bin/python3.11")
+    if(UV_PYTHON_PATHS)
+        list(GET UV_PYTHON_PATHS 0 UV_PYTHON)
+        set(Python_EXECUTABLE "${UV_PYTHON}")
+        set(PYTHON_EXECUTABLE "${UV_PYTHON}")
+        set(PYBIND11_PYTHON_VERSION 3.11)
+        message(STATUS "Using UV Python 3.11: ${UV_PYTHON}")
+    else()
+        message(WARNING "UV Python 3.11 not found. Install with: uv python install 3.11")
+    endif()
+endif()
+
+# =============================================================================
+# Dependencies
+# =============================================================================
 find_package(OpenMP)
-
-# =============================================================================
-# pybind11 モジュール
-# =============================================================================
-
-# pybind11 を探す
 find_package(pybind11 CONFIG)
 
 if(NOT pybind11_FOUND)
-    # pybind11 が見つからない場合は FetchContent で取得
     include(FetchContent)
     FetchContent_Declare(
         pybind11
@@ -44,31 +55,33 @@ if(NOT pybind11_FOUND)
     FetchContent_MakeAvailable(pybind11)
 endif()
 
-# Python モジュールをビルド
+# mp-units (compile-time dimensional analysis)
+set(MP_UNITS_BUILD_INSTALL OFF CACHE BOOL "" FORCE)
+set(MP_UNITS_API_CONTRACTS NONE CACHE STRING "" FORCE)
+add_subdirectory(extern/mp-units/src)
+
+# =============================================================================
+# Main Target: diyrenderer (Python module)
+# =============================================================================
 pybind11_add_module(diyrenderer
     src/pybind_module.cpp
     src/node_evaluator.cpp
 )
 
 target_include_directories(diyrenderer PRIVATE include)
+target_link_libraries(diyrenderer PRIVATE mp-units::mp-units)
 
-# 最適化フラグ
-if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-    target_compile_options(diyrenderer PRIVATE 
-        -O3
-        -march=native
-        -ffast-math
-        -funroll-loops
-        -ftree-vectorize
-    )
-endif()
-
-# OpenMP をリンク
 if(OpenMP_CXX_FOUND)
     target_link_libraries(diyrenderer PRIVATE OpenMP::OpenMP_CXX)
-    message(STATUS "OpenMP found - multi-threaded rendering enabled")
-else()
-    message(STATUS "OpenMP not found - single-threaded rendering")
+    message(STATUS "OpenMP enabled")
 endif()
 
-message(STATUS "Building pybind11 module: diyrenderer")
+target_compile_options(diyrenderer PRIVATE -O3 -march=native -ffast-math)
+
+# =============================================================================
+# Test Target: test_units
+# =============================================================================
+add_executable(test_units test/test_units.cpp)
+target_include_directories(test_units PRIVATE include)
+target_link_libraries(test_units PRIVATE mp-units::mp-units)
+target_compile_options(test_units PRIVATE -O2)
