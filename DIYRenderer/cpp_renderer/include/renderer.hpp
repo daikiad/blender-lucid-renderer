@@ -42,7 +42,7 @@ float getRoughnessFromNodeTree(const NodeTree &tree, const Vec2 &uv);
 
 // Debug mode: return normal as color
 inline Vec3 traceNormal(const Scene &scene, const Ray &ray, bool useAABB = true) {
-    Hit hit = intersectScene(scene, ray, useAABB);
+    Hit hit = intersectScene(scene, ray, 0.0f, geometry::RAY_T_MAX, useAABB);
     if (hit.hit) {
         return hit.normal;
     }
@@ -51,7 +51,7 @@ inline Vec3 traceNormal(const Scene &scene, const Ray &ray, bool useAABB = true)
 
 // Debug mode: return albedo from material
 inline Vec3 traceAlbedo(const Scene &scene, const Ray &ray, bool useAABB = true) {
-    Hit hit = intersectScene(scene, ray, useAABB);
+    Hit hit = intersectScene(scene, ray, 0.0f, geometry::RAY_T_MAX, useAABB);
     if (hit.hit) {
         if (hit.material.useNodes && hit.material.nodeTree.valid) {
             return getAlbedoFromNodeTree(hit.material.nodeTree, hit.uv);
@@ -63,7 +63,7 @@ inline Vec3 traceAlbedo(const Scene &scene, const Ray &ray, bool useAABB = true)
 
 // Debug mode: return emission from material
 inline Vec3 traceEmission(const Scene &scene, const Ray &ray, bool useAABB = true) {
-    Hit hit = intersectScene(scene, ray, useAABB);
+    Hit hit = intersectScene(scene, ray, 0.0f, geometry::RAY_T_MAX, useAABB);
     if (hit.hit) {
         if (hit.material.useNodes && hit.material.nodeTree.valid) {
             return getEmissionFromNodeTree(hit.material.nodeTree, hit.uv);
@@ -79,7 +79,7 @@ inline Vec3 traceEmission(const Scene &scene, const Ray &ray, bool useAABB = tru
  * Legacy trace function for backward compatibility
  * Uses simple path tracing with cosine-weighted sampling
  */
-inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = true) {
+inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = true, float tMin = 0.0f) {
     if (depth <= 0) return Vec3{0, 0, 0};
     
     // Russian Roulette
@@ -91,7 +91,7 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
         }
     }
     
-    Hit hit = intersectScene(scene, ray, useAABB);
+    Hit hit = intersectScene(scene, ray, tMin, geometry::RAY_T_MAX, useAABB);
     
     if (!hit.hit) {
         return getEnvironmentColor(ray);
@@ -128,7 +128,7 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
                 normal = normal * -1.0f;
             }
             Vec3 scatterDir = randomCosineDirection(normal);
-            scattered.o = hit.point + normal * 0.001f;
+            scattered.o = hit.point;
             scattered.d = scatterDir;
         } else {
             // Glass path
@@ -161,12 +161,11 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
             Vec3 direction;
             if (cannot_refract || randf() < reflectance) {
                 direction = reflect(unit_direction, n);
-                scattered.o = hit.point + n * 0.001f;
             } else {
                 direction = refract(unit_direction, n, refraction_ratio);
-                scattered.o = hit.point - n * 0.001f;
             }
             
+            scattered.o = hit.point;
             scattered.d = direction;
             attenuation = Vec3(1.0f, 1.0f, 1.0f);
         }
@@ -191,7 +190,7 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
             }
         }
         
-        scattered.o = hit.point + normal * 0.001f;
+        scattered.o = hit.point;
         scattered.d = reflected;
         
         if (randf() < metallic) {
@@ -208,11 +207,11 @@ inline Vec3 trace(const Scene &scene, const Ray &ray, int depth, bool useAABB = 
             normal = normal * -1.0f;
         }
         Vec3 scatterDir = randomCosineDirection(normal);
-        scattered.o = hit.point + normal * 0.001f;
+        scattered.o = hit.point;
         scattered.d = scatterDir;
     }
     
-    Vec3 incomingLight = trace(scene, scattered, depth - 1, useAABB);
+    Vec3 incomingLight = trace(scene, scattered, depth - 1, useAABB, geometry::RAY_T_MIN);
     result = result + attenuation * incomingLight;
     
     if (rrProbability < 1.0f) {

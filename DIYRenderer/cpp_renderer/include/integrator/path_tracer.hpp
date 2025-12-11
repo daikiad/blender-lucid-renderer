@@ -68,9 +68,10 @@ inline Vec3 traceSimple(const Scene& scene, const Ray& ray, int maxDepth) {
     Vec3 result(0, 0, 0);
     Vec3 throughput(1, 1, 1);
     Ray currentRay = ray;
+    float tMin = 0.0f;  // First ray starts from camera
     
     for (int depth = 0; depth < maxDepth; ++depth) {
-        Hit hit = intersectScene(scene, currentRay, true);
+        Hit hit = intersectScene(scene, currentRay, tMin);
         LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
         
         // Check if we hit a native light closer than any mesh
@@ -146,13 +147,9 @@ inline Vec3 traceSimple(const Scene& scene, const Ray& ray, int maxDepth) {
         }
         
         // Setup next ray
-        if (bsdfSample.type == BSDFSample::TRANSMISSION) {
-            currentRay.o = hit.point + bsdfSample.wi * 0.001f;
-        } else {
-            Vec3 offsetNormal = (Vec3::dot(bsdfSample.wi, sampleNormal) > 0) ? sampleNormal : sampleNormal * -1.0f;
-            currentRay.o = hit.point + offsetNormal * 0.001f;
-        }
+        currentRay.o = hit.point;
         currentRay.d = bsdfSample.wi;
+        tMin = geometry::RAY_T_MIN;  // Subsequent rays need offset
     }
     
     return result;
@@ -169,9 +166,10 @@ inline Vec3 traceNEE(const Scene& scene, const SceneLights& sceneLights,
     Vec3 result(0, 0, 0);
     Vec3 throughput(1, 1, 1);
     Ray currentRay = ray;
+    float tMin = 0.0f;  // First ray starts from camera
     
     for (int depth = 0; depth < maxDepth; ++depth) {
-        Hit hit = intersectScene(scene, currentRay, true);
+        Hit hit = intersectScene(scene, currentRay, tMin);
         LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
         
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
@@ -218,10 +216,10 @@ inline Vec3 traceNEE(const Scene& scene, const SceneLights& sceneLights,
                     float NdotL = Vec3::dot(shadingNormal, ls.direction);
                     
                     if (NdotL > 1e-6f) {
-                        Ray shadowRay{hit.point + ls.direction * 0.001f, ls.direction};
-                        Hit shadowHit = intersectScene(scene, shadowRay, true);
+                        Ray shadowRay{hit.point, ls.direction};
+                        Hit shadowHit = intersectScene(scene, shadowRay, geometry::RAY_T_MIN, ls.distance);
                         
-                        bool inShadow = shadowHit.hit && shadowHit.t < ls.distance - 0.01f;
+                        bool inShadow = shadowHit.hit;
                         
                         if (!inShadow) {
                             Vec3 f = evalBSDF(mat, wo, ls.direction, shadingNormal);
@@ -279,13 +277,9 @@ inline Vec3 traceNEE(const Scene& scene, const SceneLights& sceneLights,
         }
         
         // Setup next ray
-        if (bsdfSample.type == BSDFSample::TRANSMISSION) {
-            currentRay.o = hit.point + bsdfSample.wi * 0.001f;
-        } else {
-            Vec3 offsetNormal = (Vec3::dot(bsdfSample.wi, sampleNormal) > 0) ? sampleNormal : sampleNormal * -1.0f;
-            currentRay.o = hit.point + offsetNormal * 0.001f;
-        }
+        currentRay.o = hit.point;
         currentRay.d = bsdfSample.wi;
+        tMin = geometry::RAY_T_MIN;  // Subsequent rays need offset
     }
     
     return result;
@@ -303,9 +297,10 @@ inline Vec3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
     Vec3 throughput(1, 1, 1);
     Ray currentRay = ray;
     float lastBsdfPdf = 0.0f;
+    float tMin = 0.0f;  // First ray starts from camera
     
     for (int depth = 0; depth < maxDepth; ++depth) {
-        Hit hit = intersectScene(scene, currentRay, true);
+        Hit hit = intersectScene(scene, currentRay, tMin);
         LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
         
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
@@ -367,10 +362,10 @@ inline Vec3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
                     float NdotL = Vec3::dot(shadingNormal, ls.direction);
                     
                     if (NdotL > 1e-6f) {
-                        Ray shadowRay{hit.point + ls.direction * 0.001f, ls.direction};
-                        Hit shadowHit = intersectScene(scene, shadowRay, true);
+                        Ray shadowRay{hit.point, ls.direction};
+                        Hit shadowHit = intersectScene(scene, shadowRay, geometry::RAY_T_MIN, ls.distance);
                         
-                        bool inShadow = shadowHit.hit && shadowHit.t < ls.distance - 0.01f;
+                        bool inShadow = shadowHit.hit;
                         
                         if (!inShadow) {
                             Vec3 f = evalBSDF(mat, wo, ls.direction, shadingNormal);
@@ -432,13 +427,9 @@ inline Vec3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
         }
         
         // Setup next ray
-        if (bsdfSample.type == BSDFSample::TRANSMISSION) {
-            currentRay.o = hit.point + bsdfSample.wi * 0.001f;
-        } else {
-            Vec3 offsetNormal = (Vec3::dot(bsdfSample.wi, sampleNormal) > 0) ? sampleNormal : sampleNormal * -1.0f;
-            currentRay.o = hit.point + offsetNormal * 0.001f;
-        }
+        currentRay.o = hit.point;
         currentRay.d = bsdfSample.wi;
+        tMin = geometry::RAY_T_MIN;  // Subsequent rays need offset
         
         // Store BSDF PDF for next emission's MIS weight calculation
         lastBsdfPdf = bsdfSample.useWeight ? 0.0f : bsdfSample.pdf;

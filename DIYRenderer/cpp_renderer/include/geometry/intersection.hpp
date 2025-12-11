@@ -18,6 +18,9 @@
 
 namespace geometry {
 
+// Default ray interval constants
+constexpr float RAY_T_MIN = 1e-4f;    // Minimum t to avoid self-intersection
+constexpr float RAY_T_MAX = 1e30f;    // Maximum t (effectively infinity)
 constexpr float INTERSECTION_EPSILON = 1e-6f;
 
 // ========== Sphere Intersection ==========
@@ -175,10 +178,13 @@ inline bool intersectAABB(const Ray& ray, const Vec3& invDir, const Vec3& bmin, 
  * @param v2    Triangle vertex 2
  * @param outU  Output: barycentric u coordinate
  * @param outV  Output: barycentric v coordinate
- * @return distance t if hit (>0), -1 if no hit
+ * @param tMin  Minimum valid t value (default: RAY_T_MIN)
+ * @param tMax  Maximum valid t value (default: RAY_T_MAX)
+ * @return distance t if hit within [tMin, tMax], -1 if no hit
  */
 inline float intersectTriangle(const Ray& ray, const Vec3& v0, const Vec3& v1, const Vec3& v2, 
-                               float& outU, float& outV) {
+                               float& outU, float& outV,
+                               float tMin = RAY_T_MIN, float tMax = RAY_T_MAX) {
     const float EPS = 1e-6f;
     Vec3 e1 = v1 - v0;
     Vec3 e2 = v2 - v0;
@@ -197,7 +203,7 @@ inline float intersectTriangle(const Ray& ray, const Vec3& v0, const Vec3& v1, c
     if (v < 0.0f || u + v > 1.0f) return -1.0f;
     
     float t = Vec3::dot(e2, qvec) * invDet;
-    if (t > EPS) {
+    if (t >= tMin && t <= tMax) {
         outU = u;
         outV = v;
         return t;
