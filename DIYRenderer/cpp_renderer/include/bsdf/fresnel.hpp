@@ -5,10 +5,17 @@
  * Fresnel equations determine the ratio of reflected vs transmitted light:
  * - Schlick approximation for conductors (metals)
  * - Exact Fresnel for dielectrics (glass)
+ * 
+ * Physical Units:
+ * - All inputs/outputs are dimensionless (ratios, cosines, reflectances)
+ * - F0 (base reflectance at normal incidence) is dimensionless [0,1]
+ * - eta (IOR ratio) is dimensionless (n1/n2)
+ * - cosTheta is dimensionless (cos of angle)
+ * - Return values are reflectance fractions [0,1]
  */
 
 #pragma once
-#include "../math/vec3.hpp"
+#include "../math/vec3_unit.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -30,12 +37,12 @@ inline float fresnelSchlick(float cosTheta, float f0) {
  * Fresnel for conductor (metal) - Schlick with F0 = albedo
  * Returns per-channel Fresnel reflectance
  */
-inline Vec3 fresnelSchlickVec3(float cosTheta, const Vec3& f0) {
+inline diy::Color3 fresnelSchlickColor(float cosTheta, const diy::Color3& f0) {
     float f = std::pow(1.0f - cosTheta, 5.0f);
-    return Vec3(
-        f0.x + (1.0f - f0.x) * f,
-        f0.y + (1.0f - f0.y) * f,
-        f0.z + (1.0f - f0.z) * f
+    return diy::Color3(
+        f0.x_raw() + (1.0f - f0.x_raw()) * f,
+        f0.y_raw() + (1.0f - f0.y_raw()) * f,
+        f0.z_raw() + (1.0f - f0.z_raw()) * f
     );
 }
 

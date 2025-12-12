@@ -1,64 +1,71 @@
 /**
- * ray.hpp - Ray and Hit Structures
- * =================================
+ * ray.hpp - Ray and Camera Structures (Unit-Safe)
+ * ================================================
  * 
- * Core ray tracing structures:
- * - Ray: Origin and direction
+ * Core ray tracing structures using mp-units:
+ * - Ray: Origin (Position3) and direction (Direction3)
  * - Camera: Rendering camera parameters
  * 
- * Note: Hit structure is defined in material.hpp after Material is defined
+ * Type-safe units prevent mixing positions and directions.
  */
 
 #pragma once
-#include "../math/vec3.hpp"
+#include "../math/vec3_unit.hpp"
+#include "../units/units.hpp"
 #include <cmath>
 #include <algorithm>
 
 /**
- * Ray - Ray for ray tracing
+ * Ray - Ray for ray tracing (unit-safe)
+ * 
+ * Origin is Position3 [m], direction is Direction3 (dimensionless normalized).
  */
 struct Ray {
-    Vec3 o;  // Origin
-    Vec3 d;  // Direction (should be normalized)
+    diy::Position3 origin;      // Origin [m]
+    diy::Direction3 direction;  // Direction (normalized, dimensionless)
+    
+    Ray() : origin(), direction(0, 0, 1) {}
+    
+    Ray(const diy::Position3& orig, const diy::Direction3& dir) 
+        : origin(orig), direction(dir) {}
+    
+    // Point along ray at distance t
+    diy::Position3 at(diy::units::Distance t) const {
+        return origin + direction * t;
+    }
 };
 
 /**
- * Camera - Rendering camera parameters
+ * Camera - Rendering camera parameters (unit-safe)
  */
 struct Camera {
-    Vec3 pos;       // Camera position
-    Vec3 dir;       // View direction (normalized)
-    Vec3 up;        // Up vector (normalized)
-    float fovDeg;   // Field of view in degrees
-    float aspect;   // Aspect ratio (width/height)
-    Vec3 right;     // Right vector (derived)
-    Vec3 forward;   // Forward vector (same as dir, derived)
+    diy::Position3 pos;         // Camera position [m]
+    diy::Direction3 dir;        // View direction (normalized)
+    diy::Direction3 up;         // Up vector (normalized)
+    diy::Direction3 right;      // Right vector (derived)
+    diy::Direction3 forward;    // Forward vector (same as dir)
+    
+    diy::units::Angle fov;      // Field of view [rad]
+    float aspect;               // Aspect ratio (dimensionless)
+    
+    Camera() 
+        : fov(diy::units::degrees(60.0f))
+        , aspect(1.0f) {}
+    
+    float fovRad() const {
+        return diy::units::to_radians(fov);
+    }
+    
+    float halfTanFov() const {
+        return std::tan(fovRad() * 0.5f);
+    }
 };
 
-// ========== Reflection/Refraction ==========
+// ========== Utility Functions ==========
 
-// Reflect direction around normal
-inline Vec3 reflect(const Vec3 &v, const Vec3 &n) {
-    return v - n * 2.0f * Vec3::dot(v, n);
-}
-
-// Refract direction using Snell's law
-// Returns zero vector if total internal reflection occurs
-inline Vec3 refract(const Vec3 &uv, const Vec3 &n, float etai_over_etat) {
-    float cos_theta = std::min(-Vec3::dot(uv, n), 1.0f);
-    Vec3 r_out_perp = (uv + n * cos_theta) * etai_over_etat;
-    float r_out_perp_len2 = Vec3::dot(r_out_perp, r_out_perp);
-    if (r_out_perp_len2 > 1.0f) {
-        // Total internal reflection
-        return Vec3(0, 0, 0);
-    }
-    Vec3 r_out_parallel = n * (-std::sqrt(std::abs(1.0f - r_out_perp_len2)));
-    return r_out_perp + r_out_parallel;
-}
-
-// Schlick's approximation for Fresnel reflectance
 inline float schlickFresnelReflectance(float cosine, float ref_idx) {
     float r0 = (1.0f - ref_idx) / (1.0f + ref_idx);
     r0 = r0 * r0;
     return r0 + (1.0f - r0) * std::pow((1.0f - cosine), 5.0f);
 }
+

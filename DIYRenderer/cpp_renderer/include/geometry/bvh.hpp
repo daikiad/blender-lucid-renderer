@@ -10,7 +10,7 @@
  */
 
 #pragma once
-#include "../math/vec3.hpp"
+#include "../math/vec3_unit.hpp"
 #include "../core/ray.hpp"
 #include "../core/material.hpp"
 #include "../core/scene.hpp"
@@ -31,33 +31,34 @@ namespace geometry {
  * @param tMin      Minimum valid t value
  * @param tMax      Maximum valid t value (use result.t to find closest)
  */
-inline void traverseBVH(const Mesh& mesh, const Ray& ray, const Vec3& invDir, 
+inline void traverseBVH(const Mesh& mesh, const Ray& ray, const diy::Direction3& invDir, 
                         Hit& result, int meshIdx = -1,
                         float tMin = RAY_T_MIN, float tMax = RAY_T_MAX) {
     // Use the smaller of tMax and current result.t
-    float currentTMax = std::min(tMax, result.t);
+    float currentTMax = std::min(tMax, result.t_meters());
     
     if (mesh.bvh.nodes.empty()) {
         // Fallback: linear scan if no BVH
         for (size_t ti = 0; ti < mesh.triangles.size(); ++ti) {
             const Triangle& tri = mesh.triangles[ti];
-            const Vec3& a = mesh.vertices[tri.i0];
-            const Vec3& b = mesh.vertices[tri.i1];
-            const Vec3& c = mesh.vertices[tri.i2];
+            const auto& a = mesh.vertices[tri.i0];
+            const auto& b = mesh.vertices[tri.i1];
+            const auto& c = mesh.vertices[tri.i2];
             float u, v;
             float t = intersectTriangle(ray, a, b, c, u, v, tMin, currentTMax);
             if (t > 0) {
                 currentTMax = t;  // Update for subsequent tests
-                result.t = t;
-                result.hit = true;
-                result.point = ray.o + ray.d * t;
+                diy::Position3 point = ray.origin + ray.direction * (t * mp_units::si::metre);
+                diy::Direction3 normal;
                 float w = 1.0f - u - v;
                 if (tri.smooth) {
-                    result.normal = tri.n0 * w + tri.n1 * u + tri.n2 * v;
-                    result.normal.normalize();
+                    normal = tri.n0 * w + tri.n1 * u + tri.n2 * v;
+                    normal.normalize();
                 } else {
-                    result.normal = tri.faceNormal;
+                    normal = tri.faceNormal;
                 }
+                result.setFromTyped(t * mp_units::si::metre, point, normal);
+                result.hit = true;
                 if (tri.hasUV) {
                     result.uv = tri.uv0 * w + tri.uv1 * u + tri.uv2 * v;
                 }
@@ -86,23 +87,24 @@ inline void traverseBVH(const Mesh& mesh, const Ray& ray, const Vec3& invDir,
             for (int i = 0; i < node.triCount; ++i) {
                 int triIdx = mesh.bvh.triIndices[node.triStart + i];
                 const Triangle& tri = mesh.triangles[triIdx];
-                const Vec3& a = mesh.vertices[tri.i0];
-                const Vec3& b = mesh.vertices[tri.i1];
-                const Vec3& c = mesh.vertices[tri.i2];
+                const auto& a = mesh.vertices[tri.i0];
+                const auto& b = mesh.vertices[tri.i1];
+                const auto& c = mesh.vertices[tri.i2];
                 float u, v;
                 float t = intersectTriangle(ray, a, b, c, u, v, tMin, currentTMax);
                 if (t > 0) {
                     currentTMax = t;  // Update for subsequent tests
-                    result.t = t;
-                    result.hit = true;
-                    result.point = ray.o + ray.d * t;
+                    diy::Position3 point = ray.origin + ray.direction * (t * mp_units::si::metre);
+                    diy::Direction3 normal;
                     float w = 1.0f - u - v;
                     if (tri.smooth) {
-                        result.normal = tri.n0 * w + tri.n1 * u + tri.n2 * v;
-                        result.normal.normalize();
+                        normal = tri.n0 * w + tri.n1 * u + tri.n2 * v;
+                        normal.normalize();
                     } else {
-                        result.normal = tri.faceNormal;
+                        normal = tri.faceNormal;
                     }
+                    result.setFromTyped(t * mp_units::si::metre, point, normal);
+                    result.hit = true;
                     if (tri.hasUV) {
                         result.uv = tri.uv0 * w + tri.uv1 * u + tri.uv2 * v;
                     }
@@ -134,11 +136,11 @@ inline Hit intersectScene(const Scene& scene, const Ray& ray,
                           float tMin = RAY_T_MIN, float tMax = RAY_T_MAX,
                           bool useAABB = true) {
     Hit result;
-    result.t = tMax;
+    result.setFromTyped(tMax * mp_units::si::metre, diy::Position3(), diy::Direction3());
     result.hit = false;
     
     // Precompute inverse direction for faster AABB tests
-    Vec3 invDir = computeInverseDirection(ray.d);
+    diy::Direction3 invDir = computeInverseDirection(ray.direction);
     
     for (size_t mi = 0; mi < scene.meshes.size(); ++mi) {
         const Mesh& m = scene.meshes[mi];
@@ -146,7 +148,7 @@ inline Hit intersectScene(const Scene& scene, const Ray& ray,
         if (useAABB && !intersectAABB(ray, invDir, m.bmin, m.bmax)) continue;
         
         // Use BVH for triangle intersection
-        traverseBVH(m, ray, invDir, result, (int)mi, tMin, result.t);
+        traverseBVH(m, ray, invDir, result, (int)mi, tMin, result.t_meters());
     }
     
     return result;
@@ -158,17 +160,10 @@ inline Hit intersectScene(const Scene& scene, const Ray& ray,
  * Get environment/background color for ray
  * @param ray   Ray direction (for future HDRI support)
  * @param env   Environment settings
- * @return Environment color
+ * @return Environment radiance (Color3)
  */
-inline Vec3 getEnvironmentColor(const Ray& ray, const Environment& env) {
+inline diy::Color3 getEnvironmentColor(const Ray& ray, const Environment& env) {
     return env.color * env.strength;
-}
-
-/**
- * Legacy version for backward compatibility
- */
-inline Vec3 getEnvironmentColor(const Ray& ray) {
-    return Vec3(0.0f, 0.0f, 0.0f);
 }
 
 // ========== Shadow Testing ==========
@@ -181,8 +176,8 @@ inline Vec3 getEnvironmentColor(const Ray& ray) {
  * @param lightDist Distance to light
  * @return true if occluded
  */
-inline bool isInShadow(const Scene& scene, const Vec3& point, const Vec3& lightDir, float lightDist) {
-    Ray shadowRay{point, lightDir};
+inline bool isInShadow(const Scene& scene, const diy::Position3& point, const diy::Direction3& lightDir, float lightDist) {
+    Ray shadowRay(point, lightDir);
     Hit hit = intersectScene(scene, shadowRay, RAY_T_MIN, lightDist);
     return hit.hit;
 }

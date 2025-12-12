@@ -117,21 +117,29 @@ public:
                     float dir_x, float dir_y, float dir_z,
                     float up_x, float up_y, float up_z,
                     float fov_deg) {
-        camera_.pos = Vec3(pos_x, pos_y, pos_z);
-        camera_.dir = Vec3(dir_x, dir_y, dir_z);
-        camera_.up = Vec3(up_x, up_y, up_z);
-        camera_.fovDeg = fov_deg;
+        // Convert input floats to typed vectors
+        camera_.pos = diy::Position3(pos_x, pos_y, pos_z);
         
-        // 正規化
-        camera_.dir.normalize();
-        camera_.up.normalize();
+        // Normalize direction and up
+        diy::Direction3 dir(dir_x, dir_y, dir_z);
+        dir.normalize();
+        camera_.dir = dir;
         
-        // right と forward を計算
-        camera_.forward = camera_.dir;
-        camera_.right = Vec3::cross(camera_.forward, camera_.up);
-        camera_.right.normalize();
-        camera_.up = Vec3::cross(camera_.right, camera_.forward);
-        camera_.up.normalize();
+        diy::Direction3 up(up_x, up_y, up_z);
+        up.normalize();
+        
+        camera_.fov = diy::units::degrees(fov_deg);
+        
+        // Calculate right and forward using cross product
+        diy::Direction3 forward = dir;
+        diy::Direction3 right = diy::cross(forward, up);
+        right.normalize();
+        up = diy::cross(right, forward);
+        up.normalize();
+        
+        camera_.forward = forward;
+        camera_.right = right;
+        camera_.up = up;
         
         camera_set_ = true;
     }
@@ -183,7 +191,7 @@ public:
         camera_.aspect = static_cast<float>(full_w) / static_cast<float>(full_h);
         
         // FOV からスケール係数を計算
-        float fov_rad = camera_.fovDeg * static_cast<float>(M_PI) / 180.0f;
+        float fov_rad = camera_.fovRad();
         float scale = std::tan(fov_rad * 0.5f);
         
         // シーンライトを構築（NEE/MIS 用）
@@ -226,14 +234,16 @@ public:
                         float ndc_x = (2.0f * (global_x + 0.5f) / full_w - 1.0f) * camera_.aspect;
                         float ndc_y = 1.0f - 2.0f * (global_y + 0.5f) / full_h;
                         
-                        // レイ方向を計算
-                        Vec3 world_dir = camera_.forward + 
-                                        camera_.right * (ndc_x * scale) + 
-                                        camera_.up * (ndc_y * scale);
+                        // レイ方向を計算 (use typed vectors directly)
+                        diy::Direction3 world_dir(
+                            camera_.forward.x_raw() + camera_.right.x_raw() * (ndc_x * scale) + camera_.up.x_raw() * (ndc_y * scale),
+                            camera_.forward.y_raw() + camera_.right.y_raw() * (ndc_x * scale) + camera_.up.y_raw() * (ndc_y * scale),
+                            camera_.forward.z_raw() + camera_.right.z_raw() * (ndc_x * scale) + camera_.up.z_raw() * (ndc_y * scale)
+                        );
                         world_dir.normalize();
-                        Ray ray{camera_.pos, world_dir};
+                        Ray ray(camera_.pos, world_dir);
                         
-                        Vec3 color{0, 0, 0};
+                        diy::Color3 color(0, 0, 0);
                         
                         // 複数サンプルの平均
                         for (int s = 0; s < samples; ++s) {
@@ -249,11 +259,13 @@ public:
                             if (samples > 1) {
                                 float jitter_x = (randf() - 0.5f) / full_w;
                                 float jitter_y = (randf() - 0.5f) / full_h;
-                                Vec3 jittered_dir = camera_.forward +
-                                    camera_.right * ((ndc_x + jitter_x) * scale) +
-                                    camera_.up * ((ndc_y + jitter_y) * scale);
+                                diy::Direction3 jittered_dir(
+                                    camera_.forward.x_raw() + camera_.right.x_raw() * ((ndc_x + jitter_x) * scale) + camera_.up.x_raw() * ((ndc_y + jitter_y) * scale),
+                                    camera_.forward.y_raw() + camera_.right.y_raw() * ((ndc_x + jitter_x) * scale) + camera_.up.y_raw() * ((ndc_y + jitter_y) * scale),
+                                    camera_.forward.z_raw() + camera_.right.z_raw() * ((ndc_x + jitter_x) * scale) + camera_.up.z_raw() * ((ndc_y + jitter_y) * scale)
+                                );
                                 jittered_dir.normalize();
-                                sample_ray.d = jittered_dir;
+                                sample_ray = Ray(sample_ray.origin, jittered_dir);
                             }
                             
                             // アルゴリズムに応じてパストレーシング
@@ -267,14 +279,14 @@ public:
                         }
                         
                         // 負の値をクランプ
-                        color.x = std::max(0.0f, color.x);
-                        color.y = std::max(0.0f, color.y);
-                        color.z = std::max(0.0f, color.z);
+                        float r = std::max(0.0f, color.x_raw());
+                        float g = std::max(0.0f, color.y_raw());
+                        float b = std::max(0.0f, color.z_raw());
                         
                         // RGBA としてバッファに格納
-                        pixels[pixel_idx * 4 + 0] = color.x;
-                        pixels[pixel_idx * 4 + 1] = color.y;
-                        pixels[pixel_idx * 4 + 2] = color.z;
+                        pixels[pixel_idx * 4 + 0] = r;
+                        pixels[pixel_idx * 4 + 1] = g;
+                        pixels[pixel_idx * 4 + 2] = b;
                         pixels[pixel_idx * 4 + 3] = 1.0f;
                     }
                 }
@@ -316,7 +328,7 @@ public:
         }
         
         camera_.aspect = static_cast<float>(full_w) / static_cast<float>(full_h);
-        float fov_rad = camera_.fovDeg * static_cast<float>(M_PI) / 180.0f;
+        float fov_rad = camera_.fovRad();
         float scale = std::tan(fov_rad * 0.5f);
         
         #pragma omp parallel for collapse(2) schedule(dynamic, 16)
@@ -333,32 +345,35 @@ public:
                 float ndc_x = (2.0f * (global_x + 0.5f) / full_w - 1.0f) * camera_.aspect;
                 float ndc_y = 1.0f - 2.0f * (global_y + 0.5f) / full_h;
                 
-                Vec3 world_dir = camera_.forward +
-                                camera_.right * (ndc_x * scale) +
-                                camera_.up * (ndc_y * scale);
+                // Calculate ray direction using typed vectors
+                diy::Direction3 world_dir(
+                    camera_.forward.x_raw() + camera_.right.x_raw() * (ndc_x * scale) + camera_.up.x_raw() * (ndc_y * scale),
+                    camera_.forward.y_raw() + camera_.right.y_raw() * (ndc_x * scale) + camera_.up.y_raw() * (ndc_y * scale),
+                    camera_.forward.z_raw() + camera_.right.z_raw() * (ndc_x * scale) + camera_.up.z_raw() * (ndc_y * scale)
+                );
                 world_dir.normalize();
-                Ray ray{camera_.pos, world_dir};
+                Ray ray(camera_.pos, world_dir);
                 
-                Vec3 color;
+                diy::Color3 color(0, 0, 0);
                 if (mode == "normal") {
                     color = traceNormal(scene_, ray);
                     // -1..1 を 0..1 にマッピング
-                    color = color * 0.5f + Vec3(0.5f, 0.5f, 0.5f);
+                    color = color * 0.5f + diy::Color3(0.5f, 0.5f, 0.5f);
                 } else if (mode == "albedo") {
                     color = traceAlbedo(scene_, ray);
                 } else if (mode == "emission") {
                     color = traceEmission(scene_, ray);
                 } else {
-                    color = Vec3(1, 0, 1);  // マゼンタ（エラー表示）
+                    color = diy::Color3(1, 0, 1);  // マゼンタ（エラー表示）
                 }
                 
                 // Y反転を考慮したインデックス
                 int flipped_y = tile_h - 1 - py;
                 int flipped_idx = flipped_y * tile_w + px;
                 
-                pixels[flipped_idx * 4 + 0] = color.x;
-                pixels[flipped_idx * 4 + 1] = color.y;
-                pixels[flipped_idx * 4 + 2] = color.z;
+                pixels[flipped_idx * 4 + 0] = color.x_raw();
+                pixels[flipped_idx * 4 + 1] = color.y_raw();
+                pixels[flipped_idx * 4 + 2] = color.z_raw();
                 pixels[flipped_idx * 4 + 3] = 1.0f;
             }
         }
@@ -406,15 +421,15 @@ private:
             }
             
             // Per-triangle vertex normals
-            std::vector<std::array<Vec3, 3>> triangle_normals;
+            std::vector<std::array<diy::Direction3, 3>> triangle_normals;
             bool has_triangle_normals = false;
             if (mesh_j.contains("triangle_normals")) {
                 has_triangle_normals = true;
                 for (const auto& tn : mesh_j["triangle_normals"]) {
-                    std::array<Vec3, 3> normals;
-                    normals[0] = Vec3(tn[0][0], tn[0][1], tn[0][2]);
-                    normals[1] = Vec3(tn[1][0], tn[1][1], tn[1][2]);
-                    normals[2] = Vec3(tn[2][0], tn[2][1], tn[2][2]);
+                    std::array<diy::Direction3, 3> normals;
+                    normals[0] = diy::Direction3(static_cast<float>(tn[0][0]), static_cast<float>(tn[0][1]), static_cast<float>(tn[0][2]));
+                    normals[1] = diy::Direction3(static_cast<float>(tn[1][0]), static_cast<float>(tn[1][1]), static_cast<float>(tn[1][2]));
+                    normals[2] = diy::Direction3(static_cast<float>(tn[2][0]), static_cast<float>(tn[2][1]), static_cast<float>(tn[2][2]));
                     triangle_normals.push_back(normals);
                 }
             }
@@ -471,23 +486,36 @@ private:
             // Material
             if (mesh_j.contains("material")) {
                 const auto& mat = mesh_j["material"];
-                Vec3 albedo(0.8f, 0.8f, 0.8f);
+                diy::Color3 albedo(0.8f, 0.8f, 0.8f);
                 float metallic = 0.0f, roughness = 0.5f;
-                Vec3 emission(0.0f, 0.0f, 0.0f);
+                diy::Radiance3 emission(0.0f, 0.0f, 0.0f);
                 float transmission = 0.0f, ior = 1.45f;
                 
                 if (mat.contains("base_color")) {
-                    albedo = Vec3(mat["base_color"][0], mat["base_color"][1], mat["base_color"][2]);
+                    albedo = diy::Color3(
+                        mat["base_color"][0].get<float>(), 
+                        mat["base_color"][1].get<float>(), 
+                        mat["base_color"][2].get<float>()
+                    );
                 }
                 if (mat.contains("metallic")) metallic = mat["metallic"];
                 if (mat.contains("roughness")) roughness = mat["roughness"];
                 if (mat.contains("emission")) {
-                    emission = Vec3(mat["emission"][0], mat["emission"][1], mat["emission"][2]);
+                    emission = diy::Radiance3(
+                        mat["emission"][0].get<float>(), 
+                        mat["emission"][1].get<float>(), 
+                        mat["emission"][2].get<float>()
+                    );
                 }
                 if (mat.contains("transmission")) transmission = mat["transmission"];
                 if (mat.contains("ior")) ior = mat["ior"];
                 
-                m.material = Material(albedo, metallic, roughness, emission);
+                m.material = Material(
+                    albedo, 
+                    metallic, 
+                    roughness, 
+                    emission
+                );
                 m.material.transmission = transmission;
                 m.material.ior = ior;
                 
@@ -516,7 +544,7 @@ private:
             const auto& envJson = j["environment"];
             
             if (envJson.contains("color") && envJson["color"].is_array()) {
-                scene.environment.color = Vec3(
+                scene.environment.color = diy::Color3(
                     envJson["color"][0].get<float>(),
                     envJson["color"][1].get<float>(),
                     envJson["color"][2].get<float>()
@@ -527,8 +555,8 @@ private:
                 scene.environment.strength = envJson["strength"].get<float>();
             }
             
-            std::cerr << "[Environment] color=(" << scene.environment.color.x << ", "
-                      << scene.environment.color.y << ", " << scene.environment.color.z 
+            std::cerr << "[Environment] color=(" << scene.environment.color.x_raw() << ", "
+                      << scene.environment.color.y_raw() << ", " << scene.environment.color.z_raw() 
                       << "), strength=" << scene.environment.strength << std::endl;
         }
         
@@ -543,29 +571,29 @@ private:
             
             // Position
             if (lightJson.contains("position")) {
-                light.position = Vec3(
-                    lightJson["position"][0],
-                    lightJson["position"][1],
-                    lightJson["position"][2]
+                light.position = diy::Position3(
+                    lightJson["position"][0].get<float>(),
+                    lightJson["position"][1].get<float>(),
+                    lightJson["position"][2].get<float>()
                 );
             }
             
             // Direction (normal)
             if (lightJson.contains("direction")) {
-                light.normal = Vec3(
-                    lightJson["direction"][0],
-                    lightJson["direction"][1],
-                    lightJson["direction"][2]
+                light.normal = diy::Direction3(
+                    lightJson["direction"][0].get<float>(),
+                    lightJson["direction"][1].get<float>(),
+                    lightJson["direction"][2].get<float>()
                 );
             }
             
             // Color and energy
-            Vec3 color(1.0f, 1.0f, 1.0f);
+            diy::Color3 color(1.0f, 1.0f, 1.0f);
             if (lightJson.contains("color")) {
-                color = Vec3(
-                    lightJson["color"][0],
-                    lightJson["color"][1],
-                    lightJson["color"][2]
+                color = diy::Color3(
+                    lightJson["color"][0].get<float>(),
+                    lightJson["color"][1].get<float>(),
+                    lightJson["color"][2].get<float>()
                 );
             }
             float energy = lightJson.value("energy", 1.0f);
@@ -580,107 +608,139 @@ private:
             // Conversion depends on light type and PDF.
             // =====================================================
             
-            light.energy = energy;
+            light.energy = energy * mp_units::si::watt;
             
             // Set light type and type-specific properties
             if (typeStr == "POINT") {
                 light.type = LightType::POINT;
-                light.radius = lightJson.value("radius", 0.0f);
+                float radius = lightJson.value("radius", 0.0f);
+                light.radius = radius * mp_units::si::metre;
                 
                 // For spherical area light (soft shadows)
-                light.area = 4.0f * M_PI * light.radius * light.radius;
-                if (light.area < EPSILON) light.area = 1.0f;
+                float area = 4.0f * M_PI * radius * radius;
+                if (area < EPSILON) area = 1.0f;
+                light.area = area * diy::units::square_metre;
                 
                 // Point light: I = Power / (4π) [W/sr]
                 // In NEE, contribution = I / r² = Power / (4π * r²)
                 // We store Power / (4π) as emission, apply 1/r² in integration
                 // For soft point (sphere), emission is radiance: Power / (π * area)
-                if (light.radius > EPSILON) {
+                if (radius > EPSILON) {
                     // Spherical light: Lambertian emitter
                     // L = Power / (π * surfaceArea) where surfaceArea = 4πr²
                     // L = Power / (4π²r²)
-                    light.emission = color * (energy / (M_PI * light.area));
+                    light.emission = diy::Radiance3(
+                        color.x_raw() * (energy / (M_PI * area)),
+                        color.y_raw() * (energy / (M_PI * area)),
+                        color.z_raw() * (energy / (M_PI * area))
+                    );
                 } else {
                     // True point light: store intensity I = Power / (4π)
                     // 1/r² applied during sampling
-                    light.emission = color * (energy / (4.0f * M_PI));
+                    float factor = energy / (4.0f * M_PI);
+                    light.emission = diy::Radiance3(
+                        color.x_raw() * factor,
+                        color.y_raw() * factor,
+                        color.z_raw() * factor
+                    );
                 }
                 
             } else if (typeStr == "SUN") {
                 light.type = LightType::SUN;
-                light.area = 1.0f;  // Sun is directional, area is symbolic
+                light.area = 1.0f * diy::units::square_metre;  // Sun is directional, area is symbolic
                 
                 // Sun: energy is already irradiance (W/m²)
                 // Use directly as we treat it as parallel rays
-                light.emission = color * energy;
+                light.emission = diy::Radiance3(
+                    color.x_raw() * energy,
+                    color.y_raw() * energy,
+                    color.z_raw() * energy
+                );
                 
             } else if (typeStr == "SPOT") {
                 light.type = LightType::SPOT;
-                light.radius = lightJson.value("radius", 0.0f);
-                light.spotAngle = lightJson.value("spot_size", M_PI / 4.0f);
+                float radius = lightJson.value("radius", 0.0f);
+                light.radius = radius * mp_units::si::metre;
+                float spotAngle = lightJson.value("spot_size", static_cast<float>(M_PI / 4.0f));
+                light.spotAngle = spotAngle * mp_units::si::radian;
                 light.spotBlend = lightJson.value("spot_blend", 0.0f);
-                light.area = 1.0f;
+                light.area = 1.0f * diy::units::square_metre;
                 
                 // Spot light: same as point but concentrated in cone
                 // Blender's spot energy is total power, distributed in cone
                 // Solid angle of cone = 2π(1 - cos(θ/2))
-                float halfAngle = light.spotAngle * 0.5f;
+                float halfAngle = spotAngle * 0.5f;
                 float solidAngle = 2.0f * M_PI * (1.0f - std::cos(halfAngle));
                 
                 // Intensity in the cone direction = Power / solidAngle
-                light.emission = color * (energy / solidAngle);
+                float factor = energy / solidAngle;
+                light.emission = diy::Radiance3(
+                    color.x_raw() * factor,
+                    color.y_raw() * factor,
+                    color.z_raw() * factor
+                );
                 
             } else if (typeStr == "AREA") {
                 light.type = LightType::AREA;
-                light.sizeX = lightJson.value("size", 1.0f);
-                light.sizeY = lightJson.value("size_y", light.sizeX);
+                float sizeX = lightJson.value("size", 1.0f);
+                float sizeY = lightJson.value("size_y", sizeX);
+                light.sizeX = sizeX * mp_units::si::metre;
+                light.sizeY = sizeY * mp_units::si::metre;
+                
+                float area;
                 
                 // Parse shape
                 std::string shapeStr = lightJson.value("shape", "SQUARE");
                 if (shapeStr == "DISK") {
                     light.shape = AreaLightShape::DISK;
                     // Disk area = π * r², where r = size/2
-                    float radius = light.sizeX * 0.5f;
-                    light.area = M_PI * radius * radius;
+                    float radius = sizeX * 0.5f;
+                    area = M_PI * radius * radius;
                 } else if (shapeStr == "ELLIPSE") {
                     light.shape = AreaLightShape::ELLIPSE;
                     // Ellipse area = π * a * b, where a = sizeX/2, b = sizeY/2
-                    float radiusX = light.sizeX * 0.5f;
-                    float radiusY = light.sizeY * 0.5f;
-                    light.area = M_PI * radiusX * radiusY;
+                    float radiusX = sizeX * 0.5f;
+                    float radiusY = sizeY * 0.5f;
+                    area = M_PI * radiusX * radiusY;
                 } else if (shapeStr == "RECTANGLE") {
                     light.shape = AreaLightShape::RECTANGLE;
-                    light.area = light.sizeX * light.sizeY;
+                    area = sizeX * sizeY;
                 } else {
                     // SQUARE or default
                     light.shape = AreaLightShape::SQUARE;
-                    light.area = light.sizeX * light.sizeY;
+                    area = sizeX * sizeY;
                 }
+                
+                light.area = area * diy::units::square_metre;
                 
                 // Get orientation vectors
                 if (lightJson.contains("right")) {
-                    light.right = Vec3(
-                        lightJson["right"][0],
-                        lightJson["right"][1],
-                        lightJson["right"][2]
+                    light.right = diy::Direction3(
+                        lightJson["right"][0].get<float>(),
+                        lightJson["right"][1].get<float>(),
+                        lightJson["right"][2].get<float>()
                     );
                 }
                 if (lightJson.contains("up")) {
-                    light.up = Vec3(
-                        lightJson["up"][0],
-                        lightJson["up"][1],
-                        lightJson["up"][2]
+                    light.up = diy::Direction3(
+                        lightJson["up"][0].get<float>(),
+                        lightJson["up"][1].get<float>(),
+                        lightJson["up"][2].get<float>()
                     );
                 }
                 
                 // Area light: Lambertian emitter
                 // Radiance L = Power / (π * Area) [W/m²/sr]
                 // The π factor accounts for Lambertian cosine distribution
-                light.emission = color * (energy / (M_PI * light.area));
+                float factor = energy / (M_PI * area);
+                light.emission = diy::Radiance3(
+                    color.x_raw() * factor,
+                    color.y_raw() * factor,
+                    color.z_raw() * factor
+                );
                 
                 std::cerr << "[SceneParser] Area light shape=" << shapeStr 
-                          << " area=" << light.area << std::endl;
-            }
+                          << " area=" << area << std::endl;            }
             
             light.meshIndex = -1;
             light.triangleIndex = -1;

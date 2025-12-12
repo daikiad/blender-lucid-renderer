@@ -9,7 +9,7 @@
  */
 
 #pragma once
-#include "vec3.hpp"
+#include "vec3_unit.hpp"
 #include <cstdint>
 #include <cmath>
 
@@ -119,26 +119,23 @@ inline float randf() {
 // ========== Sampling Utilities ==========
 
 // Generate random point inside unit sphere (rejection sampling)
-inline Vec3 randomInUnitSphere() {
+inline diy::Direction3 randomInUnitSphere() {
     while(true) {
-        Vec3 p = Vec3(randf()*2.0f-1.0f, randf()*2.0f-1.0f, randf()*2.0f-1.0f);
-        if(p.length() < 1.0f) return p;
+        diy::Direction3 p(randf()*2.0f-1.0f, randf()*2.0f-1.0f, randf()*2.0f-1.0f);
+        if(p.length().numerical_value_in(mp_units::one) < 1.0f) return p;
     }
 }
 
 // Generate random unit vector (uniform on sphere)
-inline Vec3 randomUnitVector() { 
-    Vec3 v = randomInUnitSphere(); 
-    v.normalize(); 
-    return v; 
+inline diy::Direction3 randomUnitVector() { 
+    return randomInUnitSphere().normalized(); 
 }
 
 // Generate random direction in hemisphere around normal (cosine-weighted)
 // This is importance sampling for Lambertian BRDF
 // PDF = cos(theta) / PI
-inline Vec3 randomCosineDirection(const Vec3 &normal) {
-    Vec3 random_on_sphere = randomUnitVector();
-    Vec3 result = normal + random_on_sphere;
-    result.normalize();
-    return result;
+inline diy::Direction3 randomCosineDirection(const diy::Direction3 &normal) {
+    diy::Direction3 random_on_sphere = randomUnitVector();
+    diy::Direction3 result = normal + random_on_sphere;
+    return result.normalized();
 }

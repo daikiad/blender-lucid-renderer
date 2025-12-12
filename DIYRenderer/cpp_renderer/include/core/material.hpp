@@ -1,6 +1,6 @@
 /**
- * material.hpp - Material and Node System
- * ========================================
+ * material.hpp - Material and Node System (Unit-Safe)
+ * ====================================================
  * 
  * Material properties and Blender's node-based material system:
  * - SocketValue: Value types for node sockets
@@ -8,11 +8,20 @@
  * - MaterialNode: Single node in shader graph
  * - NodeTree: Complete material node graph
  * - Material: Physical material properties
- * - Hit: Ray-surface intersection result (needs Material)
+ * - Hit: Ray-surface intersection result
+ * 
+ * Physical Units:
+ * - albedo: Color3 (dimensionless reflectance [0,1])
+ * - emission: Radiance3 [W/(sr·m²)]
+ * - Hit.point: Position3 [m]
+ * - Hit.normal: Direction3 (dimensionless)
+ * - Hit.t: Distance [m]
  */
 
 #pragma once
-#include "../math/vec3.hpp"
+#include "../math/vec3_unit.hpp"
+#include "../math/vec2.hpp"
+#include "../units/units.hpp"
 #include <vector>
 #include <string>
 
@@ -29,12 +38,12 @@
 struct SocketValue {
     enum Type { FLOAT, VEC3, VEC4, STRING, BOOL, NONE };
     Type type;
-    float f;          // For FLOAT - single scalar value
-    Vec3 v3;          // For VEC3 - 3D vector (normals, positions)
-    Vec3 v4;          // For VEC4 - RGB component (colors with alpha)
-    float v4_w;       // For VEC4 - Alpha component
-    std::string s;    // For STRING - texture paths, etc.
-    bool b;           // For BOOL - boolean switches
+    float f;                      // For FLOAT - single scalar value
+    diy::Direction3 v3;           // For VEC3 - 3D vector (normals, positions)
+    diy::Color3 v4;               // For VEC4 - RGB component (colors with alpha)
+    float v4_w;                   // For VEC4 - Alpha component
+    std::string s;                // For STRING - texture paths, etc.
+    bool b;                       // For BOOL - boolean switches
     
     SocketValue() : type(NONE), f(0), v3(), v4(), v4_w(0), b(false) {}
     
@@ -48,14 +57,14 @@ struct SocketValue {
     static SocketValue makeVec3(float x, float y, float z) { 
         SocketValue sv; 
         sv.type = VEC3; 
-        sv.v3 = Vec3(x, y, z); 
+        sv.v3 = diy::Direction3(x, y, z); 
         return sv; 
     }
     
     static SocketValue makeVec4(float x, float y, float z, float w) { 
         SocketValue sv; 
         sv.type = VEC4; 
-        sv.v4 = Vec3(x, y, z); 
+        sv.v4 = diy::Color3(x, y, z); 
         sv.v4_w = w; 
         return sv; 
     }
@@ -123,19 +132,18 @@ struct NodeTree {
 // ========== Material Definition ==========
 
 /**
- * Material - Physical material properties
+ * Material - Physical material properties for PBR rendering (unit-safe)
  */
 struct Material {
-    Vec3 albedo;        // Base color (diffuse reflectance)
-    float metallic;     // Metallic factor (0=dielectric, 1=metal)
-    float roughness;    // Surface roughness
-    Vec3 emission;      // Emission color * strength
-    float transmission; // Glass/transparency (0=opaque, 1=fully transparent)
-    float ior;          // Index of Refraction
+    diy::Color3 albedo;         // Base color (dimensionless [0,1])
+    float metallic;             // Metallic factor (dimensionless, 0-1)
+    float roughness;            // Surface roughness (dimensionless, 0-1)
+    diy::Radiance3 emission;    // Emission [W/(sr·m²)]
+    float transmission;         // Glass/transparency (dimensionless, 0-1)
+    float ior;                  // Index of Refraction (dimensionless)
     
-    // Node-based material system
-    NodeTree nodeTree;  // Full node graph from Blender
-    bool useNodes;      // Should we use node tree or legacy properties?
+    NodeTree nodeTree;
+    bool useNodes;
     
     Material() 
         : albedo(0.8f, 0.8f, 0.8f)
@@ -146,38 +154,63 @@ struct Material {
         , ior(1.45f)
         , useNodes(false) {}
     
-    Material(Vec3 a, float m, float r) 
-        : albedo(a)
-        , metallic(m)
-        , roughness(r)
+    Material(const diy::Color3& a, float m, float r) 
+        : albedo(a), metallic(m), roughness(r)
         , emission(0.0f, 0.0f, 0.0f)
-        , transmission(0.0f)
-        , ior(1.45f)
-        , useNodes(false) {}
+        , transmission(0.0f), ior(1.45f), useNodes(false) {}
     
-    Material(Vec3 a, float m, float r, Vec3 e) 
-        : albedo(a)
-        , metallic(m)
-        , roughness(r)
+    Material(const diy::Color3& a, float m, float r, const diy::Radiance3& e) 
+        : albedo(a), metallic(m), roughness(r)
         , emission(e)
-        , transmission(0.0f)
-        , ior(1.45f)
-        , useNodes(false) {}
+        , transmission(0.0f), ior(1.45f), useNodes(false) {}
 };
 
-// ========== Hit Structure (needs Material) ==========
+// ========== Hit Structure ==========
 
-// Now we can define Hit properly
+/**
+ * Hit - Ray-surface intersection result (fully typed)
+ * 
+ * All spatial values use typed units:
+ * - t: Distance [m] - ray parameter
+ * - point: Position3 [m] - intersection point
+ * - normal: Direction3 (dimensionless) - surface normal
+ */
 struct Hit {
     bool hit;
-    float t;
-    Vec3 point;
-    Vec3 normal;
-    Vec2 uv;
+    diy::units::Distance t;     // Ray parameter [m]
+    diy::Position3 point;       // Intersection point [m]
+    diy::Direction3 normal;     // Surface normal (normalized)
+    Vec2 uv;                    // Texture coordinates (dimensionless)
     bool hasUV;
     Material material;
     int meshIdx;
     int triIdx;
     
-    Hit() : hit(false), t(1e30f), hasUV(false), meshIdx(-1), triIdx(-1) {}
+    Hit() 
+        : hit(false)
+        , t(1e30f * mp_units::si::metre)
+        , hasUV(false)
+        , meshIdx(-1)
+        , triIdx(-1) {}
+    
+    // Type accessors (primary interface)
+    diy::units::Distance distance() const { return t; }
+    const diy::Position3& position() const { return point; }
+    const diy::Direction3& surfaceNormal() const { return normal; }
+    
+    // Internal geometry access (for intersection calculations)
+    float t_meters() const { return diy::units::to_meters(t); }
+    float point_x() const { return point.x_raw(); }
+    float point_y() const { return point.y_raw(); }
+    float point_z() const { return point.z_raw(); }
+    float normal_x() const { return normal.x_raw(); }
+    float normal_y() const { return normal.y_raw(); }
+    float normal_z() const { return normal.z_raw(); }
+    
+    // Setters for internal use (from geometry code)
+    void setFromTyped(diy::units::Distance t_typed, const diy::Position3& p, const diy::Direction3& n) {
+        t = t_typed;
+        point = p;
+        normal = n;
+    }
 };
