@@ -162,7 +162,7 @@ inline Hit intersectScene(const Scene& scene, const Ray& ray,
  * @param env   Environment settings
  * @return Environment radiance (Color3)
  */
-inline diy::Color3 getEnvironmentColor(const Ray& ray, const Environment& env) {
+inline diy::Vec3U<mp_units::one> getEnvironmentColor(const Ray& ray, const Environment& env) {
     return env.color * env.strength;
 }
 

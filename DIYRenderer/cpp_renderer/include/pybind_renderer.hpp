@@ -243,7 +243,7 @@ public:
                         world_dir.normalize();
                         Ray ray(camera_.pos, world_dir);
                         
-                        diy::Color3 color(0, 0, 0);
+                        diy::Vec3U<mp_units::one> color(0, 0, 0);
                         
                         // 複数サンプルの平均
                         for (int s = 0; s < samples; ++s) {
@@ -354,17 +354,17 @@ public:
                 world_dir.normalize();
                 Ray ray(camera_.pos, world_dir);
                 
-                diy::Color3 color(0, 0, 0);
+                diy::Vec3U<mp_units::one> color(0, 0, 0);
                 if (mode == "normal") {
                     color = traceNormal(scene_, ray);
                     // -1..1 を 0..1 にマッピング
-                    color = color * 0.5f + diy::Color3(0.5f, 0.5f, 0.5f);
+                    color = color * 0.5f + diy::Vec3U<mp_units::one>(0.5f, 0.5f, 0.5f);
                 } else if (mode == "albedo") {
                     color = traceAlbedo(scene_, ray);
                 } else if (mode == "emission") {
                     color = traceEmission(scene_, ray);
                 } else {
-                    color = diy::Color3(1, 0, 1);  // マゼンタ（エラー表示）
+                    color = diy::Vec3U<mp_units::one>(1, 0, 1);  // マゼンタ（エラー表示）
                 }
                 
                 // Y反転を考慮したインデックス
@@ -486,13 +486,13 @@ private:
             // Material
             if (mesh_j.contains("material")) {
                 const auto& mat = mesh_j["material"];
-                diy::Color3 albedo(0.8f, 0.8f, 0.8f);
+                diy::Vec3U<mp_units::one> albedo(0.8f, 0.8f, 0.8f);
                 float metallic = 0.0f, roughness = 0.5f;
                 diy::Radiance3 emission(0.0f, 0.0f, 0.0f);
                 float transmission = 0.0f, ior = 1.45f;
                 
                 if (mat.contains("base_color")) {
-                    albedo = diy::Color3(
+                    albedo = diy::Vec3U<mp_units::one>(
                         mat["base_color"][0].get<float>(), 
                         mat["base_color"][1].get<float>(), 
                         mat["base_color"][2].get<float>()
@@ -544,7 +544,7 @@ private:
             const auto& envJson = j["environment"];
             
             if (envJson.contains("color") && envJson["color"].is_array()) {
-                scene.environment.color = diy::Color3(
+                scene.environment.color = diy::Vec3U<mp_units::one>(
                     envJson["color"][0].get<float>(),
                     envJson["color"][1].get<float>(),
                     envJson["color"][2].get<float>()
@@ -588,9 +588,9 @@ private:
             }
             
             // Color and energy
-            diy::Color3 color(1.0f, 1.0f, 1.0f);
+            diy::Vec3U<mp_units::one> color(1.0f, 1.0f, 1.0f);
             if (lightJson.contains("color")) {
-                color = diy::Color3(
+                color = diy::Vec3U<mp_units::one>(
                     lightJson["color"][0].get<float>(),
                     lightJson["color"][1].get<float>(),
                     lightJson["color"][2].get<float>()

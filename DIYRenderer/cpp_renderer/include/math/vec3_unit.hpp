@@ -7,13 +7,12 @@
  * 
  * Spatial vectors:
  *   Position3  = Vec3U<si::metre>    // [m] - position, displacement
- *   Direction3 = Vec3U<one>          // dimensionless - normalized direction
+ *   Direction3 = Vec3U<one>          // dimensionless - ALWAYS normalized (|v| = 1)
  * 
  * Radiometric vectors (RGB):
- *   Color3      = Vec3U<one>                                  // dimensionless [0,1]
+ *   Vec3U<one>  - dimensionless RGB (color [0,1], throughput, etc.)
  *   Radiance3   = Vec3U<watt_per_steradian_per_square_metre>  // [W/(sr·m²)]
  *   BSDF3       = Vec3U<per_steradian>                        // [1/sr]
- *   Throughput3 = Vec3U<one>                                  // dimensionless
  * 
  * Unit algebra examples:
  *   position + direction * (5.0f * m)   // OK: Vec3<m> + Vec3<one> * m -> Vec3<m>
@@ -314,14 +313,14 @@ constexpr Vec3U<U> lerp(const Vec3U<U>& a, const Vec3U<U>& b, float t) {
 // ========== Type aliases: Spatial ==========
 
 using Position3 = Vec3U<si::metre>;
-using Direction3 = Vec3U<one>;
+using Direction3 = Vec3U<one>;  // INVARIANT: always normalized (|v| = 1)
 
 // ========== Type aliases: Radiometric (RGB) ==========
+// Note: For dimensionless RGB values (color, throughput), use Vec3U<one> directly
+// with appropriate comments to indicate semantic meaning.
 
-using Color3 = Vec3U<one>;                                            // Reflectance [0,1]
 using Radiance3 = Vec3U<units::watt_per_steradian_per_square_metre>;  // [W/(sr·m²)]
 using BSDF3 = Vec3U<units::per_steradian>;                            // [1/sr]
-using Throughput3 = Vec3U<one>;                                       // Dimensionless path weight
 
 // ========== Reflect ==========
 // reflect(incident, normal) -> reflected direction

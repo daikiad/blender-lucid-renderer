@@ -32,8 +32,8 @@
 #include <cmath>
 
 // Forward declarations for node evaluators
-diy::Color3 getAlbedoFromNodeTree(const NodeTree& tree, const Vec2& uv);
-diy::Color3 getEmissionFromNodeTree(const NodeTree& tree, const Vec2& uv);
+diy::Vec3U<mp_units::one> getAlbedoFromNodeTree(const NodeTree& tree, const Vec2& uv);
+diy::Vec3U<mp_units::one> getEmissionFromNodeTree(const NodeTree& tree, const Vec2& uv);
 float getTransmissionFromNodeTree(const NodeTree& tree, const Vec2& uv);
 float getIORFromNodeTree(const NodeTree& tree, const Vec2& uv);
 float getMetallicFromNodeTree(const NodeTree& tree, const Vec2& uv);
@@ -63,11 +63,11 @@ inline MaterialParams getMaterialParams(const Hit& hit) {
     return mat;
 }
 
-inline diy::Color3 getEmission(const Hit& hit) {
+inline diy::Vec3U<mp_units::one> getEmission(const Hit& hit) {
     if (hit.material.useNodes && hit.material.nodeTree.valid) {
         return getEmissionFromNodeTree(hit.material.nodeTree, hit.uv);
     }
-    return diy::Color3(
+    return diy::Vec3U<mp_units::one>(
         diy::units::to_radiance(hit.material.emission.x),
         diy::units::to_radiance(hit.material.emission.y),
         diy::units::to_radiance(hit.material.emission.z)
@@ -80,9 +80,9 @@ inline diy::Color3 getEmission(const Hit& hit) {
  * Simple path tracer using BSDF sampling only (no NEE)
  * Most basic implementation - good for testing
  */
-inline diy::Color3 traceSimple(const Scene& scene, const Ray& ray, int maxDepth) {
-    diy::Throughput3 result(0, 0, 0);
-    diy::Throughput3 throughput(1, 1, 1);
+inline diy::Vec3U<mp_units::one> traceSimple(const Scene& scene, const Ray& ray, int maxDepth) {
+    diy::Vec3U<mp_units::one> result(0, 0, 0);
+    diy::Vec3U<mp_units::one> throughput(1, 1, 1);
     Ray currentRay = ray;
     float tMin = 0.0f;  // First ray starts from camera
     
@@ -92,7 +92,7 @@ inline diy::Color3 traceSimple(const Scene& scene, const Ray& ray, int maxDepth)
         
         // Check if we hit a native light closer than any mesh
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
-            diy::Color3 le(
+            diy::Vec3U<mp_units::one> le(
                 diy::units::to_radiance(lightHit.emission.x),
                 diy::units::to_radiance(lightHit.emission.y),
                 diy::units::to_radiance(lightHit.emission.z)
@@ -107,7 +107,7 @@ inline diy::Color3 traceSimple(const Scene& scene, const Ray& ray, int maxDepth)
         }
         
         MaterialParams mat = getMaterialParams(hit);
-        diy::Color3 emission = getEmission(hit);
+        diy::Vec3U<mp_units::one> emission = getEmission(hit);
         
         // Add emission
         result = result + throughput * emission;
@@ -148,7 +148,7 @@ inline diy::Color3 traceSimple(const Scene& scene, const Ray& ray, int maxDepth)
                 weightY = std::min(weightY, MAX_WEIGHT);
                 weightZ = std::min(weightZ, MAX_WEIGHT);
                 
-                throughput = diy::Throughput3(
+                throughput = diy::Vec3U<mp_units::one>(
                     throughput.x_raw() * weightX, 
                     throughput.y_raw() * weightY, 
                     throughput.z_raw() * weightZ
@@ -178,7 +178,7 @@ inline diy::Color3 traceSimple(const Scene& scene, const Ray& ray, int maxDepth)
         tMin = geometry::RAY_T_MIN;  // Subsequent rays need offset
     }
     
-    return diy::Color3(result.x_raw(), result.y_raw(), result.z_raw());
+    return diy::Vec3U<mp_units::one>(result.x_raw(), result.y_raw(), result.z_raw());
 }
 
 // ========== NEE Path Tracer ==========
@@ -187,10 +187,10 @@ inline diy::Color3 traceSimple(const Scene& scene, const Ray& ray, int maxDepth)
  * Path tracer with Next Event Estimation
  * Uses light sampling for direct illumination
  */
-inline diy::Color3 traceNEE(const Scene& scene, const SceneLights& sceneLights, 
+inline diy::Vec3U<mp_units::one> traceNEE(const Scene& scene, const SceneLights& sceneLights, 
                      const Ray& ray, int maxDepth) {
-    diy::Throughput3 result(0, 0, 0);
-    diy::Throughput3 throughput(1, 1, 1);
+    diy::Vec3U<mp_units::one> result(0, 0, 0);
+    diy::Vec3U<mp_units::one> throughput(1, 1, 1);
     Ray currentRay = ray;
     float tMin = 0.0f;  // First ray starts from camera
     
@@ -199,7 +199,7 @@ inline diy::Color3 traceNEE(const Scene& scene, const SceneLights& sceneLights,
         LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
         
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
-            diy::Color3 le(
+            diy::Vec3U<mp_units::one> le(
                 diy::units::to_radiance(lightHit.emission.x),
                 diy::units::to_radiance(lightHit.emission.y),
                 diy::units::to_radiance(lightHit.emission.z)
@@ -214,7 +214,7 @@ inline diy::Color3 traceNEE(const Scene& scene, const SceneLights& sceneLights,
         }
         
         MaterialParams mat = getMaterialParams(hit);
-        diy::Color3 emission = getEmission(hit);
+        diy::Vec3U<mp_units::one> emission = getEmission(hit);
         
         // Setup normals
         diy::Direction3 n = hit.normal;
@@ -259,13 +259,13 @@ inline diy::Color3 traceNEE(const Scene& scene, const SceneLights& sceneLights,
                             diy::BSDF3 f = evalBSDF(mat, wo, ls.direction, shadingNormal);
                             float pdfLight = ls_pdf * lightSelectProb;
                             
-                            diy::Color3 ls_emission_color(
+                            diy::Vec3U<mp_units::one> ls_emission_color(
                                 diy::units::to_radiance(ls.emission.x),
                                 diy::units::to_radiance(ls.emission.y),
                                 diy::units::to_radiance(ls.emission.z)
                             );
                             
-                            diy::Throughput3 contrib(
+                            diy::Vec3U<mp_units::one> contrib(
                                 f.x_raw() * ls_emission_color.x_raw() * NdotL / pdfLight,
                                 f.y_raw() * ls_emission_color.y_raw() * NdotL / pdfLight,
                                 f.z_raw() * ls_emission_color.z_raw() * NdotL / pdfLight
@@ -293,7 +293,7 @@ inline diy::Color3 traceNEE(const Scene& scene, const SceneLights& sceneLights,
         } else {
             float NdotL = std::abs(diy::dot(sampleNormal, bsdfSample.wi).numerical_value_in(mp_units::one));
             if (NdotL > 1e-6f && pdf_raw > 1e-6f) {
-                throughput = diy::Throughput3(
+                throughput = diy::Vec3U<mp_units::one>(
                     throughput.x_raw() * bsdfSample.f.x_raw() * NdotL / pdf_raw,
                     throughput.y_raw() * bsdfSample.f.y_raw() * NdotL / pdf_raw,
                     throughput.z_raw() * bsdfSample.f.z_raw() * NdotL / pdf_raw
@@ -323,7 +323,7 @@ inline diy::Color3 traceNEE(const Scene& scene, const SceneLights& sceneLights,
         tMin = geometry::RAY_T_MIN;  // Subsequent rays need offset
     }
     
-    return diy::Color3(result.x_raw(), result.y_raw(), result.z_raw());
+    return diy::Vec3U<mp_units::one>(result.x_raw(), result.y_raw(), result.z_raw());
 }
 
 // ========== MIS Path Tracer ==========
@@ -332,10 +332,10 @@ inline diy::Color3 traceNEE(const Scene& scene, const SceneLights& sceneLights,
  * Path tracer with Multiple Importance Sampling
  * Combines BSDF and light sampling with proper MIS weights
  */
-inline diy::Color3 traceMIS(const Scene& scene, const SceneLights& sceneLights, 
+inline diy::Vec3U<mp_units::one> traceMIS(const Scene& scene, const SceneLights& sceneLights, 
                      const Ray& ray, int maxDepth) {
-    diy::Throughput3 result(0, 0, 0);
-    diy::Throughput3 throughput(1, 1, 1);
+    diy::Vec3U<mp_units::one> result(0, 0, 0);
+    diy::Vec3U<mp_units::one> throughput(1, 1, 1);
     Ray currentRay = ray;
     float lastBsdfPdf = 0.0f;
     float tMin = 0.0f;  // First ray starts from camera
@@ -345,7 +345,7 @@ inline diy::Color3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
         LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
         
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
-            diy::Color3 lightEmission(
+            diy::Vec3U<mp_units::one> lightEmission(
                 diy::units::to_radiance(lightHit.emission.x),
                 diy::units::to_radiance(lightHit.emission.y),
                 diy::units::to_radiance(lightHit.emission.z)
@@ -365,7 +365,7 @@ inline diy::Color3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
         }
         
         MaterialParams mat = getMaterialParams(hit);
-        diy::Color3 emission = getEmission(hit);
+        diy::Vec3U<mp_units::one> emission = getEmission(hit);
         
         // Setup normals
         diy::Direction3 n = hit.normal;
@@ -427,13 +427,13 @@ inline diy::Color3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
                             
                             float misWeight = powerHeuristic(pdfLight, pdfBsdf_raw);
                             
-                            diy::Color3 ls_emission_color(
+                            diy::Vec3U<mp_units::one> ls_emission_color(
                                 diy::units::to_radiance(ls.emission.x),
                                 diy::units::to_radiance(ls.emission.y),
                                 diy::units::to_radiance(ls.emission.z)
                             );
                             
-                            diy::Throughput3 contrib(
+                            diy::Vec3U<mp_units::one> contrib(
                                 f.x_raw() * ls_emission_color.x_raw() * NdotL * misWeight / pdfLight,
                                 f.y_raw() * ls_emission_color.y_raw() * NdotL * misWeight / pdfLight,
                                 f.z_raw() * ls_emission_color.z_raw() * NdotL * misWeight / pdfLight
@@ -461,7 +461,7 @@ inline diy::Color3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
         } else {
             float NdotL = std::abs(diy::dot(sampleNormal, bsdfSample.wi).numerical_value_in(mp_units::one));
             if (NdotL > 1e-6f && pdf_raw > 1e-6f) {
-                throughput = diy::Throughput3(
+                throughput = diy::Vec3U<mp_units::one>(
                     throughput.x_raw() * bsdfSample.f.x_raw() * NdotL / pdf_raw,
                     throughput.y_raw() * bsdfSample.f.y_raw() * NdotL / pdf_raw,
                     throughput.z_raw() * bsdfSample.f.z_raw() * NdotL / pdf_raw
@@ -494,5 +494,5 @@ inline diy::Color3 traceMIS(const Scene& scene, const SceneLights& sceneLights,
         lastBsdfPdf = bsdfSample.useWeight ? 0.0f : pdf_raw;
     }
     
-    return diy::Color3(result.x_raw(), result.y_raw(), result.z_raw());
+    return diy::Vec3U<mp_units::one>(result.x_raw(), result.y_raw(), result.z_raw());
 }

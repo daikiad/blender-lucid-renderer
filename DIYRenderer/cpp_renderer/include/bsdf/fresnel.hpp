@@ -37,9 +37,9 @@ inline float fresnelSchlick(float cosTheta, float f0) {
  * Fresnel for conductor (metal) - Schlick with F0 = albedo
  * Returns per-channel Fresnel reflectance
  */
-inline diy::Color3 fresnelSchlickColor(float cosTheta, const diy::Color3& f0) {
+inline diy::Vec3U<mp_units::one> fresnelSchlickColor(float cosTheta, const diy::Vec3U<mp_units::one>& f0) {
     float f = std::pow(1.0f - cosTheta, 5.0f);
-    return diy::Color3(
+    return diy::Vec3U<mp_units::one>(
         f0.x_raw() + (1.0f - f0.x_raw()) * f,
         f0.y_raw() + (1.0f - f0.y_raw()) * f,
         f0.z_raw() + (1.0f - f0.z_raw()) * f

@@ -20,7 +20,7 @@
 // ========== Material Parameters ==========
 
 struct MaterialParams {
-    diy::Color3 albedo;         // Base color (dimensionless [0,1])
+    diy::Vec3U<mp_units::one> albedo;         // Base color (dimensionless [0,1])
     float metallic;
     float roughness;
     float transmission;
@@ -47,7 +47,7 @@ struct BSDFSample {
     diy::Direction3 wi;             // Sampled direction (normalized)
     diy::BSDF3 f;                   // BSDF value [1/sr]
     diy::units::PdfSolidAngle pdf;  // Probability density [1/sr]
-    diy::Throughput3 weight;        // Direct throughput = f × |NdotL| / pdf
+    diy::Vec3U<mp_units::one> weight;        // Direct throughput = f × |NdotL| / pdf
     bool useWeight;                 // If true, use weight directly
     bool isDelta;                   // Is this a delta distribution?
     
@@ -104,8 +104,8 @@ inline diy::BSDF3 evalSpecular(const MaterialParams& mat, const diy::Direction3&
     float G2_over_denom = 0.5f / (NdotV * lambdaL + NdotL * lambdaV + GGX_EPSILON);
     
     // Compute F0 using Color3
-    diy::Color3 f0 = mat.albedo * mat.metallic + diy::Color3(0.04f, 0.04f, 0.04f) * (1.0f - mat.metallic);
-    diy::Color3 F = fresnelSchlickColor(VdotH, f0);
+    diy::Vec3U<mp_units::one> f0 = mat.albedo * mat.metallic + diy::Vec3U<mp_units::one>(0.04f, 0.04f, 0.04f) * (1.0f - mat.metallic);
+    diy::Vec3U<mp_units::one> F = fresnelSchlickColor(VdotH, f0);
     
     float spec = D * G2_over_denom;
     return diy::BSDF3(spec * F.x_raw(), spec * F.y_raw(), spec * F.z_raw());
@@ -127,11 +127,11 @@ inline diy::BSDF3 evalBSDF(const MaterialParams& mat, const diy::Direction3& wo,
     float VdotH = std::max(diy::dot(wo, h).numerical_value_in(mp_units::one), 0.0f);
     
     // Use Color3 for Fresnel calculation
-    diy::Color3 f0(0.04f, 0.04f, 0.04f);
-    diy::Color3 F = fresnelSchlickColor(VdotH, f0);
+    diy::Vec3U<mp_units::one> f0(0.04f, 0.04f, 0.04f);
+    diy::Vec3U<mp_units::one> F = fresnelSchlickColor(VdotH, f0);
     
     diy::BSDF3 diffuse = evalDiffuse(mat, NdotL, NdotV);
-    diy::Throughput3 kd((1.0f - F.x_raw()) * (1.0f - mat.metallic),
+    diy::Vec3U<mp_units::one> kd((1.0f - F.x_raw()) * (1.0f - mat.metallic),
                         (1.0f - F.y_raw()) * (1.0f - mat.metallic),
                         (1.0f - F.z_raw()) * (1.0f - mat.metallic));
     diffuse = diy::hadamard(diffuse, kd);
@@ -185,7 +185,7 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const diy::Direction3& w
             float w = G2 / (G1 + GGX_EPSILON);
             
             sample.useWeight = true;
-            sample.weight = diy::Throughput3(w, w, w);
+            sample.weight = diy::Vec3U<mp_units::one>(w, w, w);
             sample.pdf = 1.0f * diy::units::per_steradian;
             sample.isDelta = false;
             sample.type = BSDFSample::SPECULAR;
@@ -209,7 +209,7 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const diy::Direction3& w
                 float w = G2 / (G1 + GGX_EPSILON);
                 
                 sample.useWeight = true;
-                sample.weight = diy::Throughput3(w, w, w);
+                sample.weight = diy::Vec3U<mp_units::one>(w, w, w);
                 sample.pdf = 1.0f * diy::units::per_steradian;
                 sample.isDelta = false;
                 sample.type = BSDFSample::SPECULAR;
@@ -224,7 +224,7 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const diy::Direction3& w
                 float w = G2 / (G1 + GGX_EPSILON);
                 
                 sample.useWeight = true;
-                sample.weight = diy::Throughput3(w, w, w);
+                sample.weight = diy::Vec3U<mp_units::one>(w, w, w);
                 sample.pdf = 1.0f * diy::units::per_steradian;
                 sample.isDelta = false;
                 sample.type = BSDFSample::TRANSMISSION;

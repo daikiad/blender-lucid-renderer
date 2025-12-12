@@ -163,7 +163,7 @@ struct Mesh {
  * final_radiance = color × strength [W/(sr·m²)]
  */
 struct Environment {
-    diy::Color3 color = diy::Color3{0.05f, 0.05f, 0.05f};  // Background color (RGB, each [0,∞])
+    diy::Vec3U<mp_units::one> color = diy::Vec3U<mp_units::one>{0.05f, 0.05f, 0.05f};  // Background color (RGB, each [0,∞])
     float strength = 1.0f;                                  // Emission strength multiplier (dimensionless)
 };
 

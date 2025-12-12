@@ -46,9 +46,9 @@
 #include "geometry/bvh.hpp"
 
 // Node evaluator forward declarations (implemented in node_evaluator.cpp)
-diy::Color3 evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::string &socketName, const Vec2 &uv);
-diy::Color3 getAlbedoFromNodeTree(const NodeTree &tree, const Vec2 &uv);
-diy::Color3 getEmissionFromNodeTree(const NodeTree &tree, const Vec2 &uv);
+diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::string &socketName, const Vec2 &uv);
+diy::Vec3U<mp_units::one> getAlbedoFromNodeTree(const NodeTree &tree, const Vec2 &uv);
+diy::Vec3U<mp_units::one> getEmissionFromNodeTree(const NodeTree &tree, const Vec2 &uv);
 float getTransmissionFromNodeTree(const NodeTree &tree, const Vec2 &uv);
 float getIORFromNodeTree(const NodeTree &tree, const Vec2 &uv);
 float getMetallicFromNodeTree(const NodeTree &tree, const Vec2 &uv);
@@ -57,16 +57,16 @@ float getRoughnessFromNodeTree(const NodeTree &tree, const Vec2 &uv);
 // ========== Debug Rendering Functions ==========
 
 // Debug mode: return normal as color
-inline diy::Color3 traceNormal(const Scene &scene, const Ray &ray, bool useAABB = true) {
+inline diy::Vec3U<mp_units::one> traceNormal(const Scene &scene, const Ray &ray, bool useAABB = true) {
     Hit hit = intersectScene(scene, ray, 0.0f, geometry::RAY_T_MAX, useAABB);
     if (hit.hit) {
-        return diy::Color3(hit.normal.x_raw(), hit.normal.y_raw(), hit.normal.z_raw());
+        return diy::Vec3U<mp_units::one>(hit.normal.x_raw(), hit.normal.y_raw(), hit.normal.z_raw());
     }
-    return diy::Color3(0, 0, 0);
+    return diy::Vec3U<mp_units::one>(0, 0, 0);
 }
 
 // Debug mode: return albedo from material
-inline diy::Color3 traceAlbedo(const Scene &scene, const Ray &ray, bool useAABB = true) {
+inline diy::Vec3U<mp_units::one> traceAlbedo(const Scene &scene, const Ray &ray, bool useAABB = true) {
     Hit hit = intersectScene(scene, ray, 0.0f, geometry::RAY_T_MAX, useAABB);
     if (hit.hit) {
         if (hit.material.useNodes && hit.material.nodeTree.valid) {
@@ -74,21 +74,21 @@ inline diy::Color3 traceAlbedo(const Scene &scene, const Ray &ray, bool useAABB 
         }
         return hit.material.albedo;
     }
-    return diy::Color3(0, 0, 0);
+    return diy::Vec3U<mp_units::one>(0, 0, 0);
 }
 
 // Debug mode: return emission from material
-inline diy::Color3 traceEmission(const Scene &scene, const Ray &ray, bool useAABB = true) {
+inline diy::Vec3U<mp_units::one> traceEmission(const Scene &scene, const Ray &ray, bool useAABB = true) {
     Hit hit = intersectScene(scene, ray, 0.0f, geometry::RAY_T_MAX, useAABB);
     if (hit.hit) {
         if (hit.material.useNodes && hit.material.nodeTree.valid) {
             return getEmissionFromNodeTree(hit.material.nodeTree, hit.uv);
         }
-        return diy::Color3(
+        return diy::Vec3U<mp_units::one>(
             diy::units::to_radiance(hit.material.emission.x),
             diy::units::to_radiance(hit.material.emission.y),
             diy::units::to_radiance(hit.material.emission.z)
         );
     }
-    return diy::Color3(0, 0, 0);
+    return diy::Vec3U<mp_units::one>(0, 0, 0);
 }

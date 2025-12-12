@@ -69,7 +69,7 @@ void test_radiometric() {
     using namespace diy::units;
     
     // Color (albedo) - dimensionless [0,1]
-    diy::Color3 albedo(0.8f, 0.2f, 0.1f);
+    diy::Vec3U<mp_units::one> albedo(0.8f, 0.2f, 0.1f);
     std::cout << "albedo = (" << albedo.x_raw() << ", " << albedo.y_raw() << ", " << albedo.z_raw() << ")\n";
     
     // Incoming radiance [W/(sr·m²)]
@@ -87,7 +87,7 @@ void test_radiometric() {
     std::cout << "bsdf = (" << bsdf.x_raw() << ", " << bsdf.y_raw() << ", " << bsdf.z_raw() << ") 1/sr\n";
     
     // Throughput (dimensionless)
-    diy::Throughput3 throughput(1.0f, 1.0f, 1.0f);
+    diy::Vec3U<mp_units::one> throughput(1.0f, 1.0f, 1.0f);
     
     // PDF [1/sr]
     auto pdf = 0.225f * per_steradian;  // ~cos/π for cosine-weighted hemisphere

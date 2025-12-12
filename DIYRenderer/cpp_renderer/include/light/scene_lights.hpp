@@ -24,7 +24,7 @@
 #include <algorithm>
 
 // Forward declaration for node evaluator
-diy::Color3 getEmissionFromNodeTree(const NodeTree& tree, const Vec2& uv);
+diy::Vec3U<mp_units::one> getEmissionFromNodeTree(const NodeTree& tree, const Vec2& uv);
 
 // ========== MIS Weight Functions ==========
 
@@ -81,7 +81,7 @@ struct SceneLights {
             const Mesh& mesh = scene.meshes[mi];
             
             // Check if mesh has emission
-            diy::Color3 emission(
+            diy::Vec3U<mp_units::one> emission(
                 diy::units::to_radiance(mesh.material.emission.x),
                 diy::units::to_radiance(mesh.material.emission.y),
                 diy::units::to_radiance(mesh.material.emission.z)

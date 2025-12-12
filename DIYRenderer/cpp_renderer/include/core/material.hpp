@@ -40,7 +40,7 @@ struct SocketValue {
     Type type;
     float f;                      // For FLOAT - single scalar value
     diy::Direction3 v3;           // For VEC3 - 3D vector (normals, positions)
-    diy::Color3 v4;               // For VEC4 - RGB component (colors with alpha)
+    diy::Vec3U<mp_units::one> v4;               // For VEC4 - RGB component (colors with alpha)
     float v4_w;                   // For VEC4 - Alpha component
     std::string s;                // For STRING - texture paths, etc.
     bool b;                       // For BOOL - boolean switches
@@ -64,7 +64,7 @@ struct SocketValue {
     static SocketValue makeVec4(float x, float y, float z, float w) { 
         SocketValue sv; 
         sv.type = VEC4; 
-        sv.v4 = diy::Color3(x, y, z); 
+        sv.v4 = diy::Vec3U<mp_units::one>(x, y, z); 
         sv.v4_w = w; 
         return sv; 
     }
@@ -135,7 +135,7 @@ struct NodeTree {
  * Material - Physical material properties for PBR rendering (unit-safe)
  */
 struct Material {
-    diy::Color3 albedo;         // Base color (dimensionless [0,1])
+    diy::Vec3U<mp_units::one> albedo;         // Base color (dimensionless [0,1])
     float metallic;             // Metallic factor (dimensionless, 0-1)
     float roughness;            // Surface roughness (dimensionless, 0-1)
     diy::Radiance3 emission;    // Emission [W/(sr·m²)]
@@ -154,12 +154,12 @@ struct Material {
         , ior(1.45f)
         , useNodes(false) {}
     
-    Material(const diy::Color3& a, float m, float r) 
+    Material(const diy::Vec3U<mp_units::one>& a, float m, float r) 
         : albedo(a), metallic(m), roughness(r)
         , emission(0.0f, 0.0f, 0.0f)
         , transmission(0.0f), ior(1.45f), useNodes(false) {}
     
-    Material(const diy::Color3& a, float m, float r, const diy::Radiance3& e) 
+    Material(const diy::Vec3U<mp_units::one>& a, float m, float r, const diy::Radiance3& e) 
         : albedo(a), metallic(m), roughness(r)
         , emission(e)
         , transmission(0.0f), ior(1.45f), useNodes(false) {}
