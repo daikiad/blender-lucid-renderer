@@ -85,3 +85,11 @@ add_executable(test_units test/test_units.cpp)
 target_include_directories(test_units PRIVATE include)
 target_link_libraries(test_units PRIVATE mp-units::mp-units)
 target_compile_options(test_units PRIVATE -O2)
+
+# =============================================================================
+# Test Target: test_vec3_unit
+# =============================================================================
+add_executable(test_vec3_unit test/test_vec3_unit.cpp)
+target_include_directories(test_vec3_unit PRIVATE include)
+target_link_libraries(test_vec3_unit PRIVATE mp-units::mp-units)
+target_compile_options(test_vec3_unit PRIVATE -O2)
