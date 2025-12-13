@@ -6,49 +6,12 @@
 
 #include "units/render_units.hpp"
 
+#include <gtest/gtest.h>
 #include <cmath>
-#include <iostream>
-#include <sstream>
 
 using namespace render;
 using namespace mp_units;
 using namespace mp_units::si::unit_symbols;
-
-// Simple test framework
-#define TEST(name)                                                  \
-    void test_##name();                                             \
-    struct TestRunner_##name {                                      \
-        TestRunner_##name() {                                       \
-            std::cout << "Running " #name "... ";                   \
-            try {                                                   \
-                test_##name();                                      \
-                std::cout << "PASSED" << std::endl;                 \
-            } catch (const std::exception& e) {                     \
-                std::cout << "FAILED: " << e.what() << std::endl;   \
-                exit(1);                                            \
-            }                                                       \
-        }                                                           \
-    } runner_##name;                                                \
-    void test_##name()
-
-#define EXPECT_TRUE(cond)                                           \
-    do {                                                            \
-        if (!(cond)) {                                              \
-            throw std::runtime_error(                               \
-                "Assertion failed: " #cond " at line " +            \
-                std::to_string(__LINE__));                          \
-        }                                                           \
-    } while (0)
-
-#define EXPECT_NEAR(a, b, eps)                                      \
-    do {                                                            \
-        if (std::abs((a) - (b)) > (eps)) {                          \
-            std::ostringstream oss;                                 \
-            oss << "EXPECT_NEAR failed: " << (a) << " vs " << (b)   \
-                << " (eps=" << (eps) << ") at line " << __LINE__;   \
-            throw std::runtime_error(oss.str());                    \
-        }                                                           \
-    } while (0)
 
 constexpr float kEps = 1e-5f;  // Float precision epsilon
 
@@ -56,7 +19,7 @@ constexpr float kEps = 1e-5f;  // Float precision epsilon
 // Vec3f Tests
 // ============================================================================
 
-TEST(Vec3f_arithmetic) {
+TEST(Vec3fTest, Arithmetic) {
     Vec3f a{1.0f, 2.0f, 3.0f};
     Vec3f b{4.0f, 5.0f, 6.0f};
 
@@ -74,7 +37,7 @@ TEST(Vec3f_arithmetic) {
     EXPECT_NEAR(neg.x, -1.0f, kEps);
 }
 
-TEST(Vec3f_scalar_multiply) {
+TEST(Vec3fTest, ScalarMultiply) {
     Vec3f v{1.0f, 2.0f, 3.0f};
 
     // float
@@ -95,7 +58,7 @@ TEST(Vec3f_scalar_multiply) {
     EXPECT_NEAR(v5.x, 3.0f, kEps);
 }
 
-TEST(Vec3f_dot_cross) {
+TEST(Vec3fTest, DotCross) {
     Vec3f a{1.0f, 0.0f, 0.0f};
     Vec3f b{0.0f, 1.0f, 0.0f};
 
@@ -106,7 +69,7 @@ TEST(Vec3f_dot_cross) {
     EXPECT_NEAR(c.z, 1.0f, kEps);
 }
 
-TEST(Vec3f_normalize) {
+TEST(Vec3fTest, Normalize) {
     Vec3f v{3.0f, 4.0f, 0.0f};
     auto n = normalize(v);
     EXPECT_NEAR(n.length(), 1.0f, kEps);
@@ -118,7 +81,7 @@ TEST(Vec3f_normalize) {
 // Vec2f Tests
 // ============================================================================
 
-TEST(Vec2f_basic) {
+TEST(Vec2fTest, Basic) {
     Vec2f a{1.0f, 2.0f};
     Vec2f b{3.0f, 4.0f};
 
@@ -135,7 +98,7 @@ TEST(Vec2f_basic) {
     EXPECT_NEAR(neg.y, -2.0f, kEps);
 }
 
-TEST(Vec2f_scalar_multiply) {
+TEST(Vec2fTest, ScalarMultiply) {
     Vec2f v{1.0f, 2.0f};
 
     auto v2 = v * 2.0f;
@@ -147,14 +110,14 @@ TEST(Vec2f_scalar_multiply) {
     EXPECT_NEAR(v3.y, 6.0f, kEps);
 }
 
-TEST(Vec2f_dot) {
+TEST(Vec2fTest, Dot) {
     Vec2f a{1.0f, 0.0f};
     Vec2f b{0.0f, 1.0f};
     EXPECT_NEAR(dot(a, b), 0.0f, kEps);
     EXPECT_NEAR(dot(a, a), 1.0f, kEps);
 }
 
-TEST(Vec2f_normalize) {
+TEST(Vec2fTest, Normalize) {
     Vec2f v{3.0f, 4.0f};
     auto n = normalize(v);
     EXPECT_NEAR(n.length(), 1.0f, kEps);
@@ -166,7 +129,7 @@ TEST(Vec2f_normalize) {
 // Displacement Tests
 // ============================================================================
 
-TEST(Displacement_basic) {
+TEST(DisplacementTest, Basic) {
     Displacement d1 = quantity{Vec3f{1.0f, 0.0f, 0.0f}, isq::displacement[m]};
     Displacement d2 = quantity{Vec3f{0.0f, 2.0f, 0.0f}, isq::displacement[m]};
 
@@ -176,7 +139,7 @@ TEST(Displacement_basic) {
     EXPECT_NEAR(v.y, 2.0f, kEps);
 }
 
-TEST(Displacement_scalar_multiply) {
+TEST(DisplacementTest, ScalarMultiply) {
     Displacement d = quantity{Vec3f{1.0f, 2.0f, 3.0f}, isq::displacement[m]};
 
     // Multiply by float
@@ -199,7 +162,7 @@ TEST(Displacement_scalar_multiply) {
 // Position Tests (Affine Space)
 // ============================================================================
 
-TEST(Position_subtraction) {
+TEST(PositionTest, Subtraction) {
     Position p1 = make_position(0.0f, 0.0f, 0.0f);
     Position p2 = make_position(3.0f, 4.0f, 0.0f);
 
@@ -210,7 +173,7 @@ TEST(Position_subtraction) {
     EXPECT_NEAR(dv.y, 4.0f, kEps);
 }
 
-TEST(Position_addition_with_displacement) {
+TEST(PositionTest, AdditionWithDisplacement) {
     Position p = make_position(1.0f, 2.0f, 3.0f);
     Displacement offset = quantity{Vec3f{1.0f, 0.0f, 0.0f}, isq::displacement[m]};
 
@@ -220,7 +183,7 @@ TEST(Position_addition_with_displacement) {
     EXPECT_NEAR(v.y, 2.0f, kEps);
 }
 
-TEST(Position_distance) {
+TEST(PositionTest, Distance) {
     Position p1 = make_position(0.0f, 0.0f, 0.0f);
     Position p2 = make_position(3.0f, 4.0f, 0.0f);
 
@@ -232,7 +195,7 @@ TEST(Position_distance) {
 // Direction Tests
 // ============================================================================
 
-TEST(Direction_construction) {
+TEST(DirectionTest, Construction) {
     auto d_opt = make_direction(3.0f, 4.0f, 0.0f);
     EXPECT_TRUE(d_opt.has_value());
     Direction d = *d_opt;
@@ -245,17 +208,17 @@ TEST(Direction_construction) {
     EXPECT_NEAR(len, 1.0f, kEps);
 }
 
-TEST(Direction_zero_vector) {
+TEST(DirectionTest, ZeroVector) {
     // Zero vector should return nullopt
     auto d = make_direction(0.0f, 0.0f, 0.0f);
-    EXPECT_TRUE(!d.has_value());
+    EXPECT_FALSE(d.has_value());
 
     // Very small vector should also return nullopt
     auto d2 = make_direction(1e-15f, 0.0f, 0.0f);
-    EXPECT_TRUE(!d2.has_value());
+    EXPECT_FALSE(d2.has_value());
 }
 
-TEST(Direction_times_Length) {
+TEST(DirectionTest, TimesLength) {
     Direction d = *make_direction(1.0f, 0.0f, 0.0f);
     Length len = 5.0f * m;
 
@@ -270,13 +233,13 @@ TEST(Direction_times_Length) {
     EXPECT_NEAR(disp2.numerical_value_in(m).x, 5.0f, kEps);
 }
 
-TEST(Direction_negation) {
+TEST(DirectionTest, Negation) {
     Direction d = *make_direction(1.0f, 0.0f, 0.0f);
     Direction neg = -d;
     EXPECT_NEAR(neg.x(), -1.0f, kEps);
 }
 
-TEST(Direction_cross_product) {
+TEST(DirectionTest, CrossProduct) {
     Direction d1 = *make_direction(1.0f, 0.0f, 0.0f);
     Direction d2 = *make_direction(0.0f, 1.0f, 0.0f);
 
@@ -286,14 +249,14 @@ TEST(Direction_cross_product) {
 
     // Cross of parallel vectors should be nullopt
     auto cross_parallel = d1.cross(d1);
-    EXPECT_TRUE(!cross_parallel.has_value());
+    EXPECT_FALSE(cross_parallel.has_value());
 }
 
 // ============================================================================
 // Normal Tests
 // ============================================================================
 
-TEST(Normal_construction) {
+TEST(NormalTest, Construction) {
     auto n_opt = make_normal(0.0f, 3.0f, 4.0f);
     EXPECT_TRUE(n_opt.has_value());
     Normal n = *n_opt;
@@ -301,13 +264,13 @@ TEST(Normal_construction) {
     EXPECT_NEAR(n.z(), 0.8f, kEps);
 }
 
-TEST(Normal_zero_vector) {
+TEST(NormalTest, ZeroVector) {
     // Zero vector should return nullopt
     auto n = make_normal(0.0f, 0.0f, 0.0f);
-    EXPECT_TRUE(!n.has_value());
+    EXPECT_FALSE(n.has_value());
 }
 
-TEST(Normal_dot_direction) {
+TEST(NormalTest, DotDirection) {
     Normal n = *make_normal(0.0f, 1.0f, 0.0f);
     Direction d = *make_direction(0.0f, 1.0f, 0.0f);
 
@@ -320,7 +283,7 @@ TEST(Normal_dot_direction) {
 // Reflection Tests
 // ============================================================================
 
-TEST(Reflect_basic) {
+TEST(ReflectTest, Basic) {
     // Ray coming from upper-right, hitting horizontal surface
     Direction incident = *make_direction(1.0f, -1.0f, 0.0f);
     Normal normal = *make_normal(0.0f, 1.0f, 0.0f);
@@ -336,7 +299,7 @@ TEST(Reflect_basic) {
 // Refraction Tests
 // ============================================================================
 
-TEST(Refract_basic) {
+TEST(RefractTest, Basic) {
     // Normal incidence - should pass straight through
     Direction incident = *make_direction(0.0f, -1.0f, 0.0f);
     Normal normal = *make_normal(0.0f, 1.0f, 0.0f);
@@ -346,21 +309,21 @@ TEST(Refract_basic) {
     EXPECT_NEAR(refracted->y(), -1.0f, kEps);
 }
 
-TEST(Refract_total_internal_reflection) {
+TEST(RefractTest, TotalInternalReflection) {
     // Grazing angle from denser medium
     Direction incident = *make_direction(0.9f, -0.436f, 0.0f);  // About 64 degrees
     Normal normal = *make_normal(0.0f, 1.0f, 0.0f);
 
     // eta = 1.5 (glass to air), critical angle ~42 degrees
     auto refracted = refract(incident, normal, 1.5f);
-    EXPECT_TRUE(!refracted.has_value());  // TIR
+    EXPECT_FALSE(refracted.has_value());  // TIR
 }
 
 // ============================================================================
 // PDF Tests (mp-units quantity)
 // ============================================================================
 
-TEST(PDF_construction) {
+TEST(PDFTest, Construction) {
     // PDF per solid angle: 1/(4π) per steradian (uniform sphere)
     constexpr float inv_4pi = 1.0f / (4.0f * static_cast<float>(M_PI));
     PdfW pdf_w = inv_4pi * per_sr;
@@ -368,7 +331,7 @@ TEST(PDF_construction) {
     EXPECT_NEAR(pdf_w.numerical_value_in(per_sr), inv_4pi, kEps);
 }
 
-TEST(PDF_arithmetic) {
+TEST(PDFTest, Arithmetic) {
     PdfW pdf1 = 1.0f * per_sr;
     PdfW pdf2 = 2.0f * per_sr;
 
@@ -379,7 +342,7 @@ TEST(PDF_arithmetic) {
     EXPECT_NEAR(scaled.numerical_value_in(per_sr), 3.0f, kEps);
 }
 
-TEST(PDF_types_distinct) {
+TEST(PDFTest, TypesDistinct) {
     PdfW pdf_w = 1.0f * per_sr;
     PdfA pdf_a = 2.0f * per_m2;
 
@@ -394,7 +357,7 @@ TEST(PDF_types_distinct) {
 // RGB Tests
 // ============================================================================
 
-TEST(ColorRGB_basic) {
+TEST(ColorRGBTest, Basic) {
     ColorRGB c1{0.5f, 0.6f, 0.7f};
     ColorRGB c2{0.1f, 0.2f, 0.3f};
 
@@ -404,7 +367,7 @@ TEST(ColorRGB_basic) {
     EXPECT_NEAR(sum.b, 1.0f, kEps);
 }
 
-TEST(ColorRGB_scalar) {
+TEST(ColorRGBTest, Scalar) {
     ColorRGB c{0.2f, 0.4f, 0.6f};
 
     auto c2 = c * 2.0f;
@@ -414,7 +377,7 @@ TEST(ColorRGB_scalar) {
     EXPECT_NEAR(c3.r, 0.6f, kEps);
 }
 
-TEST(ColorRGB_hadamard) {
+TEST(ColorRGBTest, Hadamard) {
     ColorRGB a{0.5f, 0.5f, 0.5f};
     ColorRGB b{0.2f, 0.4f, 0.6f};
 
@@ -424,7 +387,7 @@ TEST(ColorRGB_hadamard) {
     EXPECT_NEAR(c.b, 0.3f, kEps);
 }
 
-TEST(ColorRGB_luminance) {
+TEST(ColorRGBTest, Luminance) {
     ColorRGB white{1.0f, 1.0f, 1.0f};
     EXPECT_NEAR(luminance(white), 1.0f, kEps);
 
@@ -436,14 +399,14 @@ TEST(ColorRGB_luminance) {
 // Radiance Tests
 // ============================================================================
 
-TEST(Radiance_basic) {
+TEST(RadianceTest, Basic) {
     using namespace mp_units::si::unit_symbols;
 
     Radiance r = 100.0f * W / (sr * m2);
     EXPECT_NEAR(r.numerical_value_in(W / (sr * m2)), 100.0f, kEps);
 }
 
-TEST(RadianceRGB_hadamard) {
+TEST(RadianceRGBTest, Hadamard) {
     using namespace mp_units::si::unit_symbols;
 
     RadianceRGB rad{100.0f * W / (sr * m2), 200.0f * W / (sr * m2), 300.0f * W / (sr * m2)};
@@ -453,14 +416,4 @@ TEST(RadianceRGB_hadamard) {
     EXPECT_NEAR(result.r.numerical_value_in(W / (sr * m2)), 50.0f, kEps);
     EXPECT_NEAR(result.g.numerical_value_in(W / (sr * m2)), 100.0f, kEps);
     EXPECT_NEAR(result.b.numerical_value_in(W / (sr * m2)), 150.0f, kEps);
-}
-
-// ============================================================================
-// Main
-// ============================================================================
-
-int main() {
-    std::cout << "=== render_units.hpp tests ===" << std::endl;
-    std::cout << "All tests passed!" << std::endl;
-    return 0;
 }

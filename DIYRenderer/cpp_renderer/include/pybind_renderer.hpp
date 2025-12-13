@@ -30,7 +30,7 @@
 
 #include "renderer.hpp"
 #include "pbr.hpp"
-#include "json.hpp"
+#include <nlohmann/json.hpp>
 
 #ifdef _OPENMP
 #include <omp.h>

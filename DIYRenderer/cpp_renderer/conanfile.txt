@@ -1,0 +1,12 @@
+[requires]
+mp-units/2.4.0
+nlohmann_json/3.11.3
+pybind11/2.13.6
+gtest/1.15.0
+
+[generators]
+CMakeDeps
+CMakeToolchain
+
+[options]
+mp-units/*:cxx_modules=False

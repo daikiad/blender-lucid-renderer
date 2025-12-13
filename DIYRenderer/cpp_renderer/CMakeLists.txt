@@ -40,25 +40,13 @@ if(APPLE AND NOT DEFINED Python_EXECUTABLE)
 endif()
 
 # =============================================================================
-# Dependencies
+# Dependencies (via Conan)
 # =============================================================================
 find_package(OpenMP)
-find_package(pybind11 CONFIG)
-
-if(NOT pybind11_FOUND)
-    include(FetchContent)
-    FetchContent_Declare(
-        pybind11
-        GIT_REPOSITORY https://github.com/pybind/pybind11.git
-        GIT_TAG v2.11.1
-    )
-    FetchContent_MakeAvailable(pybind11)
-endif()
-
-# mp-units (compile-time dimensional analysis)
-set(MP_UNITS_BUILD_INSTALL OFF CACHE BOOL "" FORCE)
-set(MP_UNITS_API_CONTRACTS NONE CACHE STRING "" FORCE)
-add_subdirectory(extern/mp-units/src)
+find_package(mp-units REQUIRED)
+find_package(nlohmann_json REQUIRED)
+find_package(pybind11 REQUIRED)
+find_package(GTest REQUIRED)
 
 # =============================================================================
 # Main Target: diyrenderer (Python module)
@@ -69,7 +57,10 @@ pybind11_add_module(diyrenderer
 )
 
 target_include_directories(diyrenderer PRIVATE include)
-target_link_libraries(diyrenderer PRIVATE mp-units::mp-units)
+target_link_libraries(diyrenderer PRIVATE 
+    mp-units::mp-units 
+    nlohmann_json::nlohmann_json
+)
 
 if(OpenMP_CXX_FOUND)
     target_link_libraries(diyrenderer PRIVATE OpenMP::OpenMP_CXX)
@@ -81,9 +72,16 @@ target_compile_options(diyrenderer PRIVATE -O3 -march=native -ffast-math -flto)
 target_link_options(diyrenderer PRIVATE -flto)
 
 # =============================================================================
-# Test Target: test_render_units
+# Test Target: test_render_units (Google Test)
 # =============================================================================
+enable_testing()
 add_executable(test_render_units test/render_units_test.cpp)
 target_include_directories(test_render_units PRIVATE include)
-target_link_libraries(test_render_units PRIVATE mp-units::mp-units)
+target_link_libraries(test_render_units PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
 target_compile_options(test_render_units PRIVATE -O2)
+include(GoogleTest)
+gtest_discover_tests(test_render_units)
