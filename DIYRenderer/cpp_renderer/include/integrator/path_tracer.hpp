@@ -298,18 +298,35 @@ inline render::ColorRGB traceMIS(const Scene& scene, const SceneLights& sceneLig
     Ray currentRay = ray;
     render::PdfW lastBsdfPdf = render::zero_pdf_w();
     render::Length tMin = render::metres(0.0f);  // First ray starts from camera
+
+    auto findLightIndex = [&](int meshIdx, int triIdx) -> int {
+        for (size_t i = 0; i < sceneLights.lights.size(); ++i) {
+            const Light& l = sceneLights.lights[i];
+            if (l.meshIndex == meshIdx && l.triangleIndex == triIdx) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    };
     
     for (int depth = 0; depth < maxDepth; ++depth) {
         Hit hit = intersectScene(scene, currentRay, tMin);
         LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
         
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
-            if (lastBsdfPdf < render::MIN_PDF) {
-                result += throughput * lightHit.emission;
-            } else {
-                float misWeight = 0.5f;  // Simplified MIS weight
-                result += throughput * lightHit.emission * misWeight;
+            render::PdfW lightPdf = render::zero_pdf_w();
+            if (sceneLights.hasLights() && lightHit.lightIndex >= 0) {
+                float selectProb = sceneLights.getPdfForLight(lightHit.lightIndex);
+                if (selectProb > 0.0f) {
+                    const Light& l = sceneLights.lights[lightHit.lightIndex];
+                    lightPdf = pdfLightSample(l, currentRay.origin, lightHit.point, lightHit.normal) * selectProb;
+                }
             }
+            render::PdfW bsdfPdf = lastBsdfPdf;
+            float misWeight = (bsdfPdf > render::MIN_PDF && lightPdf > render::MIN_PDF)
+                                ? render::mis_power_heuristic(lightPdf, bsdfPdf)
+                                : 1.0f;
+            result += throughput * lightHit.emission * misWeight;
             break;
         }
         
@@ -335,17 +352,21 @@ inline render::ColorRGB traceMIS(const Scene& scene, const SceneLights& sceneLig
         render::ColorRGB emission_color = render::to_color(emission);
         float emissionStrength = emission_color.r + emission_color.g + emission_color.b;
         if (emissionStrength > 1e-6f) {
-            float emissionWeight = 1.0f;
-            
-            if (lastBsdfPdf > render::MIN_PDF && sceneLights.hasLights()) {
-                float cosLight = std::abs(render::dot(hit.normal.vec(), currentRay.direction.vec()));
-                if (cosLight > 1e-6f) {
-                    // Use hit.distance() directly (already typed)
-                    render::PdfW lightPdf_typed = render::compute_pdf_w_from_area(hit.distance(), sceneLights.totalEmissiveArea, cosLight);
-                    emissionWeight = render::mis_power_heuristic(lastBsdfPdf, lightPdf_typed);
+            float misWeight = 1.0f;
+            if (sceneLights.hasLights() && lastBsdfPdf > render::MIN_PDF) {
+                int lightIdx = findLightIndex(hit.meshIdx, hit.triIdx);
+                if (lightIdx >= 0) {
+                    float selectProb = sceneLights.getPdfForLight(lightIdx);
+                    if (selectProb > 0.0f) {
+                        const Light& l = sceneLights.lights[lightIdx];
+                        render::PdfW lightPdf = pdfLightSample(l, currentRay.origin, hit.point, hit.normal) * selectProb;
+                        if (lightPdf > render::MIN_PDF) {
+                            misWeight = render::mis_power_heuristic(lightPdf, lastBsdfPdf);
+                        }
+                    }
                 }
             }
-            result += throughput * emission * emissionWeight;
+            result += throughput * emission * misWeight;
         }
         
         // Next Event Estimation with MIS
