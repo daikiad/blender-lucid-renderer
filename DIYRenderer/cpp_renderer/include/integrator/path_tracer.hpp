@@ -20,7 +20,7 @@
  */
 
 #pragma once
-#include "../math/vec3_unit.hpp"
+#include "../units/render_units.hpp"
 #include "../math/random.hpp"
 #include "../core/scene.hpp"
 #include "../core/material.hpp"
@@ -28,16 +28,15 @@
 #include "../bsdf/bsdf.hpp"
 #include "../light/light.hpp"
 #include "../light/scene_lights.hpp"
-#include "../units/units.hpp"
 #include <cmath>
 
 // Forward declarations for node evaluators
-diy::Vec3U<mp_units::one> getAlbedoFromNodeTree(const NodeTree& tree, const Vec2& uv);
-diy::Vec3U<mp_units::one> getEmissionFromNodeTree(const NodeTree& tree, const Vec2& uv);
-float getTransmissionFromNodeTree(const NodeTree& tree, const Vec2& uv);
-float getIORFromNodeTree(const NodeTree& tree, const Vec2& uv);
-float getMetallicFromNodeTree(const NodeTree& tree, const Vec2& uv);
-float getRoughnessFromNodeTree(const NodeTree& tree, const Vec2& uv);
+render::ColorRGB getAlbedoFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
+render::ColorRGB getEmissionFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
+float getTransmissionFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
+float getIORFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
+float getMetallicFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
+float getRoughnessFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
 
 // ========== Helper Functions ==========
 
@@ -63,15 +62,11 @@ inline MaterialParams getMaterialParams(const Hit& hit) {
     return mat;
 }
 
-inline diy::Vec3U<mp_units::one> getEmission(const Hit& hit) {
+inline render::RadianceRGB getEmission(const Hit& hit) {
     if (hit.material.useNodes && hit.material.nodeTree.valid) {
-        return getEmissionFromNodeTree(hit.material.nodeTree, hit.uv);
+        return render::to_radiance(getEmissionFromNodeTree(hit.material.nodeTree, hit.uv));
     }
-    return diy::Vec3U<mp_units::one>(
-        diy::units::to_radiance(hit.material.emission.x),
-        diy::units::to_radiance(hit.material.emission.y),
-        diy::units::to_radiance(hit.material.emission.z)
-    );
+    return hit.material.emission;
 }
 
 // ========== Simple Path Tracer (BSDF only) ==========
@@ -80,11 +75,11 @@ inline diy::Vec3U<mp_units::one> getEmission(const Hit& hit) {
  * Simple path tracer using BSDF sampling only (no NEE)
  * Most basic implementation - good for testing
  */
-inline diy::Vec3U<mp_units::one> traceSimple(const Scene& scene, const Ray& ray, int maxDepth) {
-    diy::Vec3U<mp_units::one> result(0, 0, 0);
-    diy::Vec3U<mp_units::one> throughput(1, 1, 1);
+inline render::ColorRGB traceSimple(const Scene& scene, const Ray& ray, int maxDepth) {
+    render::RadianceRGB result = render::zero_radiance_rgb();
+    render::ColorRGB throughput(1, 1, 1);
     Ray currentRay = ray;
-    float tMin = 0.0f;  // First ray starts from camera
+    render::Length tMin = render::metres(0.0f);  // First ray starts from camera
     
     for (int depth = 0; depth < maxDepth; ++depth) {
         Hit hit = intersectScene(scene, currentRay, tMin);
@@ -92,44 +87,36 @@ inline diy::Vec3U<mp_units::one> traceSimple(const Scene& scene, const Ray& ray,
         
         // Check if we hit a native light closer than any mesh
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
-            diy::Vec3U<mp_units::one> le(
-                diy::units::to_radiance(lightHit.emission.x),
-                diy::units::to_radiance(lightHit.emission.y),
-                diy::units::to_radiance(lightHit.emission.z)
-            );
-            result = result + throughput * le;
+            result += throughput * lightHit.emission;  // ColorRGB * RadianceRGB -> RadianceRGB
             break;
         }
         
         if (!hit.hit) {
-            result = result + throughput * getEnvironmentColor(currentRay, scene.environment);
+            result += throughput * render::to_radiance(getEnvironmentColor(currentRay, scene.environment));
             break;
         }
         
         MaterialParams mat = getMaterialParams(hit);
-        diy::Vec3U<mp_units::one> emission = getEmission(hit);
+        render::RadianceRGB emission = getEmission(hit);
         
         // Add emission
-        result = result + throughput * emission;
+        result += throughput * emission;
         
         // Setup normals
-        diy::Direction3 n = hit.normal;
-        diy::Direction3 wo = currentRay.direction * -1.0f;
-        wo.normalize();
-        bool frontFace = diy::dot(wo, n).numerical_value_in(mp_units::one) > 0;
+        render::Direction n = hit.normal.as_direction();
+        render::Direction wo = -currentRay.direction;
+        bool frontFace = render::dot(wo.vec(), n.vec()) > 0;
         
-        diy::Direction3 shadingNormal = n;
+        render::Direction shadingNormal = n;
         if (mat.transmission < 0.5f && !frontFace) {
-            shadingNormal = n * -1.0f;
+            shadingNormal = -n;
         }
         
         // Sample BSDF
-        diy::Direction3 sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
+        render::Direction sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
         BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
         
-        float pdf_raw = diy::units::to_per_sr(bsdfSample.pdf);
-        
-        if (pdf_raw < 1e-6f && !bsdfSample.useWeight) {
+        if (bsdfSample.pdf < render::MIN_PDF && !bsdfSample.useWeight) {
             break;
         }
         
@@ -137,22 +124,16 @@ inline diy::Vec3U<mp_units::one> traceSimple(const Scene& scene, const Ray& ray,
         if (bsdfSample.useWeight) {
             throughput = throughput * bsdfSample.weight;
         } else {
-            float absNdotL = std::abs(diy::dot(sampleNormal, bsdfSample.wi).numerical_value_in(mp_units::one));
-            if (absNdotL > 1e-6f && pdf_raw > 1e-6f) {
-                float weightX = bsdfSample.f.x_raw() * absNdotL / pdf_raw;
-                float weightY = bsdfSample.f.y_raw() * absNdotL / pdf_raw;
-                float weightZ = bsdfSample.f.z_raw() * absNdotL / pdf_raw;
+            float absNdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
+            if (absNdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
+                render::ColorRGB weight = render::bsdf_sample_weight(bsdfSample.f, absNdotL, bsdfSample.pdf);
                 
                 const float MAX_WEIGHT = 10.0f;
-                weightX = std::min(weightX, MAX_WEIGHT);
-                weightY = std::min(weightY, MAX_WEIGHT);
-                weightZ = std::min(weightZ, MAX_WEIGHT);
+                weight.r = std::min(weight.r, MAX_WEIGHT);
+                weight.g = std::min(weight.g, MAX_WEIGHT);
+                weight.b = std::min(weight.b, MAX_WEIGHT);
                 
-                throughput = diy::Vec3U<mp_units::one>(
-                    throughput.x_raw() * weightX, 
-                    throughput.y_raw() * weightY, 
-                    throughput.z_raw() * weightZ
-                );
+                throughput = throughput * weight;
             } else {
                 break;
             }
@@ -160,25 +141,25 @@ inline diy::Vec3U<mp_units::one> traceSimple(const Scene& scene, const Ray& ray,
         
         // Russian Roulette
         if (depth >= 3) {
-            float maxThroughput = std::max({throughput.x_raw(), throughput.y_raw(), throughput.z_raw()});
+            float maxThroughput = std::max({throughput.r, throughput.g, throughput.b});
             float rrProb = std::min(maxThroughput, 0.95f);
             if (randf() > rrProb) break;
             throughput = throughput * (1.0f / rrProb);
         }
         
         // Check for NaN/Inf
-        if (std::isnan(throughput.x_raw()) || std::isinf(throughput.x_raw()) ||
-            std::isnan(throughput.y_raw()) || std::isinf(throughput.y_raw()) ||
-            std::isnan(throughput.z_raw()) || std::isinf(throughput.z_raw())) {
+        if (std::isnan(throughput.r) || std::isinf(throughput.r) ||
+            std::isnan(throughput.g) || std::isinf(throughput.g) ||
+            std::isnan(throughput.b) || std::isinf(throughput.b)) {
             break;
         }
         
         // Setup next ray
         currentRay = Ray(hit.point, bsdfSample.wi);
-        tMin = geometry::RAY_T_MIN;  // Subsequent rays need offset
+        tMin = geometry::RAY_T_MIN_TYPED;  // Subsequent rays need offset
     }
     
-    return diy::Vec3U<mp_units::one>(result.x_raw(), result.y_raw(), result.z_raw());
+    return render::to_color(result);  // RadianceRGB -> ColorRGB at interface boundary
 }
 
 // ========== NEE Path Tracer ==========
@@ -187,50 +168,44 @@ inline diy::Vec3U<mp_units::one> traceSimple(const Scene& scene, const Ray& ray,
  * Path tracer with Next Event Estimation
  * Uses light sampling for direct illumination
  */
-inline diy::Vec3U<mp_units::one> traceNEE(const Scene& scene, const SceneLights& sceneLights, 
+inline render::ColorRGB traceNEE(const Scene& scene, const SceneLights& sceneLights, 
                      const Ray& ray, int maxDepth) {
-    diy::Vec3U<mp_units::one> result(0, 0, 0);
-    diy::Vec3U<mp_units::one> throughput(1, 1, 1);
+    render::RadianceRGB result = render::zero_radiance_rgb();
+    render::ColorRGB throughput(1, 1, 1);
     Ray currentRay = ray;
-    float tMin = 0.0f;  // First ray starts from camera
+    render::Length tMin = render::metres(0.0f);  // First ray starts from camera
     
     for (int depth = 0; depth < maxDepth; ++depth) {
         Hit hit = intersectScene(scene, currentRay, tMin);
         LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
         
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
-            diy::Vec3U<mp_units::one> le(
-                diy::units::to_radiance(lightHit.emission.x),
-                diy::units::to_radiance(lightHit.emission.y),
-                diy::units::to_radiance(lightHit.emission.z)
-            );
-            result = result + throughput * le;
+            result += throughput * lightHit.emission;
             break;
         }
         
         if (!hit.hit) {
-            result = result + throughput * getEnvironmentColor(currentRay, scene.environment);
+            result += throughput * render::to_radiance(getEnvironmentColor(currentRay, scene.environment));
             break;
         }
         
         MaterialParams mat = getMaterialParams(hit);
-        diy::Vec3U<mp_units::one> emission = getEmission(hit);
+        render::RadianceRGB emission = getEmission(hit);
         
         // Setup normals
-        diy::Direction3 n = hit.normal;
-        diy::Direction3 wo = currentRay.direction * -1.0f;
-        wo.normalize();
-        bool frontFace = diy::dot(wo, n).numerical_value_in(mp_units::one) > 0;
+        render::Direction n = hit.normal.as_direction();
+        render::Direction wo = -currentRay.direction;
+        bool frontFace = render::dot(wo.vec(), n.vec()) > 0;
         
-        diy::Direction3 shadingNormal = n;
+        render::Direction shadingNormal = n;
         if (mat.transmission < 0.5f && !frontFace) {
-            shadingNormal = n * -1.0f;
+            shadingNormal = -n;
         }
         
         // Add emission only on first hit
-        float emissionStrength = emission.x_raw() + emission.y_raw() + emission.z_raw();
+        float emissionStrength = render::to_color(emission).r + render::to_color(emission).g + render::to_color(emission).b;
         if (emissionStrength > 1e-6f && depth == 0) {
-            result = result + throughput * emission;
+            result += throughput * emission;
         }
         
         // Next Event Estimation
@@ -243,34 +218,23 @@ inline diy::Vec3U<mp_units::one> traceNEE(const Scene& scene, const SceneLights&
                 const Light& light = sceneLights.lights[lightIdx];
                 LightSample ls = sampleLight(light, hit.point, randf(), randf());
                 
-                float ls_pdf = ls.pdf_raw();
-                float ls_distance = ls.distance_raw();
-                
-                if (ls_pdf > 1e-6f) {
-                    float NdotL = diy::dot(shadingNormal, ls.direction).numerical_value_in(mp_units::one);
+                if (ls.pdf > render::MIN_PDF) {
+                    float NdotL = render::dot(shadingNormal.vec(), ls.direction.vec());
                     
                     if (NdotL > 1e-6f) {
                         Ray shadowRay(hit.point, ls.direction);
-                        Hit shadowHit = intersectScene(scene, shadowRay, geometry::RAY_T_MIN, ls_distance);
+                        Hit shadowHit = intersectScene(scene, shadowRay, geometry::RAY_T_MIN_TYPED, ls.distance);
                         
                         bool inShadow = shadowHit.hit;
                         
                         if (!inShadow) {
-                            diy::BSDF3 f = evalBSDF(mat, wo, ls.direction, shadingNormal);
-                            float pdfLight = ls_pdf * lightSelectProb;
+                            render::BSDFRGB f = evalBSDF(mat, wo, ls.direction, shadingNormal);
+                            render::PdfW pdfLight = ls.pdf * lightSelectProb;
                             
-                            diy::Vec3U<mp_units::one> ls_emission_color(
-                                diy::units::to_radiance(ls.emission.x),
-                                diy::units::to_radiance(ls.emission.y),
-                                diy::units::to_radiance(ls.emission.z)
-                            );
-                            
-                            diy::Vec3U<mp_units::one> contrib(
-                                f.x_raw() * ls_emission_color.x_raw() * NdotL / pdfLight,
-                                f.y_raw() * ls_emission_color.y_raw() * NdotL / pdfLight,
-                                f.z_raw() * ls_emission_color.z_raw() * NdotL / pdfLight
-                            );
-                            result = result + throughput * contrib;
+                            // f [1/sr] * L [W/(sr·m²)] * cosθ / pdf = contrib [W/(sr·m²)]
+                            render::ColorRGB bsdf_weight = render::bsdf_sample_weight(f, NdotL, pdfLight);
+                            render::RadianceRGB contrib = bsdf_weight * ls.emission;
+                            result += throughput * contrib;
                         }
                     }
                 }
@@ -278,12 +242,10 @@ inline diy::Vec3U<mp_units::one> traceNEE(const Scene& scene, const SceneLights&
         }
         
         // BSDF Sampling for next bounce
-        diy::Direction3 sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
+        render::Direction sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
         BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
         
-        float pdf_raw = diy::units::to_per_sr(bsdfSample.pdf);
-        
-        if (pdf_raw < 1e-6f && !bsdfSample.useWeight) {
+        if (bsdfSample.pdf < render::MIN_PDF && !bsdfSample.useWeight) {
             break;
         }
         
@@ -291,13 +253,10 @@ inline diy::Vec3U<mp_units::one> traceNEE(const Scene& scene, const SceneLights&
         if (bsdfSample.useWeight) {
             throughput = throughput * bsdfSample.weight;
         } else {
-            float NdotL = std::abs(diy::dot(sampleNormal, bsdfSample.wi).numerical_value_in(mp_units::one));
-            if (NdotL > 1e-6f && pdf_raw > 1e-6f) {
-                throughput = diy::Vec3U<mp_units::one>(
-                    throughput.x_raw() * bsdfSample.f.x_raw() * NdotL / pdf_raw,
-                    throughput.y_raw() * bsdfSample.f.y_raw() * NdotL / pdf_raw,
-                    throughput.z_raw() * bsdfSample.f.z_raw() * NdotL / pdf_raw
-                );
+            float NdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
+            if (NdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
+                render::ColorRGB weight = render::bsdf_sample_weight(bsdfSample.f, NdotL, bsdfSample.pdf);
+                throughput = throughput * weight;
             } else {
                 break;
             }
@@ -305,25 +264,25 @@ inline diy::Vec3U<mp_units::one> traceNEE(const Scene& scene, const SceneLights&
         
         // Russian Roulette
         if (depth >= 3) {
-            float maxThroughput = std::max({throughput.x_raw(), throughput.y_raw(), throughput.z_raw()});
+            float maxThroughput = std::max({throughput.r, throughput.g, throughput.b});
             float rrProb = std::min(maxThroughput, 0.95f);
             if (randf() > rrProb) break;
             throughput = throughput * (1.0f / rrProb);
         }
         
         // Check for NaN/Inf
-        if (std::isnan(throughput.x_raw()) || std::isinf(throughput.x_raw()) ||
-            std::isnan(throughput.y_raw()) || std::isinf(throughput.y_raw()) ||
-            std::isnan(throughput.z_raw()) || std::isinf(throughput.z_raw())) {
+        if (std::isnan(throughput.r) || std::isinf(throughput.r) ||
+            std::isnan(throughput.g) || std::isinf(throughput.g) ||
+            std::isnan(throughput.b) || std::isinf(throughput.b)) {
             break;
         }
         
         // Setup next ray
         currentRay = Ray(hit.point, bsdfSample.wi);
-        tMin = geometry::RAY_T_MIN;  // Subsequent rays need offset
+        tMin = geometry::RAY_T_MIN_TYPED;  // Subsequent rays need offset
     }
     
-    return diy::Vec3U<mp_units::one>(result.x_raw(), result.y_raw(), result.z_raw());
+    return render::to_color(result);
 }
 
 // ========== MIS Path Tracer ==========
@@ -332,67 +291,61 @@ inline diy::Vec3U<mp_units::one> traceNEE(const Scene& scene, const SceneLights&
  * Path tracer with Multiple Importance Sampling
  * Combines BSDF and light sampling with proper MIS weights
  */
-inline diy::Vec3U<mp_units::one> traceMIS(const Scene& scene, const SceneLights& sceneLights, 
+inline render::ColorRGB traceMIS(const Scene& scene, const SceneLights& sceneLights, 
                      const Ray& ray, int maxDepth) {
-    diy::Vec3U<mp_units::one> result(0, 0, 0);
-    diy::Vec3U<mp_units::one> throughput(1, 1, 1);
+    render::RadianceRGB result = render::zero_radiance_rgb();
+    render::ColorRGB throughput(1, 1, 1);
     Ray currentRay = ray;
-    float lastBsdfPdf = 0.0f;
-    float tMin = 0.0f;  // First ray starts from camera
+    render::PdfW lastBsdfPdf = render::zero_pdf_w();
+    render::Length tMin = render::metres(0.0f);  // First ray starts from camera
     
     for (int depth = 0; depth < maxDepth; ++depth) {
         Hit hit = intersectScene(scene, currentRay, tMin);
         LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
         
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
-            diy::Vec3U<mp_units::one> lightEmission(
-                diy::units::to_radiance(lightHit.emission.x),
-                diy::units::to_radiance(lightHit.emission.y),
-                diy::units::to_radiance(lightHit.emission.z)
-            );
-            if (lastBsdfPdf < 1e-6f) {
-                result = result + throughput * lightEmission;
+            if (lastBsdfPdf < render::MIN_PDF) {
+                result += throughput * lightHit.emission;
             } else {
                 float misWeight = 0.5f;  // Simplified MIS weight
-                result = result + throughput * lightEmission * misWeight;
+                result += throughput * lightHit.emission * misWeight;
             }
             break;
         }
         
         if (!hit.hit) {
-            result = result + throughput * getEnvironmentColor(currentRay, scene.environment);
+            result += throughput * render::to_radiance(getEnvironmentColor(currentRay, scene.environment));
             break;
         }
         
         MaterialParams mat = getMaterialParams(hit);
-        diy::Vec3U<mp_units::one> emission = getEmission(hit);
+        render::RadianceRGB emission = getEmission(hit);
         
         // Setup normals
-        diy::Direction3 n = hit.normal;
-        diy::Direction3 wo = currentRay.direction * -1.0f;
-        wo.normalize();
-        bool frontFace = diy::dot(wo, n).numerical_value_in(mp_units::one) > 0;
+        render::Direction n = hit.normal.as_direction();
+        render::Direction wo = -currentRay.direction;
+        bool frontFace = render::dot(wo.vec(), n.vec()) > 0;
         
-        diy::Direction3 shadingNormal = n;
+        render::Direction shadingNormal = n;
         if (mat.transmission < 0.5f && !frontFace) {
-            shadingNormal = n * -1.0f;
+            shadingNormal = -n;
         }
         
         // Add emission with MIS weight
-        float emissionStrength = emission.x_raw() + emission.y_raw() + emission.z_raw();
+        render::ColorRGB emission_color = render::to_color(emission);
+        float emissionStrength = emission_color.r + emission_color.g + emission_color.b;
         if (emissionStrength > 1e-6f) {
             float emissionWeight = 1.0f;
             
-            if (lastBsdfPdf > 1e-6f && sceneLights.hasLights()) {
-                float cosLight = std::abs(diy::dot(hit.normal, currentRay.direction).numerical_value_in(mp_units::one));
+            if (lastBsdfPdf > render::MIN_PDF && sceneLights.hasLights()) {
+                float cosLight = std::abs(render::dot(hit.normal.vec(), currentRay.direction.vec()));
                 if (cosLight > 1e-6f) {
-                    float t_raw = hit.t_meters();
-                    float totalArea = diy::units::to_square_meters(sceneLights.totalEmissiveArea);
-                    float lightPdf = (totalArea > 0.0f) ? (t_raw * t_raw) / (totalArea * cosLight) : 0.0f;
-                    emissionWeight = powerHeuristic(lastBsdfPdf, lightPdf);
+                    // Use hit.distance() directly (already typed)
+                    render::PdfW lightPdf_typed = render::compute_pdf_w_from_area(hit.distance(), sceneLights.totalEmissiveArea, cosLight);
+                    emissionWeight = render::mis_power_heuristic(lastBsdfPdf, lightPdf_typed);
                 }
             }
-            result = result + throughput * emission * emissionWeight;
+            result += throughput * emission * emissionWeight;
         }
         
         // Next Event Estimation with MIS
@@ -406,39 +359,29 @@ inline diy::Vec3U<mp_units::one> traceMIS(const Scene& scene, const SceneLights&
                 const Light& light = sceneLights.lights[lightIdx];
                 LightSample ls = sampleLight(light, hit.point, randf(), randf());
                 
-                float ls_pdf = ls.pdf_raw();
-                float ls_distance = ls.distance_raw();
-                
-                if (ls_pdf > 1e-6f) {
-                    float NdotL = diy::dot(shadingNormal, ls.direction).numerical_value_in(mp_units::one);
+                if (ls.pdf > render::MIN_PDF) {
+                    float NdotL = render::dot(shadingNormal.vec(), ls.direction.vec());
                     
                     if (NdotL > 1e-6f) {
                         Ray shadowRay(hit.point, ls.direction);
-                        Hit shadowHit = intersectScene(scene, shadowRay, geometry::RAY_T_MIN, ls_distance);
+                        Hit shadowHit = intersectScene(scene, shadowRay, geometry::RAY_T_MIN_TYPED, ls.distance);
                         
                         bool inShadow = shadowHit.hit;
                         
                         if (!inShadow) {
-                            diy::BSDF3 f = evalBSDF(mat, wo, ls.direction, shadingNormal);
+                            render::BSDFRGB f = evalBSDF(mat, wo, ls.direction, shadingNormal);
                             
-                            float pdfLight = ls_pdf * lightSelectProb;
-                            diy::units::PdfSolidAngle pdfBsdf_typed = pdfBSDF(mat, wo, ls.direction, shadingNormal);
-                            float pdfBsdf_raw = diy::units::to_per_sr(pdfBsdf_typed);
+                            render::PdfW pdfLight_typed = ls.pdf * lightSelectProb;
+                            render::PdfW pdfBsdf_typed = pdfBSDF(mat, wo, ls.direction, shadingNormal);
                             
-                            float misWeight = powerHeuristic(pdfLight, pdfBsdf_raw);
+                            float misWeight = render::mis_power_heuristic(pdfLight_typed, pdfBsdf_typed);
                             
-                            diy::Vec3U<mp_units::one> ls_emission_color(
-                                diy::units::to_radiance(ls.emission.x),
-                                diy::units::to_radiance(ls.emission.y),
-                                diy::units::to_radiance(ls.emission.z)
-                            );
-                            
-                            diy::Vec3U<mp_units::one> contrib(
-                                f.x_raw() * ls_emission_color.x_raw() * NdotL * misWeight / pdfLight,
-                                f.y_raw() * ls_emission_color.y_raw() * NdotL * misWeight / pdfLight,
-                                f.z_raw() * ls_emission_color.z_raw() * NdotL * misWeight / pdfLight
-                            );
-                            result = result + throughput * contrib;
+                            // f [1/sr] * L [W/(sr·m²)] * cosθ * misWeight / pdf
+                            render::ColorRGB bsdf_color = render::to_color(f);
+                            // Use typed bsdf_sample_weight pattern: ColorRGB = f/pdf * cos
+                            render::ColorRGB bsdf_weight = render::bsdf_sample_weight(f, NdotL, pdfLight_typed);
+                            render::RadianceRGB contrib = (bsdf_weight * misWeight) * ls.emission;
+                            result += throughput * contrib;
                         }
                     }
                 }
@@ -446,12 +389,10 @@ inline diy::Vec3U<mp_units::one> traceMIS(const Scene& scene, const SceneLights&
         }
         
         // BSDF Sampling for next bounce
-        diy::Direction3 sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
+        render::Direction sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
         BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
         
-        float pdf_raw = diy::units::to_per_sr(bsdfSample.pdf);
-        
-        if (pdf_raw < 1e-6f && !bsdfSample.useWeight) {
+        if (bsdfSample.pdf < render::MIN_PDF && !bsdfSample.useWeight) {
             break;
         }
         
@@ -459,40 +400,40 @@ inline diy::Vec3U<mp_units::one> traceMIS(const Scene& scene, const SceneLights&
         if (bsdfSample.useWeight) {
             throughput = throughput * bsdfSample.weight;
         } else {
-            float NdotL = std::abs(diy::dot(sampleNormal, bsdfSample.wi).numerical_value_in(mp_units::one));
-            if (NdotL > 1e-6f && pdf_raw > 1e-6f) {
-                throughput = diy::Vec3U<mp_units::one>(
-                    throughput.x_raw() * bsdfSample.f.x_raw() * NdotL / pdf_raw,
-                    throughput.y_raw() * bsdfSample.f.y_raw() * NdotL / pdf_raw,
-                    throughput.z_raw() * bsdfSample.f.z_raw() * NdotL / pdf_raw
-                );
+            float NdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
+            if (NdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
+                render::ColorRGB weight = render::bsdf_sample_weight(bsdfSample.f, NdotL, bsdfSample.pdf);
+                throughput = throughput * weight;
             } else {
                 break;
             }
         }
         
+        // Store PDF for next bounce MIS (0 if using pre-computed weight)
+        lastBsdfPdf = bsdfSample.useWeight ? render::zero_pdf_w() : bsdfSample.pdf;
+        
         // Russian Roulette
         if (depth >= 3) {
-            float maxThroughput = std::max({throughput.x_raw(), throughput.y_raw(), throughput.z_raw()});
+            float maxThroughput = std::max({throughput.r, throughput.g, throughput.b});
             float rrProb = std::min(maxThroughput, 0.95f);
             if (randf() > rrProb) break;
             throughput = throughput * (1.0f / rrProb);
         }
         
         // Check for NaN/Inf
-        if (std::isnan(throughput.x_raw()) || std::isinf(throughput.x_raw()) ||
-            std::isnan(throughput.y_raw()) || std::isinf(throughput.y_raw()) ||
-            std::isnan(throughput.z_raw()) || std::isinf(throughput.z_raw())) {
+        if (std::isnan(throughput.r) || std::isinf(throughput.r) ||
+            std::isnan(throughput.g) || std::isinf(throughput.g) ||
+            std::isnan(throughput.b) || std::isinf(throughput.b)) {
             break;
         }
         
         // Setup next ray
         currentRay = Ray(hit.point, bsdfSample.wi);
-        tMin = geometry::RAY_T_MIN;  // Subsequent rays need offset
+        tMin = geometry::RAY_T_MIN_TYPED;  // Subsequent rays need offset
         
         // Store BSDF PDF for next emission's MIS weight calculation
-        lastBsdfPdf = bsdfSample.useWeight ? 0.0f : pdf_raw;
+        // Note: lastBsdfPdf already set in "Store PDF for next bounce MIS" section
     }
     
-    return diy::Vec3U<mp_units::one>(result.x_raw(), result.y_raw(), result.z_raw());
+    return render::to_color(result);
 }

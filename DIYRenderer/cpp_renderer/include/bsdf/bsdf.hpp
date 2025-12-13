@@ -2,25 +2,24 @@
  * bsdf.hpp - BSDF Evaluation and Sampling (Unit-Safe)
  * ====================================================
  * 
- * BSDF implementation with mp-units:
- * - BSDF3 [1/sr] for reflectance per solid angle
- * - PdfSolidAngle [1/sr] for probability densities
- * - Direction3 for all direction vectors
- * - Throughput3 (dimensionless) for path weights
+ * BSDF implementation with render:: namespace types:
+ * - BSDFRGB [1/sr] for reflectance per solid angle
+ * - PdfW [1/sr] for probability densities
+ * - Direction for all direction vectors
+ * - ColorRGB (dimensionless) for path weights
  */
 
 #pragma once
-#include "../math/vec3_unit.hpp"
+#include "../units/render_units.hpp"
 #include "../math/random.hpp"
 #include "../core/ray.hpp"
-#include "../units/units.hpp"
 #include "fresnel.hpp"
 #include "ggx.hpp"
 
 // ========== Material Parameters ==========
 
 struct MaterialParams {
-    diy::Vec3U<mp_units::one> albedo;         // Base color (dimensionless [0,1])
+    render::ColorRGB albedo;         // Base color (dimensionless [0,1])
     float metallic;
     float roughness;
     float transmission;
@@ -44,26 +43,26 @@ struct MaterialParams {
  * - weight: f × |cosθ| / pdf (dimensionless)
  */
 struct BSDFSample {
-    diy::Direction3 wi;             // Sampled direction (normalized)
-    diy::BSDF3 f;                   // BSDF value [1/sr]
-    diy::units::PdfSolidAngle pdf;  // Probability density [1/sr]
-    diy::Vec3U<mp_units::one> weight;        // Direct throughput = f × |NdotL| / pdf
-    bool useWeight;                 // If true, use weight directly
-    bool isDelta;                   // Is this a delta distribution?
+    render::Direction wi;             // Sampled direction (normalized)
+    render::BSDFRGB f;                // BSDF value [1/sr]
+    render::PdfW pdf;                 // Probability density [1/sr]
+    render::ColorRGB weight;          // Direct throughput = f × |NdotL| / pdf
+    bool useWeight;                   // If true, use weight directly
+    bool isDelta;                     // Is this a delta distribution?
     
     enum Type { DIFFUSE, SPECULAR, TRANSMISSION } type;
     
     BSDFSample() 
-        : wi()
-        , f(0, 0, 0)
-        , pdf(0.0f * diy::units::per_steradian)
-        , weight(1, 1, 1)
+        : wi(render::direction_from_unit_vector(render::Vec3f(0.0f, 0.0f, 1.0f)))
+        , f(render::zero_bsdf_rgb())
+        , pdf(0.0f * render::per_sr)
+        , weight(1.0f, 1.0f, 1.0f)
         , useWeight(false)
         , isDelta(false)
         , type(DIFFUSE) {}
     
     bool isValid() const {
-        return diy::units::to_per_sr(pdf) > 1e-6f || useWeight;
+        return pdf > render::MIN_PDF || useWeight;
     }
 };
 
@@ -72,27 +71,28 @@ struct BSDFSample {
 /**
  * Evaluate Lambertian diffuse BSDF [1/sr]
  */
-inline diy::BSDF3 evalDiffuse(const MaterialParams& mat, float NdotL, float NdotV) {
-    if (NdotL <= 0.0f || NdotV <= 0.0f) return diy::BSDF3(0, 0, 0);
+inline render::BSDFRGB evalDiffuse(const MaterialParams& mat, float NdotL, float NdotV) {
+    if (NdotL <= 0.0f || NdotV <= 0.0f) return render::zero_bsdf_rgb();
     // albedo [dimensionless] / π → [1/sr]
-    return diy::BSDF3(
-        mat.albedo.x_raw() * GGX_INV_PI,
-        mat.albedo.y_raw() * GGX_INV_PI,
-        mat.albedo.z_raw() * GGX_INV_PI
+    return render::make_bsdf_rgb(
+        mat.albedo.r * GGX_INV_PI,
+        mat.albedo.g * GGX_INV_PI,
+        mat.albedo.b * GGX_INV_PI
     );
 }
 
 /**
  * Evaluate GGX specular BSDF [1/sr]
  */
-inline diy::BSDF3 evalSpecular(const MaterialParams& mat, const diy::Direction3& wo, 
-                                const diy::Direction3& wi, const diy::Direction3& n, 
+inline render::BSDFRGB evalSpecular(const MaterialParams& mat, const render::Direction& wo, 
+                                const render::Direction& wi, const render::Direction& n, 
                                 float NdotL, float NdotV) {
-    if (NdotL <= 0.0f || NdotV <= 0.0f) return diy::BSDF3(0, 0, 0);
+    if (NdotL <= 0.0f || NdotV <= 0.0f) return render::zero_bsdf_rgb();
     
-    auto h = diy::normalize(wo + wi);
-    float NdotH = std::max(diy::dot(n, h).numerical_value_in(mp_units::one), 0.0f);
-    float VdotH = std::max(diy::dot(wo, h).numerical_value_in(mp_units::one), 0.0f);
+    auto h_vec = render::normalize(wo.vec() + wi.vec());
+    auto h = render::make_direction_or_default(h_vec);
+    float NdotH = std::max(render::dot(n.vec(), h.vec()), 0.0f);
+    float VdotH = std::max(render::dot(wo.vec(), h.vec()), 0.0f);
     
     float roughness = std::max(mat.roughness, MIN_ROUGHNESS);
     float D = ggxD(NdotH, roughness);
@@ -103,49 +103,50 @@ inline diy::BSDF3 evalSpecular(const MaterialParams& mat, const diy::Direction3&
     float lambdaV = ggx_safe_sqrt(a2 + (1.0f - a2) * NdotV * NdotV);
     float G2_over_denom = 0.5f / (NdotV * lambdaL + NdotL * lambdaV + GGX_EPSILON);
     
-    // Compute F0 using Color3
-    diy::Vec3U<mp_units::one> f0 = mat.albedo * mat.metallic + diy::Vec3U<mp_units::one>(0.04f, 0.04f, 0.04f) * (1.0f - mat.metallic);
-    diy::Vec3U<mp_units::one> F = fresnelSchlickColor(VdotH, f0);
+    // Compute F0 using ColorRGB
+    render::ColorRGB f0 = mat.albedo * mat.metallic + render::ColorRGB(0.04f, 0.04f, 0.04f) * (1.0f - mat.metallic);
+    render::ColorRGB F = fresnelSchlickColor(VdotH, f0);
     
     float spec = D * G2_over_denom;
-    return diy::BSDF3(spec * F.x_raw(), spec * F.y_raw(), spec * F.z_raw());
+    return render::make_bsdf_rgb(spec * F.r, spec * F.g, spec * F.b);
 }
 
 /**
  * Evaluate combined BSDF [1/sr]
  */
-inline diy::BSDF3 evalBSDF(const MaterialParams& mat, const diy::Direction3& wo, 
-                            const diy::Direction3& wi, const diy::Direction3& n) {
-    float NdotL = diy::dot(n, wi).numerical_value_in(mp_units::one);
-    float NdotV = diy::dot(n, wo).numerical_value_in(mp_units::one);
+inline render::BSDFRGB evalBSDF(const MaterialParams& mat, const render::Direction& wo, 
+                            const render::Direction& wi, const render::Direction& n) {
+    float NdotL = render::dot(n.vec(), wi.vec());
+    float NdotV = render::dot(n.vec(), wo.vec());
     
-    if (NdotL <= 0.0f || NdotV <= 0.0f) return diy::BSDF3(0, 0, 0);
+    if (NdotL <= 0.0f || NdotV <= 0.0f) return render::zero_bsdf_rgb();
     
-    diy::BSDF3 specular = evalSpecular(mat, wo, wi, n, NdotL, NdotV);
+    render::BSDFRGB specular = evalSpecular(mat, wo, wi, n, NdotL, NdotV);
     
-    auto h = diy::normalize(wo + wi);
-    float VdotH = std::max(diy::dot(wo, h).numerical_value_in(mp_units::one), 0.0f);
+    auto h_vec = render::normalize(wo.vec() + wi.vec());
+    auto h = render::make_direction_or_default(h_vec);
+    float VdotH = std::max(render::dot(wo.vec(), h.vec()), 0.0f);
     
-    // Use Color3 for Fresnel calculation
-    diy::Vec3U<mp_units::one> f0(0.04f, 0.04f, 0.04f);
-    diy::Vec3U<mp_units::one> F = fresnelSchlickColor(VdotH, f0);
+    // Use ColorRGB for Fresnel calculation
+    render::ColorRGB f0(0.04f, 0.04f, 0.04f);
+    render::ColorRGB F = fresnelSchlickColor(VdotH, f0);
     
-    diy::BSDF3 diffuse = evalDiffuse(mat, NdotL, NdotV);
-    diy::Vec3U<mp_units::one> kd((1.0f - F.x_raw()) * (1.0f - mat.metallic),
-                        (1.0f - F.y_raw()) * (1.0f - mat.metallic),
-                        (1.0f - F.z_raw()) * (1.0f - mat.metallic));
-    diffuse = diy::hadamard(diffuse, kd);
+    render::BSDFRGB diffuse = evalDiffuse(mat, NdotL, NdotV);
+    render::ColorRGB kd((1.0f - F.r) * (1.0f - mat.metallic),
+                        (1.0f - F.g) * (1.0f - mat.metallic),
+                        (1.0f - F.b) * (1.0f - mat.metallic));
+    diffuse = diffuse * kd;  // BSDFRGB * ColorRGB -> BSDFRGB
     
-    return diffuse + specular;
+    return diffuse + specular;  // BSDFRGB + BSDFRGB -> BSDFRGB
 }
 
 // ========== BSDF Sampling ==========
 
 /**
  * Sample BSDF direction based on material properties
- * Returns BSDFSample with mp-units typed members
+ * Returns BSDFSample with render:: typed members
  */
-inline BSDFSample sampleBSDF(const MaterialParams& mat, const diy::Direction3& wo, const diy::Direction3& n, 
+inline BSDFSample sampleBSDF(const MaterialParams& mat, const render::Direction& wo, const render::Direction& n, 
                               float u1, float u2, float u3) {
     BSDFSample sample;
     
@@ -153,30 +154,30 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const diy::Direction3& w
     
     // Handle glass/transmission
     if (mat.transmission > 0.0f && u3 < mat.transmission) {
-        float wo_dot_n = diy::dot(wo, n).numerical_value_in(mp_units::one);
+        float wo_dot_n = render::dot(wo.vec(), n.vec());
         bool frontFace = wo_dot_n > 0.0f;
-        diy::Direction3 faceNormal = frontFace ? n : n * -1.0f;
+        render::Direction faceNormal = frontFace ? n : -n;
         float eta = frontFace ? (1.0f / mat.ior) : mat.ior;
         
         // Sample microfacet normal using VNDF
-        diy::Direction3 t, b;
+        render::Direction t, b;
         buildOrthonormalBasis(faceNormal, t, b);
-        diy::Direction3 h = sampleGGXVNDF(wo, roughness, u1, u2, faceNormal, t, b);
+        render::Direction h = sampleGGXVNDF(wo, roughness, u1, u2, faceNormal, t, b);
         
-        float cosThetaI = std::abs(diy::dot(wo, h).numerical_value_in(mp_units::one));
+        float cosThetaI = std::abs(render::dot(wo.vec(), h.vec()));
         float F = fresnelDielectric(cosThetaI, eta);
         
-        diy::Direction3 incident = wo * -1.0f;
+        render::Direction incident = -wo;
         
         if (randf() < F) {
             // Fresnel reflection
-            sample.wi = diy::reflect(incident, h);
+            sample.wi = render::reflect(incident, h.as_normal());
             
-            float NdotL = diy::dot(faceNormal, sample.wi).numerical_value_in(mp_units::one);
-            float NdotV = diy::dot(faceNormal, wo).numerical_value_in(mp_units::one);
+            float NdotL = render::dot(faceNormal.vec(), sample.wi.vec());
+            float NdotV = render::dot(faceNormal.vec(), wo.vec());
             if (NdotL <= 0.0f || NdotV <= 0.0f) {
-                sample.pdf = diy::units::PdfSolidAngle::zero();
-                sample.f = diy::BSDF3(0, 0, 0);
+                sample.pdf = render::PdfW::zero();
+                sample.f = render::zero_bsdf_rgb();
                 return sample;
             }
             
@@ -185,22 +186,22 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const diy::Direction3& w
             float w = G2 / (G1 + GGX_EPSILON);
             
             sample.useWeight = true;
-            sample.weight = diy::Vec3U<mp_units::one>(w, w, w);
-            sample.pdf = 1.0f * diy::units::per_steradian;
+            sample.weight = render::ColorRGB(w, w, w);
+            sample.pdf = 1.0f * render::per_sr;
             sample.isDelta = false;
             sample.type = BSDFSample::SPECULAR;
         } else {
             // Refraction
-            diy::Direction3 refracted = diy::refract(incident, h, eta);
-            if (diy::length(refracted) < 0.5f) {
+            auto refracted_opt = render::refract(incident, h.as_normal(), eta);
+            if (!refracted_opt) {
                 // Total internal reflection
-                sample.wi = diy::reflect(incident, h);
+                sample.wi = render::reflect(incident, h.as_normal());
                 
-                float NdotL = diy::dot(faceNormal, sample.wi).numerical_value_in(mp_units::one);
-                float NdotV = diy::dot(faceNormal, wo).numerical_value_in(mp_units::one);
+                float NdotL = render::dot(faceNormal.vec(), sample.wi.vec());
+                float NdotV = render::dot(faceNormal.vec(), wo.vec());
                 if (NdotL <= 0.0f || NdotV <= 0.0f) {
-                    sample.pdf = diy::units::PdfSolidAngle::zero();
-                    sample.f = diy::BSDF3(0, 0, 0);
+                    sample.pdf = render::PdfW::zero();
+                    sample.f = render::zero_bsdf_rgb();
                     return sample;
                 }
                 
@@ -209,23 +210,23 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const diy::Direction3& w
                 float w = G2 / (G1 + GGX_EPSILON);
                 
                 sample.useWeight = true;
-                sample.weight = diy::Vec3U<mp_units::one>(w, w, w);
-                sample.pdf = 1.0f * diy::units::per_steradian;
+                sample.weight = render::ColorRGB(w, w, w);
+                sample.pdf = 1.0f * render::per_sr;
                 sample.isDelta = false;
                 sample.type = BSDFSample::SPECULAR;
             } else {
-                sample.wi = refracted;
+                sample.wi = *refracted_opt;
                 
-                float NdotL = std::abs(diy::dot(refracted, faceNormal).numerical_value_in(mp_units::one));
-                float NdotV = std::abs(diy::dot(wo, faceNormal).numerical_value_in(mp_units::one));
+                float NdotL = std::abs(render::dot(sample.wi.vec(), faceNormal.vec()));
+                float NdotV = std::abs(render::dot(wo.vec(), faceNormal.vec()));
                 
                 float G2 = ggxG2(NdotL, NdotV, roughness);
                 float G1 = ggxG1(NdotV, roughness);
                 float w = G2 / (G1 + GGX_EPSILON);
                 
                 sample.useWeight = true;
-                sample.weight = diy::Vec3U<mp_units::one>(w, w, w);
-                sample.pdf = 1.0f * diy::units::per_steradian;
+                sample.weight = render::ColorRGB(w, w, w);
+                sample.pdf = 1.0f * render::per_sr;
                 sample.isDelta = false;
                 sample.type = BSDFSample::TRANSMISSION;
             }
@@ -242,19 +243,19 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const diy::Direction3& w
         specProb = std::clamp(specProb, 0.1f, 0.9f);
     }
     
-    diy::Direction3 t, b;
+    render::Direction t, b;
     buildOrthonormalBasis(n, t, b);
-    float NdotV = std::max(diy::dot(n, wo).numerical_value_in(mp_units::one), GGX_EPSILON);
+    float NdotV = std::max(render::dot(n.vec(), wo.vec()), GGX_EPSILON);
     
     if (u1 < specProb) {
         // Specular sampling using GGX VNDF
-        diy::Direction3 h = sampleGGXVNDF(wo, roughness, u1 / specProb, u2, n, t, b);
-        sample.wi = diy::reflect(wo * -1.0f, h);
+        render::Direction h = sampleGGXVNDF(wo, roughness, u1 / specProb, u2, n, t, b);
+        sample.wi = render::reflect(-wo, h.as_normal());
         
-        float NdotL = diy::dot(n, sample.wi).numerical_value_in(mp_units::one);
+        float NdotL = render::dot(n.vec(), sample.wi.vec());
         if (NdotL <= 0.0f) {
-            sample.pdf = diy::units::PdfSolidAngle::zero();
-            sample.f = diy::BSDF3(0, 0, 0);
+            sample.pdf = render::PdfW::zero();
+            sample.f = render::zero_bsdf_rgb();
             return sample;
         }
         
@@ -263,7 +264,7 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const diy::Direction3& w
         float pdfSpec = pdfGGXVNDF(wo, h, roughness, n);
         float pdfDiff = pdfCosineHemisphere(NdotL);
         float pdf_raw = (specProb * pdfSpec + (1.0f - specProb) * pdfDiff) * (1.0f - mat.transmission);
-        sample.pdf = pdf_raw * diy::units::per_steradian;
+        sample.pdf = pdf_raw * render::per_sr;
         
         sample.useWeight = false;
         sample.isDelta = false;
@@ -273,20 +274,21 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const diy::Direction3& w
         float u1Adj = (u1 - specProb) / (1.0f - specProb);
         sample.wi = sampleCosineHemisphere(u1Adj, u2, n);
         
-        float NdotL = diy::dot(n, sample.wi).numerical_value_in(mp_units::one);
+        float NdotL = render::dot(n.vec(), sample.wi.vec());
         if (NdotL <= 0.0f) {
-            sample.pdf = diy::units::PdfSolidAngle::zero();
-            sample.f = diy::BSDF3(0, 0, 0);
+            sample.pdf = render::PdfW::zero();
+            sample.f = render::zero_bsdf_rgb();
             return sample;
         }
         
         sample.f = evalBSDF(mat, wo, sample.wi, n);
         
-        diy::Direction3 h = diy::normalize(wo + sample.wi);
+        auto h_vec = render::normalize(wo.vec() + sample.wi.vec());
+        auto h = render::make_direction_or_default(h_vec);
         float pdfSpec = pdfGGXVNDF(wo, h, roughness, n);
         float pdfDiff = pdfCosineHemisphere(NdotL);
         float pdf_raw = (specProb * pdfSpec + (1.0f - specProb) * pdfDiff) * (1.0f - mat.transmission);
-        sample.pdf = pdf_raw * diy::units::per_steradian;
+        sample.pdf = pdf_raw * render::per_sr;
         
         sample.useWeight = false;
         sample.isDelta = false;
@@ -301,15 +303,12 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const diy::Direction3& w
 /**
  * Get PDF for a given direction [1/sr]
  */
-inline diy::units::PdfSolidAngle pdfBSDF(const MaterialParams& mat, 
-                                         const diy::Direction3& wo, 
-                                         const diy::Direction3& wi, 
-                                         const diy::Direction3& n) {
-    using namespace mp_units;
-    using namespace mp_units::si;
-    
-    float NdotL = diy::dot(n, wi).numerical_value_in(one);
-    if (NdotL <= 0.0f) return diy::units::PdfSolidAngle::zero();
+inline render::PdfW pdfBSDF(const MaterialParams& mat, 
+                            const render::Direction& wo, 
+                            const render::Direction& wi, 
+                            const render::Direction& n) {
+    float NdotL = render::dot(n.vec(), wi.vec());
+    if (NdotL <= 0.0f) return render::PdfW::zero();
     
     float specProb;
     if (mat.metallic > 0.99f) {
@@ -321,11 +320,12 @@ inline diy::units::PdfSolidAngle pdfBSDF(const MaterialParams& mat,
     
     float roughness = std::max(mat.roughness, MIN_ROUGHNESS);
     
-    diy::Direction3 h = diy::normalize(wo + wi);
+    auto h_vec = render::normalize(wo.vec() + wi.vec());
+    auto h = render::make_direction_or_default(h_vec);
     
     float pdfSpec = pdfGGXVNDF(wo, h, roughness, n);
     float pdfDiff = pdfCosineHemisphere(NdotL);
     
     float pdf_raw = (specProb * pdfSpec + (1.0f - specProb) * pdfDiff) * (1.0f - mat.transmission);
-    return pdf_raw * diy::units::per_steradian;
+    return pdf_raw * render::per_sr;
 }

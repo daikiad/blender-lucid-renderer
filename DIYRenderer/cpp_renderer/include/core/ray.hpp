@@ -2,35 +2,34 @@
  * ray.hpp - Ray and Camera Structures (Unit-Safe)
  * ================================================
  * 
- * Core ray tracing structures using mp-units:
- * - Ray: Origin (Position3) and direction (Direction3)
+ * Core ray tracing structures using render:: namespace types:
+ * - Ray: Origin (Position) and direction (Direction)
  * - Camera: Rendering camera parameters
  * 
  * Type-safe units prevent mixing positions and directions.
  */
 
 #pragma once
-#include "../math/vec3_unit.hpp"
-#include "../units/units.hpp"
+#include "../units/render_units.hpp"
 #include <cmath>
 #include <algorithm>
 
 /**
  * Ray - Ray for ray tracing (unit-safe)
  * 
- * Origin is Position3 [m], direction is Direction3 (dimensionless normalized).
+ * Origin is Position [m], direction is Direction (normalized).
  */
 struct Ray {
-    diy::Position3 origin;      // Origin [m]
-    diy::Direction3 direction;  // Direction (normalized, dimensionless)
+    render::Position origin;      // Origin [m]
+    render::Direction direction;  // Direction (normalized)
     
-    Ray() : origin(), direction(0, 0, 1) {}
+    Ray() : origin(render::make_position(0.0f, 0.0f, 0.0f)), direction() {}
     
-    Ray(const diy::Position3& orig, const diy::Direction3& dir) 
+    Ray(const render::Position& orig, const render::Direction& dir) 
         : origin(orig), direction(dir) {}
     
     // Point along ray at distance t
-    diy::Position3 at(diy::units::Distance t) const {
+    render::Position at(render::Length t) const {
         return origin + direction * t;
     }
 };
@@ -39,21 +38,22 @@ struct Ray {
  * Camera - Rendering camera parameters (unit-safe)
  */
 struct Camera {
-    diy::Position3 pos;         // Camera position [m]
-    diy::Direction3 dir;        // View direction (normalized)
-    diy::Direction3 up;         // Up vector (normalized)
-    diy::Direction3 right;      // Right vector (derived)
-    diy::Direction3 forward;    // Forward vector (same as dir)
+    render::Position pos;         // Camera position [m]
+    render::Direction dir;        // View direction (normalized)
+    render::Direction up;         // Up vector (normalized)
+    render::Direction right;      // Right vector (derived)
+    render::Direction forward;    // Forward vector (same as dir)
     
-    diy::units::Angle fov;      // Field of view [rad]
-    float aspect;               // Aspect ratio (dimensionless)
+    render::Angle fov;            // Field of view [rad]
+    float aspect;                 // Aspect ratio (dimensionless)
     
     Camera() 
-        : fov(diy::units::degrees(60.0f))
+        : pos(render::make_position(0.0f, 0.0f, 0.0f))
+        , fov(render::degrees(60.0f))
         , aspect(1.0f) {}
     
     float fovRad() const {
-        return diy::units::to_radians(fov);
+        return fov.numerical_value_in(mp_units::si::radian);
     }
     
     float halfTanFov() const {

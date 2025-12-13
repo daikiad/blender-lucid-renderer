@@ -9,7 +9,7 @@
  */
 
 #pragma once
-#include "vec3_unit.hpp"
+#include "../units/render_units.hpp"
 #include <cstdint>
 #include <cmath>
 
@@ -119,23 +119,31 @@ inline float randf() {
 // ========== Sampling Utilities ==========
 
 // Generate random point inside unit sphere (rejection sampling)
-inline diy::Direction3 randomInUnitSphere() {
+inline render::Direction randomInUnitSphere() {
     while(true) {
-        diy::Direction3 p(randf()*2.0f-1.0f, randf()*2.0f-1.0f, randf()*2.0f-1.0f);
-        if(p.length().numerical_value_in(mp_units::one) < 1.0f) return p;
+        render::Vec3f p(randf()*2.0f-1.0f, randf()*2.0f-1.0f, randf()*2.0f-1.0f);
+        if(p.length_squared() < 1.0f) return render::make_direction_or_default(p);
     }
 }
 
 // Generate random unit vector (uniform on sphere)
-inline diy::Direction3 randomUnitVector() { 
-    return randomInUnitSphere().normalized(); 
+inline render::Direction randomUnitVector() { 
+    // Generate using spherical coordinates for uniform distribution
+    float u1 = randf();
+    float u2 = randf();
+    float z = 1.0f - 2.0f * u1;
+    float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+    float phi = 2.0f * 3.14159265358979f * u2;
+    return render::direction_from_unit_vector(render::Vec3f{r * std::cos(phi), r * std::sin(phi), z});
 }
 
 // Generate random direction in hemisphere around normal (cosine-weighted)
 // This is importance sampling for Lambertian BRDF
 // PDF = cos(theta) / PI
-inline diy::Direction3 randomCosineDirection(const diy::Direction3 &normal) {
-    diy::Direction3 random_on_sphere = randomUnitVector();
-    diy::Direction3 result = normal + random_on_sphere;
-    return result.normalized();
+inline render::Direction randomCosineDirection(const render::Normal &normal) {
+    render::Direction random_on_sphere = randomUnitVector();
+    render::Vec3f result = normal.vec() + random_on_sphere.vec();
+    auto dir = render::make_direction(result);
+    // Fallback to normal if result is degenerate
+    return dir.value_or(normal.as_direction());
 }

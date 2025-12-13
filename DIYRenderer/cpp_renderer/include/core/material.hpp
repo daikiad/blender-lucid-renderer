@@ -10,18 +10,16 @@
  * - Material: Physical material properties
  * - Hit: Ray-surface intersection result
  * 
- * Physical Units:
- * - albedo: Color3 (dimensionless reflectance [0,1])
- * - emission: Radiance3 [W/(sr·m²)]
- * - Hit.point: Position3 [m]
- * - Hit.normal: Direction3 (dimensionless)
- * - Hit.t: Distance [m]
+ * Physical Units (using render:: namespace):
+ * - albedo: ColorRGB (dimensionless reflectance [0,1])
+ * - emission: RadianceRGB [W/(sr·m²)]
+ * - Hit.point: Position [m]
+ * - Hit.normal: Normal (normalized surface normal)
+ * - Hit.t: Length [m]
  */
 
 #pragma once
-#include "../math/vec3_unit.hpp"
-#include "../math/vec2.hpp"
-#include "../units/units.hpp"
+#include "../units/render_units.hpp"
 #include <vector>
 #include <string>
 
@@ -39,8 +37,8 @@ struct SocketValue {
     enum Type { FLOAT, VEC3, VEC4, STRING, BOOL, NONE };
     Type type;
     float f;                      // For FLOAT - single scalar value
-    diy::Direction3 v3;           // For VEC3 - 3D vector (normals, positions)
-    diy::Vec3U<mp_units::one> v4;               // For VEC4 - RGB component (colors with alpha)
+    render::Vec3f v3;             // For VEC3 - 3D vector (normals, positions)
+    render::ColorRGB v4;          // For VEC4 - RGB component (colors with alpha)
     float v4_w;                   // For VEC4 - Alpha component
     std::string s;                // For STRING - texture paths, etc.
     bool b;                       // For BOOL - boolean switches
@@ -57,14 +55,14 @@ struct SocketValue {
     static SocketValue makeVec3(float x, float y, float z) { 
         SocketValue sv; 
         sv.type = VEC3; 
-        sv.v3 = diy::Direction3(x, y, z); 
+        sv.v3 = render::Vec3f(x, y, z); 
         return sv; 
     }
     
     static SocketValue makeVec4(float x, float y, float z, float w) { 
         SocketValue sv; 
         sv.type = VEC4; 
-        sv.v4 = diy::Vec3U<mp_units::one>(x, y, z); 
+        sv.v4 = render::ColorRGB(x, y, z); 
         sv.v4_w = w; 
         return sv; 
     }
@@ -135,12 +133,12 @@ struct NodeTree {
  * Material - Physical material properties for PBR rendering (unit-safe)
  */
 struct Material {
-    diy::Vec3U<mp_units::one> albedo;         // Base color (dimensionless [0,1])
-    float metallic;             // Metallic factor (dimensionless, 0-1)
-    float roughness;            // Surface roughness (dimensionless, 0-1)
-    diy::Radiance3 emission;    // Emission [W/(sr·m²)]
-    float transmission;         // Glass/transparency (dimensionless, 0-1)
-    float ior;                  // Index of Refraction (dimensionless)
+    render::ColorRGB albedo;      // Base color (dimensionless [0,1])
+    float metallic;               // Metallic factor (dimensionless, 0-1)
+    float roughness;              // Surface roughness (dimensionless, 0-1)
+    render::RadianceRGB emission; // Emission [W/(sr·m²)]
+    float transmission;           // Glass/transparency (dimensionless, 0-1)
+    float ior;                    // Index of Refraction (dimensionless)
     
     NodeTree nodeTree;
     bool useNodes;
@@ -149,17 +147,17 @@ struct Material {
         : albedo(0.8f, 0.8f, 0.8f)
         , metallic(0.0f)
         , roughness(0.5f)
-        , emission(0.0f, 0.0f, 0.0f)
+        , emission()
         , transmission(0.0f)
         , ior(1.45f)
         , useNodes(false) {}
     
-    Material(const diy::Vec3U<mp_units::one>& a, float m, float r) 
+    Material(const render::ColorRGB& a, float m, float r) 
         : albedo(a), metallic(m), roughness(r)
-        , emission(0.0f, 0.0f, 0.0f)
+        , emission()
         , transmission(0.0f), ior(1.45f), useNodes(false) {}
     
-    Material(const diy::Vec3U<mp_units::one>& a, float m, float r, const diy::Radiance3& e) 
+    Material(const render::ColorRGB& a, float m, float r, const render::RadianceRGB& e) 
         : albedo(a), metallic(m), roughness(r)
         , emission(e)
         , transmission(0.0f), ior(1.45f), useNodes(false) {}
@@ -171,16 +169,16 @@ struct Material {
  * Hit - Ray-surface intersection result (fully typed)
  * 
  * All spatial values use typed units:
- * - t: Distance [m] - ray parameter
- * - point: Position3 [m] - intersection point
- * - normal: Direction3 (dimensionless) - surface normal
+ * - t: Length [m] - ray parameter
+ * - point: Position [m] - intersection point
+ * - normal: Normal - surface normal
  */
 struct Hit {
     bool hit;
-    diy::units::Distance t;     // Ray parameter [m]
-    diy::Position3 point;       // Intersection point [m]
-    diy::Direction3 normal;     // Surface normal (normalized)
-    Vec2 uv;                    // Texture coordinates (dimensionless)
+    render::Length t;             // Ray parameter [m]
+    render::Position point;       // Intersection point [m]
+    render::Normal normal;        // Surface normal
+    render::Vec2f uv;             // Texture coordinates (dimensionless)
     bool hasUV;
     Material material;
     int meshIdx;
@@ -189,26 +187,25 @@ struct Hit {
     Hit() 
         : hit(false)
         , t(1e30f * mp_units::si::metre)
+        , point(render::make_position(0.0f, 0.0f, 0.0f))
         , hasUV(false)
         , meshIdx(-1)
         , triIdx(-1) {}
     
     // Type accessors (primary interface)
-    diy::units::Distance distance() const { return t; }
-    const diy::Position3& position() const { return point; }
-    const diy::Direction3& surfaceNormal() const { return normal; }
+    render::Length distance() const { return t; }
+    const render::Position& position() const { return point; }
+    const render::Normal& surfaceNormal() const { return normal; }
     
     // Internal geometry access (for intersection calculations)
-    float t_meters() const { return diy::units::to_meters(t); }
-    float point_x() const { return point.x_raw(); }
-    float point_y() const { return point.y_raw(); }
-    float point_z() const { return point.z_raw(); }
-    float normal_x() const { return normal.x_raw(); }
-    float normal_y() const { return normal.y_raw(); }
-    float normal_z() const { return normal.z_raw(); }
+    float t_meters() const { return t.numerical_value_in(mp_units::si::metre); }
+    render::Vec3f point_vec() const { return render::displacement_from_origin(point).numerical_value_in(render::si::metre); }
+    float normal_x() const { return normal.x(); }
+    float normal_y() const { return normal.y(); }
+    float normal_z() const { return normal.z(); }
     
     // Setters for internal use (from geometry code)
-    void setFromTyped(diy::units::Distance t_typed, const diy::Position3& p, const diy::Direction3& n) {
+    void setFromTyped(render::Length t_typed, const render::Position& p, const render::Normal& n) {
         t = t_typed;
         point = p;
         normal = n;

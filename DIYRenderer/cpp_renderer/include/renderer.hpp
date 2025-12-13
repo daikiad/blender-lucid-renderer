@@ -6,13 +6,13 @@
  * modular components of the renderer.
  * 
  * New code should include specific headers:
- * - math/vec3_unit.hpp, math/random.hpp
+ * - math/random.hpp
  * - core/ray.hpp, core/material.hpp, core/scene.hpp
  * - geometry/intersection.hpp, geometry/bvh.hpp
  * - bsdf/fresnel.hpp, bsdf/ggx.hpp, bsdf/bsdf.hpp
  * - light/light.hpp, light/scene_lights.hpp
  * - integrator/path_tracer.hpp
- * - units/units.hpp (for type-safe physical quantities)
+ * - units/render_units.hpp (for type-safe physical quantities)
  * 
  * Physical Units Reference:
  * - Position, distance: [m] (meters)
@@ -29,11 +29,9 @@
 #pragma once
 
 // Physical units (include first for type definitions)
-#include "units/units.hpp"
+#include "units/render_units.hpp"
 
 // Math utilities
-#include "math/vec3_unit.hpp"
-#include "math/vec2.hpp"
 #include "math/random.hpp"
 
 // Core structures
@@ -46,49 +44,45 @@
 #include "geometry/bvh.hpp"
 
 // Node evaluator forward declarations (implemented in node_evaluator.cpp)
-diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::string &socketName, const Vec2 &uv);
-diy::Vec3U<mp_units::one> getAlbedoFromNodeTree(const NodeTree &tree, const Vec2 &uv);
-diy::Vec3U<mp_units::one> getEmissionFromNodeTree(const NodeTree &tree, const Vec2 &uv);
-float getTransmissionFromNodeTree(const NodeTree &tree, const Vec2 &uv);
-float getIORFromNodeTree(const NodeTree &tree, const Vec2 &uv);
-float getMetallicFromNodeTree(const NodeTree &tree, const Vec2 &uv);
-float getRoughnessFromNodeTree(const NodeTree &tree, const Vec2 &uv);
+render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::string &socketName, const render::Vec2f &uv);
+render::ColorRGB getAlbedoFromNodeTree(const NodeTree &tree, const render::Vec2f &uv);
+render::ColorRGB getEmissionFromNodeTree(const NodeTree &tree, const render::Vec2f &uv);
+float getTransmissionFromNodeTree(const NodeTree &tree, const render::Vec2f &uv);
+float getIORFromNodeTree(const NodeTree &tree, const render::Vec2f &uv);
+float getMetallicFromNodeTree(const NodeTree &tree, const render::Vec2f &uv);
+float getRoughnessFromNodeTree(const NodeTree &tree, const render::Vec2f &uv);
 
 // ========== Debug Rendering Functions ==========
 
 // Debug mode: return normal as color
-inline diy::Vec3U<mp_units::one> traceNormal(const Scene &scene, const Ray &ray, bool useAABB = true) {
-    Hit hit = intersectScene(scene, ray, 0.0f, geometry::RAY_T_MAX, useAABB);
+inline render::ColorRGB traceNormal(const Scene &scene, const Ray &ray, bool useAABB = true) {
+    Hit hit = intersectScene(scene, ray, render::metres(0.0f), geometry::RAY_T_MAX_TYPED, useAABB);
     if (hit.hit) {
-        return diy::Vec3U<mp_units::one>(hit.normal.x_raw(), hit.normal.y_raw(), hit.normal.z_raw());
+        return render::ColorRGB(hit.normal.vec().x, hit.normal.vec().y, hit.normal.vec().z);
     }
-    return diy::Vec3U<mp_units::one>(0, 0, 0);
+    return render::ColorRGB(0, 0, 0);
 }
 
 // Debug mode: return albedo from material
-inline diy::Vec3U<mp_units::one> traceAlbedo(const Scene &scene, const Ray &ray, bool useAABB = true) {
-    Hit hit = intersectScene(scene, ray, 0.0f, geometry::RAY_T_MAX, useAABB);
+inline render::ColorRGB traceAlbedo(const Scene &scene, const Ray &ray, bool useAABB = true) {
+    Hit hit = intersectScene(scene, ray, render::metres(0.0f), geometry::RAY_T_MAX_TYPED, useAABB);
     if (hit.hit) {
         if (hit.material.useNodes && hit.material.nodeTree.valid) {
             return getAlbedoFromNodeTree(hit.material.nodeTree, hit.uv);
         }
         return hit.material.albedo;
     }
-    return diy::Vec3U<mp_units::one>(0, 0, 0);
+    return render::ColorRGB(0, 0, 0);
 }
 
 // Debug mode: return emission from material
-inline diy::Vec3U<mp_units::one> traceEmission(const Scene &scene, const Ray &ray, bool useAABB = true) {
-    Hit hit = intersectScene(scene, ray, 0.0f, geometry::RAY_T_MAX, useAABB);
+inline render::ColorRGB traceEmission(const Scene &scene, const Ray &ray, bool useAABB = true) {
+    Hit hit = intersectScene(scene, ray, render::metres(0.0f), geometry::RAY_T_MAX_TYPED, useAABB);
     if (hit.hit) {
         if (hit.material.useNodes && hit.material.nodeTree.valid) {
             return getEmissionFromNodeTree(hit.material.nodeTree, hit.uv);
         }
-        return diy::Vec3U<mp_units::one>(
-            diy::units::to_radiance(hit.material.emission.x),
-            diy::units::to_radiance(hit.material.emission.y),
-            diy::units::to_radiance(hit.material.emission.z)
-        );
+        return render::to_color(hit.material.emission);
     }
-    return diy::Vec3U<mp_units::one>(0, 0, 0);
+    return render::ColorRGB(0, 0, 0);
 }

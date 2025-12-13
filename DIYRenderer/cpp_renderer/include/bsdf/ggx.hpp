@@ -9,8 +9,7 @@
  */
 
 #pragma once
-#include "../math/vec3_unit.hpp"
-#include "../units/units.hpp"
+#include "../units/render_units.hpp"
 #include <cmath>
 #include <algorithm>
 #include <numbers>
@@ -24,15 +23,6 @@ constexpr float GGX_EPSILON = 1e-6f;
 // Minimum roughness to avoid delta distributions (dimensionless: 0-1)
 constexpr float MIN_ROUGHNESS = 0.01f;
 
-// Unit-typed angle constants (for documentation/reference)
-// Note: Most BSDF calculations use cosines, which are dimensionless
-namespace ggx_units {
-    using namespace diy::units;
-    inline constexpr auto pi_rad = diy::units::pi_rad;           // π radians
-    inline constexpr auto two_pi_rad = diy::units::two_pi_rad;   // 2π radians
-    inline constexpr auto hemisphere = diy::units::hemisphere_sr; // 2π steradians
-}
-
 // ========== Utility Functions ==========
 
 inline float ggx_sqr(float x) { return x * x; }
@@ -40,36 +30,36 @@ inline float ggx_sqr(float x) { return x * x; }
 inline float ggx_safe_sqrt(float x) { return std::sqrt(std::max(0.0f, x)); }
 
 // Build orthonormal basis from normal (Duff et al. 2017)
-inline void buildOrthonormalBasis(const diy::Direction3& n, diy::Direction3& tangent, diy::Direction3& bitangent) {
-    if (n.z_raw() < -0.9999f) {
-        tangent = diy::Direction3(0.0f, -1.0f, 0.0f);
-        bitangent = diy::Direction3(-1.0f, 0.0f, 0.0f);
+inline void buildOrthonormalBasis(const render::Direction& n, render::Direction& tangent, render::Direction& bitangent) {
+    if (n.z() < -0.9999f) {
+        tangent = render::direction_from_unit_vector(render::Vec3f(0.0f, -1.0f, 0.0f));
+        bitangent = render::direction_from_unit_vector(render::Vec3f(-1.0f, 0.0f, 0.0f));
         return;
     }
-    float a = 1.0f / (1.0f + n.z_raw());
-    float b = -n.x_raw() * n.y_raw() * a;
-    tangent = diy::Direction3(1.0f - n.x_raw() * n.x_raw() * a, b, -n.x_raw());
-    bitangent = diy::Direction3(b, 1.0f - n.y_raw() * n.y_raw() * a, -n.y_raw());
+    float a = 1.0f / (1.0f + n.z());
+    float b = -n.x() * n.y() * a;
+    tangent = render::make_direction_or_default(render::Vec3f(1.0f - n.x() * n.x() * a, b, -n.x()));
+    bitangent = render::make_direction_or_default(render::Vec3f(b, 1.0f - n.y() * n.y() * a, -n.y()));
 }
 
 // Transform direction from local space (z-up) to world space
-inline diy::Direction3 localToWorld(const diy::Direction3& local, const diy::Direction3& n, 
-                                     const diy::Direction3& t, const diy::Direction3& b) {
-    return diy::Direction3(
-        t.x_raw() * local.x_raw() + b.x_raw() * local.y_raw() + n.x_raw() * local.z_raw(),
-        t.y_raw() * local.x_raw() + b.y_raw() * local.y_raw() + n.y_raw() * local.z_raw(),
-        t.z_raw() * local.x_raw() + b.z_raw() * local.y_raw() + n.z_raw() * local.z_raw()
-    );
+inline render::Direction localToWorld(const render::Direction& local, const render::Direction& n, 
+                                       const render::Direction& t, const render::Direction& b) {
+    return render::make_direction_or_default(render::Vec3f(
+        t.x() * local.x() + b.x() * local.y() + n.x() * local.z(),
+        t.y() * local.x() + b.y() * local.y() + n.y() * local.z(),
+        t.z() * local.x() + b.z() * local.y() + n.z() * local.z()
+    ));
 }
 
 // Transform direction from world space to local space (z-up)
-inline diy::Direction3 worldToLocal(const diy::Direction3& world, const diy::Direction3& n, 
-                                     const diy::Direction3& t, const diy::Direction3& b) {
-    return diy::Direction3(
-        diy::dot(world, t).numerical_value_in(mp_units::one),
-        diy::dot(world, b).numerical_value_in(mp_units::one),
-        diy::dot(world, n).numerical_value_in(mp_units::one)
-    );
+inline render::Direction worldToLocal(const render::Direction& world, const render::Direction& n, 
+                                       const render::Direction& t, const render::Direction& b) {
+    return render::make_direction_or_default(render::Vec3f(
+        render::dot(world.vec(), t.vec()),
+        render::dot(world.vec(), b.vec()),
+        render::dot(world.vec(), n.vec())
+    ));
 }
 
 // ========== GGX Normal Distribution Function ==========
@@ -121,36 +111,41 @@ inline float ggxG2(float NdotL, float NdotV, float roughness) {
  * Sample GGX microfacet normal using VNDF
  * Returns half-vector in world space
  */
-inline diy::Direction3 sampleGGXVNDF(const diy::Direction3& wo, float roughness, float u1, float u2, 
-                                      const diy::Direction3& n, const diy::Direction3& t, const diy::Direction3& b) {
+inline render::Direction sampleGGXVNDF(const render::Direction& wo, float roughness, float u1, float u2, 
+                                        const render::Direction& n, const render::Direction& t, const render::Direction& b) {
     // Transform wo to local space
-    diy::Direction3 woLocal = worldToLocal(wo, n, t, b);
+    render::Direction woLocal = worldToLocal(wo, n, t, b);
     
     // Stretch wo by alpha
     float alpha = roughness * roughness;
-    diy::Direction3 woStretched(woLocal.x_raw() * alpha, woLocal.y_raw() * alpha, woLocal.z_raw());
-    woStretched.normalize();
+    auto woStretchedVec = render::Vec3f(woLocal.x() * alpha, woLocal.y() * alpha, woLocal.z());
+    render::Direction woStretched = render::make_direction_or_default(woStretchedVec);
     
     // Build orthonormal basis around stretched wo
-    diy::Direction3 t1 = (woStretched.z_raw() < 0.9999f) ? 
-        diy::cross(diy::Direction3(0, 0, 1), woStretched) : diy::Direction3(1, 0, 0);
-    t1.normalize();
-    diy::Direction3 t2 = diy::cross(woStretched, t1);
+    render::Direction t1;
+    if (woStretched.z() < 0.9999f) {
+        auto cross_opt = render::make_direction(render::cross(render::Vec3f(0, 0, 1), woStretched.vec()));
+        t1 = cross_opt ? *cross_opt : render::direction_from_unit_vector(render::Vec3f(1, 0, 0));
+    } else {
+        t1 = render::direction_from_unit_vector(render::Vec3f(1, 0, 0));
+    }
+    auto t2_opt = woStretched.cross(t1);
+    render::Direction t2 = t2_opt ? *t2_opt : render::direction_from_unit_vector(render::Vec3f(0, 1, 0));
     
     // Sample point on disk
     float r = std::sqrt(u1);
     float phi = 2.0f * GGX_PI * u2;
     float p1 = r * std::cos(phi);
     float p2 = r * std::sin(phi);
-    float s = 0.5f * (1.0f + woStretched.z_raw());
+    float s = 0.5f * (1.0f + woStretched.z());
     p2 = (1.0f - s) * std::sqrt(1.0f - p1 * p1) + s * p2;
     
     // Compute half-vector
-    diy::Direction3 hLocal = t1 * p1 + t2 * p2 + woStretched * std::sqrt(std::max(0.0f, 1.0f - p1*p1 - p2*p2));
+    render::Vec3f hLocalVec = t1.vec() * p1 + t2.vec() * p2 + woStretched.vec() * std::sqrt(std::max(0.0f, 1.0f - p1*p1 - p2*p2));
     
     // Unstretch
-    hLocal = diy::Direction3(hLocal.x_raw() * alpha, hLocal.y_raw() * alpha, std::max(0.0f, hLocal.z_raw()));
-    hLocal.normalize();
+    hLocalVec = render::Vec3f(hLocalVec.x * alpha, hLocalVec.y * alpha, std::max(0.0f, hLocalVec.z));
+    render::Direction hLocal = render::make_direction_or_default(hLocalVec);
     
     // Transform back to world space
     return localToWorld(hLocal, n, t, b);
@@ -159,10 +154,10 @@ inline diy::Direction3 sampleGGXVNDF(const diy::Direction3& wo, float roughness,
 /**
  * PDF for GGX VNDF sampling
  */
-inline float pdfGGXVNDF(const diy::Direction3& wo, const diy::Direction3& h, float roughness, const diy::Direction3& n) {
-    float NdotH = diy::dot(n, h).numerical_value_in(mp_units::one);
-    float VdotH = diy::dot(wo, h).numerical_value_in(mp_units::one);
-    float NdotV = diy::dot(n, wo).numerical_value_in(mp_units::one);
+inline float pdfGGXVNDF(const render::Direction& wo, const render::Direction& h, float roughness, const render::Direction& n) {
+    float NdotH = render::dot(n.vec(), h.vec());
+    float VdotH = render::dot(wo.vec(), h.vec());
+    float NdotV = render::dot(n.vec(), wo.vec());
     if (NdotH <= 0.0f || VdotH <= 0.0f || NdotV <= 0.0f) return 0.0f;
     
     float D = ggxD(NdotH, roughness);
@@ -177,17 +172,17 @@ inline float pdfGGXVNDF(const diy::Direction3& wo, const diy::Direction3& h, flo
  * Sample direction with cosine-weighted distribution
  * PDF = cos(θ) / π
  */
-inline diy::Direction3 sampleCosineHemisphere(float u1, float u2, const diy::Direction3& n) {
+inline render::Direction sampleCosineHemisphere(float u1, float u2, const render::Direction& n) {
     float r = std::sqrt(u1);
     float theta = 2.0f * GGX_PI * u2;
     float x = r * std::cos(theta);
     float y = r * std::sin(theta);
     float z = std::sqrt(std::max(0.0f, 1.0f - u1));
     
-    diy::Direction3 t, b;
+    render::Direction t, b;
     buildOrthonormalBasis(n, t, b);
     
-    return localToWorld(diy::Direction3(x, y, z), n, t, b);
+    return localToWorld(render::direction_from_unit_vector(render::Vec3f(x, y, z)), n, t, b);
 }
 
 inline float pdfCosineHemisphere(float NdotL) {

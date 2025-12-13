@@ -18,43 +18,22 @@
 #pragma once
 #include "../core/scene.hpp"
 #include "../geometry/intersection.hpp"
-#include "../units/units.hpp"
+#include "../units/render_units.hpp"
 #include "light.hpp"
 #include <vector>
 #include <algorithm>
 
 // Forward declaration for node evaluator
-diy::Vec3U<mp_units::one> getEmissionFromNodeTree(const NodeTree& tree, const Vec2& uv);
+render::ColorRGB getEmissionFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
 
 // ========== MIS Weight Functions ==========
-
-/**
- * Power heuristic with β = 2
- * w = pf² / (pf² + pg²)
- * 
- * @param pf PDF of sampling strategy f [1/sr]
- * @param pg PDF of sampling strategy g [1/sr]
- * @return MIS weight (dimensionless, [0,1])
- */
-inline float powerHeuristic(float pf, float pg) {
-    float f2 = pf * pf;
-    float g2 = pg * pg;
-    return f2 / (f2 + g2 + 1e-6f);
-}
-
-/**
- * Balance heuristic
- * w = pf / (pf + pg)
- * 
- * @param pf PDF of sampling strategy f [1/sr]
- * @param pg PDF of sampling strategy g [1/sr]
- * @return MIS weight (dimensionless, [0,1])
- */
-inline float balanceHeuristic(float pf, float pg) {
-    return pf / (pf + pg + 1e-6f);
-}
+// NOTE: Use render::mis_power_heuristic(PdfW, PdfW) from render_units.hpp for typed MIS.
+// The typed version provides compile-time unit safety.
 
 // ========== Scene Lights Collection ==========
+
+// Use render::displacement_from_origin from render_units.hpp for low-level geometry
+using render::displacement_from_origin;
 
 /**
  * SceneLights - Collection of all light sources for importance sampling
@@ -67,30 +46,25 @@ struct SceneLights {
     std::vector<float> cdf;                   // CDF for importance sampling (dimensionless)
     
     // Unit-typed properties
-    diy::units::Area totalEmissiveArea{0.0f * diy::units::square_metre};  // [m²]
+    render::Area totalEmissiveArea{0.0f * mp_units::square(mp_units::si::metre)};  // [m²]
     
     SceneLights() {}
     
     void buildFromScene(const Scene& scene) {
         lights.clear();
-        totalEmissiveArea = 0.0f * diy::units::square_metre;
-        float totalAreaAccum = 0.0f;  // Local accumulator
+        totalEmissiveArea = 0.0f * mp_units::square(mp_units::si::metre);
         
         // Add emissive mesh triangles
         for (size_t mi = 0; mi < scene.meshes.size(); ++mi) {
             const Mesh& mesh = scene.meshes[mi];
             
             // Check if mesh has emission
-            diy::Vec3U<mp_units::one> emission(
-                diy::units::to_radiance(mesh.material.emission.x),
-                diy::units::to_radiance(mesh.material.emission.y),
-                diy::units::to_radiance(mesh.material.emission.z)
-            );
+            render::ColorRGB emission = render::to_color(mesh.material.emission);
             if (mesh.material.useNodes && mesh.material.nodeTree.valid) {
-                emission = getEmissionFromNodeTree(mesh.material.nodeTree, Vec2(0.0f, 0.0f));
+                emission = getEmissionFromNodeTree(mesh.material.nodeTree, render::Vec2f(0.0f, 0.0f));
             }
             
-            float emissionStrength = emission.x_raw() + emission.y_raw() + emission.z_raw();
+            float emissionStrength = emission.r + emission.g + emission.b;
             if (emissionStrength < 1e-6f) continue;
             
             // Add each triangle as a light
@@ -102,15 +76,19 @@ struct SceneLights {
                 light.v1 = mesh.vertices[tri.i1];
                 light.v2 = mesh.vertices[tri.i2];
                 light.normal = tri.faceNormal;
-                light.emission = diy::Radiance3(emission.x_raw(), emission.y_raw(), emission.z_raw());
+                light.emission = render::make_radiance_rgb(emission.r, emission.g, emission.b);
                 light.area = triangleArea(light.v0, light.v1, light.v2);
                 light.meshIndex = (int)mi;
                 light.triangleIndex = (int)ti;
-                light.position = (light.v0 + light.v1 + light.v2) / 3.0f;
+                // Compute centroid using typed arithmetic (Displacement - ISQ compliant!)
+                render::Displacement centroid_pv = (displacement_from_origin(light.v0) + 
+                                                       displacement_from_origin(light.v1) + 
+                                                       displacement_from_origin(light.v2)) / 3.0f;
+                light.position = render::world_origin + centroid_pv;
                 
-                if (diy::units::to_square_meters(light.area) > 1e-6f) {
+                if (light.area > render::MIN_AREA) {
                     lights.push_back(light);
-                    totalAreaAccum += diy::units::to_square_meters(light.area);
+                    totalEmissiveArea += light.area;
                 }
             }
         }
@@ -119,23 +97,20 @@ struct SceneLights {
         for (const Light& nativeLight : scene.nativeLights) {
             Light light = nativeLight;
             
-            if (diy::units::to_square_meters(light.area) < 1e-6f) {
-                light.area = 1.0f * diy::units::square_metre;  // Default for point-like lights
+            if (light.area < render::MIN_AREA) {
+                light.area = 1.0f * mp_units::square(mp_units::si::metre);  // Default for point-like lights
             }
             
             lights.push_back(light);
-            totalAreaAccum += diy::units::to_square_meters(light.area);
+            totalEmissiveArea += light.area;
         }
         
-        // Store total area
-        totalEmissiveArea = diy::units::square_meters(totalAreaAccum);
-        
-        // Build CDF for light selection
+        // Build CDF for light selection (dimensionless ratios)
         cdf.resize(lights.size());
-        float cumulative = 0.0f;
+        render::Area cumulative = 0.0f * mp_units::square(mp_units::si::metre);
         for (size_t i = 0; i < lights.size(); ++i) {
-            cumulative += diy::units::to_square_meters(lights[i].area);
-            cdf[i] = (totalAreaAccum > 0.0f) ? (cumulative / totalAreaAccum) : 0.0f;
+            cumulative += lights[i].area;
+            cdf[i] = render::area_ratio(cumulative, totalEmissiveArea);
         }
     }
     
@@ -156,8 +131,7 @@ struct SceneLights {
         idx = std::min(idx, (int)lights.size() - 1);
         
         // Selection probability = area_i / total_area (dimensionless)
-        float totalArea = diy::units::to_square_meters(totalEmissiveArea);
-        selectionProb = (totalArea > 0.0f) ? diy::units::to_square_meters(lights[idx].area) / totalArea : 0.0f;
+        selectionProb = render::area_ratio(lights[idx].area, totalEmissiveArea);
         
         return idx;
     }
@@ -168,8 +142,7 @@ struct SceneLights {
      */
     float getPdfForLight(int lightIdx) const {
         if (lightIdx < 0 || lightIdx >= (int)lights.size()) return 0.0f;
-        float totalArea = diy::units::to_square_meters(totalEmissiveArea);
-        return (totalArea > 0.0f) ? diy::units::to_square_meters(lights[lightIdx].area) / totalArea : 0.0f;
+        return render::area_ratio(lights[lightIdx].area, totalEmissiveArea);
     }
     
     bool hasLights() const { return !lights.empty(); }
@@ -192,24 +165,20 @@ inline LightHit intersectNativeLights(const Scene& scene, const Ray& ray, int de
     
     for (size_t i = 0; i < scene.nativeLights.size(); ++i) {
         const Light& light = scene.nativeLights[i];
-        float t;
-        diy::Position3 hitPoint;
-        diy::Direction3 hitNormal;
+render::Length t_dist;
+        render::Position hitPoint;
+        render::Normal hitNormal;
         
         switch (light.type) {
             case LightType::POINT: {
-                if (diy::units::to_meters(light.radius) > 1e-6f) {
-                    float radius_raw = diy::units::to_meters(light.radius);
-                    if (geometry::intersectSphere(ray, light.position, radius_raw, t, hitNormal)) {
-                        if (t < diy::units::to_meters(result.t)) {
+                if (light.radius > render::MIN_LENGTH) {
+                    render::Normal temp_normal;
+                    if (geometry::intersectSphere(ray, light.position, light.radius, t_dist, temp_normal)) {
+                        if (t_dist < result.t) {
                             result.hit = true;
-                            result.t = t * mp_units::si::metre;
-                            result.point = diy::Position3(
-                                ray.origin.x_raw() + ray.direction.x_raw() * t,
-                                ray.origin.y_raw() + ray.direction.y_raw() * t,
-                                ray.origin.z_raw() + ray.direction.z_raw() * t
-                            );
-                            result.normal = hitNormal;
+                            result.t = t_dist;
+                            result.point = ray.at(t_dist);
+                            result.normal = temp_normal;
                             result.emission = light.emission;
                             result.lightIndex = (int)i;
                         }
@@ -220,26 +189,25 @@ inline LightHit intersectNativeLights(const Scene& scene, const Ray& ray, int de
             
             case LightType::AREA: {
                 bool hitLight = false;
-                float sizeX_raw = diy::units::to_meters(light.sizeX);
-                float sizeY_raw = diy::units::to_meters(light.sizeY);
                 
                 if (light.shape == AreaLightShape::DISK || light.shape == AreaLightShape::ELLIPSE) {
-                    float radiusX = sizeX_raw * 0.5f;
-                    float radiusY = sizeY_raw * 0.5f;
-                    hitLight = geometry::intersectEllipse(ray, light.position, light.normal, 
+                    // Ellipse radii = size / 2
+                    auto radiusX = light.sizeX * 0.5f;
+                    auto radiusY = light.sizeY * 0.5f;
+                    hitLight = geometry::intersectEllipse(ray, light.position, light.normal.as_direction(), 
                                                 light.right, light.up, 
-                                                radiusX, radiusY, t, hitPoint);
+                                                radiusX, radiusY, t_dist, hitPoint);
                 } else {
-                    hitLight = geometry::intersectRectangle(ray, light.position, light.normal, 
+                    hitLight = geometry::intersectRectangle(ray, light.position, light.normal.as_direction(), 
                                                   light.right, light.up, 
-                                                  sizeX_raw, sizeY_raw, t, hitPoint);
+                                                  light.sizeX, light.sizeY, t_dist, hitPoint);
                 }
                 
-                if (hitLight && t < diy::units::to_meters(result.t)) {
-                    float facing = diy::dot(light.normal, ray.direction).numerical_value_in(mp_units::one);
+                if (hitLight && t_dist < result.t) {
+                    float facing = render::dot(light.normal.vec(), ray.direction.vec());
                     if (facing < 0) {  // Front side
                         result.hit = true;
-                        result.t = t * mp_units::si::metre;
+                        result.t = t_dist;
                         result.point = hitPoint;
                         result.normal = light.normal;
                         result.emission = light.emission;

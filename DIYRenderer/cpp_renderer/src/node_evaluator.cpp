@@ -164,7 +164,7 @@ NodeTree parseNodeTree(const json &nodeTreeJson) {
  * 3. If connected: recursively evaluate the linked node
  * 4. If not connected: use the socket's default value
  */
-diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::string &socketName, const Vec2 &uv) {
+render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::string &socketName, const render::Vec2f &uv) {
     const MaterialNode *node = tree.findNode(nodeName);
     if(!node) {
         // Only warn once per missing node name to avoid log spam
@@ -173,7 +173,7 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
             warnedNodes.insert(nodeName);
             std::cerr << "[NodeEval] Node not found: " << nodeName << " (warning once)\n";
         }
-        return diy::Vec3U<mp_units::one>(0.8f, 0.8f, 0.8f);  // Default gray instead of magenta
+        return render::ColorRGB(0.8f, 0.8f, 0.8f);  // Default gray instead of magenta
     }
     
     // ===== Principled BSDF Node =====
@@ -190,16 +190,16 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
                     std::cerr << "[NodeEval]   is_linked=" << baseColorSocket->is_linked 
                               << " type=" << (int)baseColorSocket->default_value.type << "\n";
                     // Always print v3 values regardless of type check
-                    std::cerr << "[NodeEval]   v3 union contents=(" << baseColorSocket->default_value.v3.x_raw() 
-                              << "," << baseColorSocket->default_value.v3.y_raw() 
-                              << "," << baseColorSocket->default_value.v3.z_raw() << ")\n";
+                    std::cerr << "[NodeEval]   v3 union contents=(" << baseColorSocket->default_value.v3.x 
+                              << "," << baseColorSocket->default_value.v3.y 
+                              << "," << baseColorSocket->default_value.v3.z << ")\n";
                     std::cerr << "[NodeEval]   VEC3 enum=" << (int)SocketValue::VEC3 
                               << " VEC4 enum=" << (int)SocketValue::VEC4 << "\n";
                 }
             }
             
             if(!baseColorSocket) {
-                return diy::Vec3U<mp_units::one>(0.8f, 0.8f, 0.8f);  // Default gray
+                return render::ColorRGB(0.8f, 0.8f, 0.8f);  // Default gray
             }
             
             if(baseColorSocket->is_linked) {
@@ -210,11 +210,11 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
                 if(baseColorSocket->default_value.type == SocketValue::VEC4) {
                     return baseColorSocket->default_value.v4;  // VEC4 uses v4 field (already Color3)
                 } else if(baseColorSocket->default_value.type == SocketValue::VEC3) {
-                    return diy::Vec3U<mp_units::one>(baseColorSocket->default_value.v3.x_raw(),
-                                       baseColorSocket->default_value.v3.y_raw(),
-                                       baseColorSocket->default_value.v3.z_raw());
+                    return render::ColorRGB(baseColorSocket->default_value.v3.x,
+                                       baseColorSocket->default_value.v3.y,
+                                       baseColorSocket->default_value.v3.z);
                 }
-                return diy::Vec3U<mp_units::one>(0.8f, 0.8f, 0.8f);
+                return render::ColorRGB(0.8f, 0.8f, 0.8f);
             }
         } else if(socketName == "Base Color") {
             // Direct query of Base Color
@@ -223,12 +223,12 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
                 if(socket->default_value.type == SocketValue::VEC4) {
                     return socket->default_value.v4;
                 } else if(socket->default_value.type == SocketValue::VEC3) {
-                    return diy::Vec3U<mp_units::one>(socket->default_value.v3.x_raw(),
-                                       socket->default_value.v3.y_raw(),
-                                       socket->default_value.v3.z_raw());
+                    return render::ColorRGB(socket->default_value.v3.x,
+                                       socket->default_value.v3.y,
+                                       socket->default_value.v3.z);
                 }
             }
-            return diy::Vec3U<mp_units::one>(0.8f, 0.8f, 0.8f);
+            return render::ColorRGB(0.8f, 0.8f, 0.8f);
         }
     } else if(node->type == "ShaderNodeEmission") {
         // ===== Emission Node =====
@@ -237,7 +237,7 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
             const NodeSocket *colorSocket = node->findInput("Color");
             const NodeSocket *strengthSocket = node->findInput("Strength");
             
-            diy::Vec3U<mp_units::one> color(1.0f, 1.0f, 1.0f);  // Default white
+            render::ColorRGB color(1.0f, 1.0f, 1.0f);  // Default white
             float strength = 1.0f;          // Default strength
             
             // Evaluate color (can be connected or constant)
@@ -247,9 +247,9 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
                 } else if(colorSocket->default_value.type == SocketValue::VEC4) {
                     color = colorSocket->default_value.v4;  // RGBA → use v4 field
                 } else if(colorSocket->default_value.type == SocketValue::VEC3) {
-                    color = diy::Vec3U<mp_units::one>(colorSocket->default_value.v3.x_raw(),
-                                        colorSocket->default_value.v3.y_raw(),
-                                        colorSocket->default_value.v3.z_raw());
+                    color = render::ColorRGB(colorSocket->default_value.v3.x,
+                                        colorSocket->default_value.v3.y,
+                                        colorSocket->default_value.v3.z);
                 }
             }
             
@@ -271,7 +271,7 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
             const NodeSocket *colorSocket = node->findInput("Color");
             
             if(!colorSocket) {
-                return diy::Vec3U<mp_units::one>(0.8f, 0.8f, 0.8f);  // Default gray
+                return render::ColorRGB(0.8f, 0.8f, 0.8f);  // Default gray
             }
             
             if(colorSocket->is_linked) {
@@ -282,11 +282,11 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
                 if(colorSocket->default_value.type == SocketValue::VEC4) {
                     return colorSocket->default_value.v4;  // RGBA → use v4 field (already Color3)
                 } else if(colorSocket->default_value.type == SocketValue::VEC3) {
-                    return diy::Vec3U<mp_units::one>(colorSocket->default_value.v3.x_raw(),
-                                       colorSocket->default_value.v3.y_raw(),
-                                       colorSocket->default_value.v3.z_raw());
+                    return render::ColorRGB(colorSocket->default_value.v3.x,
+                                       colorSocket->default_value.v3.y,
+                                       colorSocket->default_value.v3.z);
                 }
-                return diy::Vec3U<mp_units::one>(0.8f, 0.8f, 0.8f);
+                return render::ColorRGB(0.8f, 0.8f, 0.8f);
             }
         }
     } else if(node->type == "ShaderNodeRGB") {
@@ -297,14 +297,14 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
                 if(output.default_value.type == SocketValue::VEC4) {
                     return output.default_value.v4;  // RGBA → use v4 field (already Color3)
                 } else if(output.default_value.type == SocketValue::VEC3) {
-                    return diy::Vec3U<mp_units::one>(output.default_value.v3.x_raw(),
-                                       output.default_value.v3.y_raw(),
-                                       output.default_value.v3.z_raw());
+                    return render::ColorRGB(output.default_value.v3.x,
+                                       output.default_value.v3.y,
+                                       output.default_value.v3.z);
                 }
             }
         }
         // Fallback: return white if no valid color found
-        return diy::Vec3U<mp_units::one>(1.0f, 1.0f, 1.0f);
+        return render::ColorRGB(1.0f, 1.0f, 1.0f);
     } else if(node->type == "ShaderNodeMix" || node->type == "ShaderNodeMixRGB") {
         // ===== Mix Node =====
         // Blends two colors using various blend modes (Mix, Add, Multiply, etc.)
@@ -313,7 +313,7 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
         const NodeSocket *bSocket = node->findInput("B");
         
         float fac = 0.5f;
-        diy::Vec3U<mp_units::one> colorA(0, 0, 0), colorB(1, 1, 1);
+        render::ColorRGB colorA(0, 0, 0), colorB(1, 1, 1);
         
         if(facSocket && !facSocket->is_linked) {
             if(facSocket->default_value.type == SocketValue::FLOAT) {
@@ -327,9 +327,9 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
             } else if(aSocket->default_value.type == SocketValue::VEC4) {
                 colorA = aSocket->default_value.v4;
             } else if(aSocket->default_value.type == SocketValue::VEC3) {
-                colorA = diy::Vec3U<mp_units::one>(aSocket->default_value.v3.x_raw(),
-                                     aSocket->default_value.v3.y_raw(),
-                                     aSocket->default_value.v3.z_raw());
+                colorA = render::ColorRGB(aSocket->default_value.v3.x,
+                                     aSocket->default_value.v3.y,
+                                     aSocket->default_value.v3.z);
             }
         }
         
@@ -339,9 +339,9 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
             } else if(bSocket->default_value.type == SocketValue::VEC4) {
                 colorB = bSocket->default_value.v4;
             } else if(bSocket->default_value.type == SocketValue::VEC3) {
-                colorB = diy::Vec3U<mp_units::one>(bSocket->default_value.v3.x_raw(),
-                                     bSocket->default_value.v3.y_raw(),
-                                     bSocket->default_value.v3.z_raw());
+                colorB = render::ColorRGB(bSocket->default_value.v3.x,
+                                     bSocket->default_value.v3.y,
+                                     bSocket->default_value.v3.z);
             }
         }
         
@@ -354,8 +354,8 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
         const NodeSocket *color2Socket = node->findInput("Color2");
         const NodeSocket *scaleSocket = node->findInput("Scale");
         
-        diy::Vec3U<mp_units::one> color1(0.8f, 0.8f, 0.8f);  // Default white
-        diy::Vec3U<mp_units::one> color2(0.2f, 0.2f, 0.2f);  // Default black
+        render::ColorRGB color1(0.8f, 0.8f, 0.8f);  // Default white
+        render::ColorRGB color2(0.2f, 0.2f, 0.2f);  // Default black
         float scale = 5.0f;  // Default scale
         
         if(color1Socket) {
@@ -364,9 +364,9 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
             } else if(color1Socket->default_value.type == SocketValue::VEC4) {
                 color1 = color1Socket->default_value.v4;
             } else if(color1Socket->default_value.type == SocketValue::VEC3) {
-                color1 = diy::Vec3U<mp_units::one>(color1Socket->default_value.v3.x_raw(),
-                                     color1Socket->default_value.v3.y_raw(),
-                                     color1Socket->default_value.v3.z_raw());
+                color1 = render::ColorRGB(color1Socket->default_value.v3.x,
+                                     color1Socket->default_value.v3.y,
+                                     color1Socket->default_value.v3.z);
             }
         }
         
@@ -376,9 +376,9 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
             } else if(color2Socket->default_value.type == SocketValue::VEC4) {
                 color2 = color2Socket->default_value.v4;
             } else if(color2Socket->default_value.type == SocketValue::VEC3) {
-                color2 = diy::Vec3U<mp_units::one>(color2Socket->default_value.v3.x_raw(),
-                                     color2Socket->default_value.v3.y_raw(),
-                                     color2Socket->default_value.v3.z_raw());
+                color2 = render::ColorRGB(color2Socket->default_value.v3.x,
+                                     color2Socket->default_value.v3.y,
+                                     color2Socket->default_value.v3.z);
             }
         }
         
@@ -413,7 +413,7 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
         warnedNodeTypes.insert(node->type);
         std::cerr << "[NodeEval] Unhandled node type: " << node->type << " (further warnings suppressed)\n";
     }
-    return diy::Vec3U<mp_units::one>(0.8f, 0.8f, 0.8f);  // Default gray for unimplemented nodes
+    return render::ColorRGB(0.8f, 0.8f, 0.8f);  // Default gray for unimplemented nodes
 }
 
 /**
@@ -432,7 +432,7 @@ diy::Vec3U<mp_units::one> evaluateNode(const NodeTree &tree, const std::string &
  * This is called once per ray-surface intersection to determine
  * the surface's diffuse color for path tracing calculations.
  */
-diy::Vec3U<mp_units::one> getAlbedoFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
+render::ColorRGB getAlbedoFromNodeTree(const NodeTree &tree, const render::Vec2f &uv) {
     static int callCount = 0;
     if(++callCount <= 3) {
         std::cerr << "[NodeEval] getAlbedoFromNodeTree called, valid=" << tree.valid << "\n";
@@ -440,21 +440,21 @@ diy::Vec3U<mp_units::one> getAlbedoFromNodeTree(const NodeTree &tree, const Vec2
     
     if(!tree.valid) {
         std::cerr << "[NodeEval] Tree not valid, returning gray\n";
-        return diy::Vec3U<mp_units::one>(0.8f, 0.8f, 0.8f);  // Default gray
+        return render::ColorRGB(0.8f, 0.8f, 0.8f);  // Default gray
     }
     
     // Find Material Output node (entry point)
     const MaterialNode *outputNode = tree.findOutputNode();
     if(!outputNode) {
         std::cerr << "[NodeEval] No Material Output node found\n";
-        return diy::Vec3U<mp_units::one>(0.8f, 0.8f, 0.8f);
+        return render::ColorRGB(0.8f, 0.8f, 0.8f);
     }
     
     // Get Surface input (should be connected to a shader like Principled BSDF)
     const NodeSocket *surfaceSocket = outputNode->findInput("Surface");
     if(!surfaceSocket || !surfaceSocket->is_linked) {
         std::cerr << "[NodeEval] Surface socket not connected\n";
-        return diy::Vec3U<mp_units::one>(0.8f, 0.8f, 0.8f);
+        return render::ColorRGB(0.8f, 0.8f, 0.8f);
     }
     
     if(callCount <= 3) {
@@ -462,10 +462,10 @@ diy::Vec3U<mp_units::one> getAlbedoFromNodeTree(const NodeTree &tree, const Vec2
     }
     
     // Evaluate connected BSDF node
-    diy::Vec3U<mp_units::one> result = evaluateNode(tree, surfaceSocket->linked_node, surfaceSocket->linked_socket, uv);
+    render::ColorRGB result = evaluateNode(tree, surfaceSocket->linked_node, surfaceSocket->linked_socket, uv);
     
     if(callCount <= 3) {
-        std::cerr << "[NodeEval] Result: (" << result.x_raw() << "," << result.y_raw() << "," << result.z_raw() << ")\n";
+        std::cerr << "[NodeEval] Result: (" << result.r << "," << result.g << "," << result.b << ")\n";
     }
     
     return result;
@@ -488,21 +488,21 @@ diy::Vec3U<mp_units::one> getAlbedoFromNodeTree(const NodeTree &tree, const Vec2
  * This determines if a surface emits light (acts as a light source).
  * Used to implement area lights in path tracing.
  */
-diy::Vec3U<mp_units::one> getEmissionFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
+render::ColorRGB getEmissionFromNodeTree(const NodeTree &tree, const render::Vec2f &uv) {
     if(!tree.valid) {
-        return diy::Vec3U<mp_units::one>(0.0f, 0.0f, 0.0f);  // No emission
+        return render::ColorRGB(0.0f, 0.0f, 0.0f);  // No emission
     }
     
     // Find Material Output node
     const MaterialNode *outputNode = tree.findOutputNode();
     if(!outputNode) {
-        return diy::Vec3U<mp_units::one>(0.0f, 0.0f, 0.0f);
+        return render::ColorRGB(0.0f, 0.0f, 0.0f);
     }
     
     // Get Surface input
     const NodeSocket *surfaceSocket = outputNode->findInput("Surface");
     if(!surfaceSocket || !surfaceSocket->is_linked) {
-        return diy::Vec3U<mp_units::one>(0.0f, 0.0f, 0.0f);
+        return render::ColorRGB(0.0f, 0.0f, 0.0f);
     }
     
     // Check if connected node is Emission shader
@@ -521,7 +521,7 @@ diy::Vec3U<mp_units::one> getEmissionFromNodeTree(const NodeTree &tree, const Ve
         
         if(emissionSocket) {
             if(emissionSocket->is_linked) {
-                diy::Vec3U<mp_units::one> emissionColor = evaluateNode(tree, emissionSocket->linked_node, emissionSocket->linked_socket, uv);
+                render::ColorRGB emissionColor = evaluateNode(tree, emissionSocket->linked_node, emissionSocket->linked_socket, uv);
                 // Apply emission strength
                 const NodeSocket *strengthSocket = shaderNode->findInput("Emission Strength");
                 float strength = 0.0f;
@@ -544,14 +544,14 @@ diy::Vec3U<mp_units::one> getEmissionFromNodeTree(const NodeTree &tree, const Ve
                 if(strengthSocket && strengthSocket->default_value.type == SocketValue::FLOAT) {
                     strength = strengthSocket->default_value.f;
                 }
-                return diy::Vec3U<mp_units::one>(emissionSocket->default_value.v3.x_raw(),
-                                   emissionSocket->default_value.v3.y_raw(),
-                                   emissionSocket->default_value.v3.z_raw()) * strength;
+                return render::ColorRGB(emissionSocket->default_value.v3.x,
+                                   emissionSocket->default_value.v3.y,
+                                   emissionSocket->default_value.v3.z) * strength;
             }
         }
     }
     
-    return diy::Vec3U<mp_units::one>(0.0f, 0.0f, 0.0f);
+    return render::ColorRGB(0.0f, 0.0f, 0.0f);
 }
 
 /**
@@ -566,7 +566,7 @@ diy::Vec3U<mp_units::one> getEmissionFromNodeTree(const NodeTree &tree, const Ve
  * 2. Follow its Surface input connection
  * 3. If connected to Principled BSDF, get its Transmission socket
  */
-float getTransmissionFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
+float getTransmissionFromNodeTree(const NodeTree &tree, const render::Vec2f &uv) {
     (void)uv;  // Unused for now
     if(!tree.valid) {
         return 0.0f;  // No transmission (opaque)
@@ -616,7 +616,7 @@ float getTransmissionFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
  * 2. Follow its Surface input connection
  * 3. If connected to Principled BSDF, get its IOR socket
  */
-float getIORFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
+float getIORFromNodeTree(const NodeTree &tree, const render::Vec2f &uv) {
     (void)uv;  // Unused for now
     if(!tree.valid) {
         return 1.45f;  // Default glass IOR
@@ -656,7 +656,7 @@ float getIORFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
  * @param uv UV coordinates (unused for metallic, but kept for API consistency)
  * @return Metallic value (0.0 = dielectric, 1.0 = metal)
  */
-float getMetallicFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
+float getMetallicFromNodeTree(const NodeTree &tree, const render::Vec2f &uv) {
     (void)uv;  // Unused for now
     if(!tree.valid) {
         return 0.0f;  // Default dielectric
@@ -696,7 +696,7 @@ float getMetallicFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
  * @param uv UV coordinates (unused for roughness, but kept for API consistency)
  * @return Roughness value (0.0 = smooth/mirror, 1.0 = rough/diffuse)
  */
-float getRoughnessFromNodeTree(const NodeTree &tree, const Vec2 &uv) {
+float getRoughnessFromNodeTree(const NodeTree &tree, const render::Vec2f &uv) {
     (void)uv;  // Unused for now
     if(!tree.valid) {
         return 0.5f;  // Default roughness

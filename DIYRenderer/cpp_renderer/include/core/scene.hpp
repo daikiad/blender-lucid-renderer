@@ -9,18 +9,16 @@
  * - Environment: World/background settings
  * - Scene: Complete scene with meshes and lights
  * 
- * Physical Units:
- * - All vertex positions: Position3 [m]
- * - Bounding box coordinates: Position3 [m]
- * - Normals: Direction3 (dimensionless, normalized)
- * - UV coordinates: Vec2 (dimensionless [0,1])
- * - Colors: Color3 (dimensionless [0,1])
+ * Physical Units (using render:: namespace):
+ * - All vertex positions: Position [m]
+ * - Bounding box coordinates: Position [m]
+ * - Normals: Normal (normalized)
+ * - UV coordinates: render::Vec2f (dimensionless [0,1])
+ * - Colors: ColorRGB (dimensionless [0,1])
  */
 
 #pragma once
-#include "../math/vec3_unit.hpp"
-#include "../math/vec2.hpp"
-#include "../units/units.hpp"
+#include "../units/render_units.hpp"
 #include "ray.hpp"
 #include "material.hpp"
 #include <vector>
@@ -33,22 +31,28 @@ struct Light;
 
 struct Triangle { 
     int i0, i1, i2;              // Vertex indices
-    diy::Direction3 faceNormal;  // Face normal (flat shading)
-    diy::Direction3 n0, n1, n2;  // Vertex normals (smooth shading)
-    Vec2 uv0, uv1, uv2;          // UV coordinates per vertex
-    diy::Position3 centroid;     // For BVH construction
+    render::Normal faceNormal;   // Face normal (flat shading)
+    render::Normal n0, n1, n2;   // Vertex normals (smooth shading)
+    render::Vec2f uv0, uv1, uv2; // UV coordinates per vertex
+    render::Position centroid;   // For BVH construction
     bool smooth;                 // Use smooth shading?
     bool hasUV;                  // Does triangle have UV coordinates?
     
-    Triangle() : i0(0), i1(0), i2(0), smooth(false), hasUV(false) {}
+    Triangle() : i0(0), i1(0), i2(0), 
+                 centroid(render::make_position(0.0f, 0.0f, 0.0f)),
+                 smooth(false), hasUV(false) {}
 };
 
 // ========== BVH (Bounding Volume Hierarchy) ==========
 
 struct BVHNode {
-    diy::Position3 bmin, bmax;    // Bounding box of this node
+    render::Position bmin, bmax;  // Bounding box of this node
     int left, right;              // Child indices (-1 for leaf)
     int triStart, triCount;       // Triangle range for leaf nodes
+    
+    BVHNode() : bmin(render::make_position(0.0f, 0.0f, 0.0f)),
+                bmax(render::make_position(0.0f, 0.0f, 0.0f)),
+                left(-1), right(-1), triStart(0), triCount(0) {}
     
     bool isLeaf() const { return triCount > 0; }
 };
@@ -58,7 +62,7 @@ struct BVH {
     std::vector<int> triIndices;  // Reordered triangle indices
     
     // Build BVH from mesh triangles
-    void build(const std::vector<diy::Position3>& vertices, std::vector<Triangle>& triangles) {
+    void build(const std::vector<render::Position>& vertices, std::vector<Triangle>& triangles) {
         if(triangles.empty()) return;
         
         // Initialize triangle indices and compute centroids
@@ -66,10 +70,19 @@ struct BVH {
         for(size_t i = 0; i < triangles.size(); ++i) {
             triIndices[i] = (int)i;
             Triangle& tri = triangles[i];
-            const auto& a = vertices[tri.i0];
-            const auto& b = vertices[tri.i1];
-            const auto& c = vertices[tri.i2];
-            tri.centroid = (a + b + c) / 3.0f;
+            
+            // Compute centroid using typed position arithmetic
+            // Centroid = v0 + (1/3)*(e01 + e02) = v0 + (v1-v0+v2-v0)/3
+            const render::Position& a = vertices[tri.i0];
+            const render::Position& b = vertices[tri.i1];
+            const render::Position& c = vertices[tri.i2];
+            
+            // Edge vectors [m] (Displacement - ISQ compliant!)
+            render::Displacement ab = b - a;
+            render::Displacement ac = c - a;
+            
+            // Centroid = a + (ab + ac)/3  [Displacement / scalar = Displacement]
+            tri.centroid = a + (ab + ac) / 3.0f;
         }
         
         // Reserve space for nodes (2n-1 nodes for n triangles in worst case)
@@ -80,7 +93,7 @@ struct BVH {
     }
     
 private:
-    int buildRecursive(const std::vector<diy::Position3>& vertices, std::vector<Triangle>& triangles, 
+    int buildRecursive(const std::vector<render::Position>& vertices, std::vector<Triangle>& triangles, 
                        int start, int end) {
         int nodeIdx = (int)nodes.size();
         nodes.push_back(BVHNode());
@@ -88,23 +101,15 @@ private:
         
         // Compute bounds for this node
         constexpr float inf = 1e30f;
-        node.bmin = diy::Position3{inf * mp_units::si::metre, inf * mp_units::si::metre, inf * mp_units::si::metre};
-        node.bmax = diy::Position3{-inf * mp_units::si::metre, -inf * mp_units::si::metre, -inf * mp_units::si::metre};
+        node.bmin = render::make_position(inf, inf, inf);
+        node.bmax = render::make_position(-inf, -inf, -inf);
         
         for(int i = start; i < end; ++i) {
             const Triangle& tri = triangles[triIndices[i]];
             for(int v = 0; v < 3; ++v) {
-                const auto& vert = vertices[v == 0 ? tri.i0 : (v == 1 ? tri.i1 : tri.i2)];
-                node.bmin = diy::Position3{
-                    std::min(node.bmin[0], vert[0]),
-                    std::min(node.bmin[1], vert[1]),
-                    std::min(node.bmin[2], vert[2])
-                };
-                node.bmax = diy::Position3{
-                    std::max(node.bmax[0], vert[0]),
-                    std::max(node.bmax[1], vert[1]),
-                    std::max(node.bmax[2], vert[2])
-                };
+                const render::Position& vert = vertices[v == 0 ? tri.i0 : (v == 1 ? tri.i1 : tri.i2)];
+                node.bmin = render::pos_component_min(node.bmin, vert);
+                node.bmax = render::pos_component_max(node.bmax, vert);
             }
         }
         
@@ -119,17 +124,22 @@ private:
         }
         
         // Find best split axis (longest extent)
-        auto extent = node.bmax - node.bmin;  // Direction3 (displacement)
+        // extent = bmax - bmin is a Displacement [m] (ISQ compliant!)
+        render::Displacement extent = node.bmax - node.bmin;
+        render::Length ex = render::disp_x(extent);
+        render::Length ey = render::disp_y(extent);
+        render::Length ez = render::disp_z(extent);
         int axis = 0;
-        if(extent[1] > extent[0]) axis = 1;
-        if(extent[2] > (axis == 0 ? extent[0] : extent[1])) axis = 2;
+        if (ey > ex) axis = 1;
+        if (ez > (axis == 0 ? ex : ey)) axis = 2;
         
-        // Sort by centroid along split axis
+        // Sort by centroid along split axis using typed comparison
         int mid = (start + end) / 2;
         std::nth_element(triIndices.begin() + start, triIndices.begin() + mid, 
                         triIndices.begin() + end,
                         [&](int a, int b) {
-                            return triangles[a].centroid[axis] < triangles[b].centroid[axis];
+                            return render::pos_component(triangles[a].centroid, axis)
+                                 < render::pos_component(triangles[b].centroid, axis);
                         });
         
         // Build children
@@ -145,13 +155,13 @@ private:
 // ========== Mesh Structure ==========
 
 struct Mesh {
-    std::vector<diy::Position3> vertices;
+    std::vector<render::Position> vertices;
     std::vector<Triangle> triangles;
     Material material;
     BVH bvh;  // BVH acceleration structure
     // axis-aligned bounding box (for whole mesh)
-    diy::Position3 bmin{1e30f * mp_units::si::metre, 1e30f * mp_units::si::metre, 1e30f * mp_units::si::metre};
-    diy::Position3 bmax{-1e30f * mp_units::si::metre, -1e30f * mp_units::si::metre, -1e30f * mp_units::si::metre};
+    render::Position bmin{render::make_position(1e30f, 1e30f, 1e30f)};
+    render::Position bmax{render::make_position(-1e30f, -1e30f, -1e30f)};
 };
 
 // ========== Environment Settings ==========
@@ -163,8 +173,8 @@ struct Mesh {
  * final_radiance = color × strength [W/(sr·m²)]
  */
 struct Environment {
-    diy::Vec3U<mp_units::one> color = diy::Vec3U<mp_units::one>{0.05f, 0.05f, 0.05f};  // Background color (RGB, each [0,∞])
-    float strength = 1.0f;                                  // Emission strength multiplier (dimensionless)
+    render::ColorRGB color{0.05f, 0.05f, 0.05f};  // Background color (RGB, each [0,∞])
+    float strength = 1.0f;                         // Emission strength multiplier (dimensionless)
 };
 
 // ========== Scene Structure ==========
@@ -179,28 +189,36 @@ struct Scene {
 
 inline void finalizeMeshBounds(Mesh &m) {
     for(const auto &v : m.vertices) {
-        m.bmin = diy::Position3{
-            std::min(m.bmin[0], v[0]),
-            std::min(m.bmin[1], v[1]),
-            std::min(m.bmin[2], v[2])
-        };
-        m.bmax = diy::Position3{
-            std::max(m.bmax[0], v[0]),
-            std::max(m.bmax[1], v[1]),
-            std::max(m.bmax[2], v[2])
-        };
+        m.bmin = render::pos_component_min(m.bmin, v);
+        m.bmax = render::pos_component_max(m.bmax, v);
     }
-    // Add small epsilon to avoid zero-thickness boxes
-    const auto eps = 0.001f * mp_units::si::metre;
-    if(m.bmax[0] - m.bmin[0] < eps) { m.bmin = diy::Position3{m.bmin[0] - eps, m.bmin[1], m.bmin[2]}; m.bmax = diy::Position3{m.bmax[0] + eps, m.bmax[1], m.bmax[2]}; }
-    if(m.bmax[1] - m.bmin[1] < eps) { m.bmin = diy::Position3{m.bmin[0], m.bmin[1] - eps, m.bmin[2]}; m.bmax = diy::Position3{m.bmax[0], m.bmax[1] + eps, m.bmax[2]}; }
-    if(m.bmax[2] - m.bmin[2] < eps) { m.bmin = diy::Position3{m.bmin[0], m.bmin[1], m.bmin[2] - eps}; m.bmax = diy::Position3{m.bmax[0], m.bmax[1], m.bmax[2] + eps}; }
+    
+    // Add small epsilon to avoid zero-thickness boxes (fully typed)
+    constexpr auto eps = render::metres(0.001f);
+    render::Displacement extent = m.bmax - m.bmin;
+    
+    if (render::disp_x(extent) < eps) {
+        m.bmin = m.bmin - render::kAxisX * eps;
+        m.bmax = m.bmax + render::kAxisX * eps;
+    }
+    if (render::disp_y(extent) < eps) {
+        m.bmin = m.bmin - render::kAxisY * eps;
+        m.bmax = m.bmax + render::kAxisY * eps;
+    }
+    if (render::disp_z(extent) < eps) {
+        m.bmin = m.bmin - render::kAxisZ * eps;
+        m.bmax = m.bmax + render::kAxisZ * eps;
+    }
     
     for(auto &t : m.triangles) {
-        const auto &a = m.vertices[t.i0];
-        const auto &b = m.vertices[t.i1];
-        const auto &c = m.vertices[t.i2];
-        t.faceNormal = diy::normalize(diy::cross(b - a, c - a));
+        // Compute face normal using typed edge vectors (Displacement - ISQ compliant!)
+        render::Displacement e1 = m.vertices[t.i1] - m.vertices[t.i0];  // [m]
+        render::Displacement e2 = m.vertices[t.i2] - m.vertices[t.i0];  // [m]
+        // Cross product using disp_to_vec helper (encapsulates extraction)
+        auto normal_opt = render::make_normal(render::cross(render::disp_to_vec(e1), render::disp_to_vec(e2)));
+        if (normal_opt) {
+            t.faceNormal = *normal_opt;
+        }
     }
     
     // Build BVH for this mesh

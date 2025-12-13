@@ -15,7 +15,7 @@
  */
 
 #pragma once
-#include "../math/vec3_unit.hpp"
+#include "../units/render_units.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -37,12 +37,12 @@ inline float fresnelSchlick(float cosTheta, float f0) {
  * Fresnel for conductor (metal) - Schlick with F0 = albedo
  * Returns per-channel Fresnel reflectance
  */
-inline diy::Vec3U<mp_units::one> fresnelSchlickColor(float cosTheta, const diy::Vec3U<mp_units::one>& f0) {
+inline render::ColorRGB fresnelSchlickColor(float cosTheta, const render::ColorRGB& f0) {
     float f = std::pow(1.0f - cosTheta, 5.0f);
-    return diy::Vec3U<mp_units::one>(
-        f0.x_raw() + (1.0f - f0.x_raw()) * f,
-        f0.y_raw() + (1.0f - f0.y_raw()) * f,
-        f0.z_raw() + (1.0f - f0.z_raw()) * f
+    return render::ColorRGB(
+        f0.r + (1.0f - f0.r) * f,
+        f0.g + (1.0f - f0.g) * f,
+        f0.b + (1.0f - f0.b) * f
     );
 }
 
