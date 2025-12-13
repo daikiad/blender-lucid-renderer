@@ -257,29 +257,46 @@ inline bool intersectEllipse(const Ray& ray, const render::Position& center, con
 inline bool intersectAABB(const Ray& ray, const render::Vec3f& invDir, 
                           const render::Position& bmin, const render::Position& bmax) {
     using namespace mp_units::si;
-    
+    const float parallelEps = 1e-8f;
+
     // Compute Displacements from origin to bmin/bmax (ISQ compliant!)
     render::Displacement toMin = bmin - ray.origin;  // [m]
     render::Displacement toMax = bmax - ray.origin;  // [m]
-    
-    // Slab test with typed Length values
-    // t = distance * invDir, where distance is [m] and invDir is [1/component]
-    // Result t is Length [m] (ray parameter)
-    render::Length t1 = render::disp_x(toMin) * invDir.x;
-    render::Length t2 = render::disp_x(toMax) * invDir.x;
-    render::Length tmin = std::min(t1, t2);
-    render::Length tmax = std::max(t1, t2);
-    
-    t1 = render::disp_y(toMin) * invDir.y;
-    t2 = render::disp_y(toMax) * invDir.y;
-    tmin = std::max(tmin, std::min(t1, t2));
-    tmax = std::min(tmax, std::max(t1, t2));
-    
-    t1 = render::disp_z(toMin) * invDir.z;
-    t2 = render::disp_z(toMax) * invDir.z;
-    tmin = std::max(tmin, std::min(t1, t2));
-    tmax = std::min(tmax, std::max(t1, t2));
-    
+
+    // Extract direction once for parallel checks
+    const auto dir = ray.direction.vec();
+
+    auto axis_slab = [&](float dirComp, float invDirComp,
+                         render::Length dMin, render::Length dMax,
+                         render::Length& tmin, render::Length& tmax) -> bool {
+        // Parallel to slab: origin must be inside bounds on this axis
+        if (std::abs(dirComp) < parallelEps) {
+            render::Length zero = 0.0f * metre;
+            const bool outsidePositive = (dMin > zero && dMax > zero);
+            const bool outsideNegative = (dMin < zero && dMax < zero);
+            if (outsidePositive || outsideNegative) {
+                return false;  // Ray misses box on this axis
+            }
+            // Inside slab: no t update for this axis
+            return true;
+        }
+
+        render::Length t1 = dMin * invDirComp;
+        render::Length t2 = dMax * invDirComp;
+        render::Length axisMin = std::min(t1, t2);
+        render::Length axisMax = std::max(t1, t2);
+        tmin = std::max(tmin, axisMin);
+        tmax = std::min(tmax, axisMax);
+        return tmax >= tmin;
+    };
+
+    render::Length tmin = RAY_T_MIN_TYPED * 0.0f;  // zero Length
+    render::Length tmax = RAY_T_MAX_TYPED;
+
+    if (!axis_slab(dir.x, invDir.x, render::disp_x(toMin), render::disp_x(toMax), tmin, tmax)) return false;
+    if (!axis_slab(dir.y, invDir.y, render::disp_y(toMin), render::disp_y(toMax), tmin, tmax)) return false;
+    if (!axis_slab(dir.z, invDir.z, render::disp_z(toMin), render::disp_z(toMax), tmin, tmax)) return false;
+
     render::Length zero_length = 0.0f * metre;
     return tmax >= std::max(tmin, zero_length);
 }
@@ -393,9 +410,9 @@ inline std::optional<render::Length> intersectTriangle(const Ray& ray,
 inline render::Vec3f computeInverseDirection(const render::Direction& dir) {
     auto d = dir.vec();
     return render::Vec3f(
-        std::abs(d.x) > 1e-8f ? 1.0f / d.x : 1e30f,
-        std::abs(d.y) > 1e-8f ? 1.0f / d.y : 1e30f,
-        std::abs(d.z) > 1e-8f ? 1.0f / d.z : 1e30f
+        std::abs(d.x) > 1e-8f ? 1.0f / d.x : 0.0f,
+        std::abs(d.y) > 1e-8f ? 1.0f / d.y : 0.0f,
+        std::abs(d.z) > 1e-8f ? 1.0f / d.z : 0.0f
     );
 }
 

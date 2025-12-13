@@ -66,6 +66,9 @@ inline void traverseBVH(const Mesh& mesh, const Ray& ray, const render::Vec3f& i
                 result.hit = true;
                 if (tri.hasUV) {
                     result.uv = tri.uv0 * w + tri.uv1 * u + tri.uv2 * v;
+                    result.hasUV = true;
+                } else {
+                    result.hasUV = false;
                 }
                 result.material = mesh.material;
                 result.meshIdx = meshIdx;
@@ -76,12 +79,13 @@ inline void traverseBVH(const Mesh& mesh, const Ray& ray, const render::Vec3f& i
     }
     
     // Stack-based BVH traversal (non-recursive for speed)
-    int stack[64];
-    int stackPtr = 0;
-    stack[stackPtr++] = 0;  // Start with root node
+    std::vector<int> stack;
+    stack.reserve(mesh.bvh.nodes.size());
+    stack.push_back(0);  // Start with root node
     
-    while (stackPtr > 0) {
-        int nodeIdx = stack[--stackPtr];
+    while (!stack.empty()) {
+        int nodeIdx = stack.back();
+        stack.pop_back();
         const BVHNode& node = mesh.bvh.nodes[nodeIdx];
         
         // Test ray against node bounds
@@ -116,6 +120,9 @@ inline void traverseBVH(const Mesh& mesh, const Ray& ray, const render::Vec3f& i
                     result.hit = true;
                     if (tri.hasUV) {
                         result.uv = tri.uv0 * w + tri.uv1 * u + tri.uv2 * v;
+                        result.hasUV = true;
+                    } else {
+                        result.hasUV = false;
                     }
                     result.material = mesh.material;
                     result.meshIdx = meshIdx;
@@ -124,8 +131,8 @@ inline void traverseBVH(const Mesh& mesh, const Ray& ray, const render::Vec3f& i
             }
         } else {
             // Push children onto stack
-            if (node.right >= 0) stack[stackPtr++] = node.right;
-            if (node.left >= 0) stack[stackPtr++] = node.left;
+            if (node.right >= 0) stack.push_back(node.right);
+            if (node.left >= 0) stack.push_back(node.left);
         }
     }
 }
