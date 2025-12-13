@@ -172,6 +172,9 @@ struct Material {
  * - t: Length [m] - ray parameter
  * - point: Position [m] - intersection point
  * - normal: Normal - surface normal
+ * 
+ * Material is stored as pointer to avoid copying NodeTree on every hit.
+ * The pointed Material lives in Mesh and is valid for the scene's lifetime.
  */
 struct Hit {
     bool hit;
@@ -180,7 +183,7 @@ struct Hit {
     render::Normal normal;        // Surface normal
     render::Vec2f uv;             // Texture coordinates (dimensionless)
     bool hasUV;
-    Material material;
+    const Material* material;     // Pointer to mesh material (no copy)
     int meshIdx;
     int triIdx;
     
@@ -189,6 +192,7 @@ struct Hit {
         , t(1e30f * mp_units::si::metre)
         , point(render::make_position(0.0f, 0.0f, 0.0f))
         , hasUV(false)
+        , material(nullptr)
         , meshIdx(-1)
         , triIdx(-1) {}
     

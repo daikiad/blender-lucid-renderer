@@ -112,8 +112,11 @@ inline uint32_t pcg32() {
 }
 
 // Generate random float between 0 and 1
+// Uses ldexpf instead of division for ~2x faster conversion
+// (pcg32() >> 9) gives 23 random bits for mantissa
+// ldexpf(x, -23) = x * 2^-23
 inline float randf() { 
-    return (float)pcg32() / (float)0xFFFFFFFFu;
+    return std::ldexpf(static_cast<float>(pcg32() >> 9), -23);
 }
 
 // ========== Sampling Utilities ==========

@@ -76,7 +76,9 @@ if(OpenMP_CXX_FOUND)
     message(STATUS "OpenMP enabled")
 endif()
 
-target_compile_options(diyrenderer PRIVATE -O3 -march=native -ffast-math)
+# Performance: -O3 + native + ffast-math + LTO for cross-file optimization
+target_compile_options(diyrenderer PRIVATE -O3 -march=native -ffast-math -flto)
+target_link_options(diyrenderer PRIVATE -flto)
 
 # =============================================================================
 # Test Target: test_render_units

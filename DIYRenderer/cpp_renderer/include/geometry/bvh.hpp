@@ -70,7 +70,7 @@ inline void traverseBVH(const Mesh& mesh, const Ray& ray, const render::Vec3f& i
                 } else {
                     result.hasUV = false;
                 }
-                result.material = mesh.material;
+                result.material = &mesh.material;
                 result.meshIdx = meshIdx;
                 result.triIdx = (int)ti;
             }
@@ -79,13 +79,15 @@ inline void traverseBVH(const Mesh& mesh, const Ray& ray, const render::Vec3f& i
     }
     
     // Stack-based BVH traversal (non-recursive for speed)
-    std::vector<int> stack;
-    stack.reserve(mesh.bvh.nodes.size());
-    stack.push_back(0);  // Start with root node
+    // Fixed-size stack is faster than vector (no heap allocation)
+    // Max depth 64 supports up to 2^64 triangles theoretically
+    // Typical BVH depth is ~20-30 even for millions of triangles
+    int stack[64];
+    int stackPtr = 0;
+    stack[stackPtr++] = 0;  // Start with root node
     
-    while (!stack.empty()) {
-        int nodeIdx = stack.back();
-        stack.pop_back();
+    while (stackPtr > 0) {
+        int nodeIdx = stack[--stackPtr];
         const BVHNode& node = mesh.bvh.nodes[nodeIdx];
         
         // Test ray against node bounds
@@ -124,15 +126,17 @@ inline void traverseBVH(const Mesh& mesh, const Ray& ray, const render::Vec3f& i
                     } else {
                         result.hasUV = false;
                     }
-                    result.material = mesh.material;
+                    result.material = &mesh.material;
                     result.meshIdx = meshIdx;
                     result.triIdx = triIdx;
                 }
             }
         } else {
-            // Push children onto stack
-            if (node.right >= 0) stack.push_back(node.right);
-            if (node.left >= 0) stack.push_back(node.left);
+            // Push children onto stack (check bounds to prevent overflow)
+            if (stackPtr < 62) {
+                if (node.right >= 0) stack[stackPtr++] = node.right;
+                if (node.left >= 0) stack[stackPtr++] = node.left;
+            }
         }
     }
 }

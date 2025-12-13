@@ -42,18 +42,18 @@ float getRoughnessFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
 
 inline MaterialParams getMaterialParams(const Hit& hit) {
     MaterialParams mat;
-    mat.albedo = hit.material.albedo;
-    mat.metallic = hit.material.metallic;
-    mat.roughness = hit.material.roughness;
-    mat.transmission = hit.material.transmission;
-    mat.ior = hit.material.ior;
+    mat.albedo = hit.material->albedo;
+    mat.metallic = hit.material->metallic;
+    mat.roughness = hit.material->roughness;
+    mat.transmission = hit.material->transmission;
+    mat.ior = hit.material->ior;
     
-    if (hit.material.useNodes && hit.material.nodeTree.valid) {
-        mat.albedo = getAlbedoFromNodeTree(hit.material.nodeTree, hit.uv);
-        mat.metallic = getMetallicFromNodeTree(hit.material.nodeTree, hit.uv);
-        mat.roughness = getRoughnessFromNodeTree(hit.material.nodeTree, hit.uv);
-        mat.transmission = getTransmissionFromNodeTree(hit.material.nodeTree, hit.uv);
-        mat.ior = getIORFromNodeTree(hit.material.nodeTree, hit.uv);
+    if (hit.material->useNodes && hit.material->nodeTree.valid) {
+        mat.albedo = getAlbedoFromNodeTree(hit.material->nodeTree, hit.uv);
+        mat.metallic = getMetallicFromNodeTree(hit.material->nodeTree, hit.uv);
+        mat.roughness = getRoughnessFromNodeTree(hit.material->nodeTree, hit.uv);
+        mat.transmission = getTransmissionFromNodeTree(hit.material->nodeTree, hit.uv);
+        mat.ior = getIORFromNodeTree(hit.material->nodeTree, hit.uv);
     }
     
     // Enforce minimum roughness
@@ -63,10 +63,10 @@ inline MaterialParams getMaterialParams(const Hit& hit) {
 }
 
 inline render::RadianceRGB getEmission(const Hit& hit) {
-    if (hit.material.useNodes && hit.material.nodeTree.valid) {
-        return render::to_radiance(getEmissionFromNodeTree(hit.material.nodeTree, hit.uv));
+    if (hit.material->useNodes && hit.material->nodeTree.valid) {
+        return render::to_radiance(getEmissionFromNodeTree(hit.material->nodeTree, hit.uv));
     }
-    return hit.material.emission;
+    return hit.material->emission;
 }
 
 // ========== Simple Path Tracer (BSDF only) ==========

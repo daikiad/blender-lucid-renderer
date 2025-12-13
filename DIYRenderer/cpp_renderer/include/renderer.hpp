@@ -67,10 +67,10 @@ inline render::ColorRGB traceNormal(const Scene &scene, const Ray &ray, bool use
 inline render::ColorRGB traceAlbedo(const Scene &scene, const Ray &ray, bool useAABB = true) {
     Hit hit = intersectScene(scene, ray, render::metres(0.0f), geometry::RAY_T_MAX_TYPED, useAABB);
     if (hit.hit) {
-        if (hit.material.useNodes && hit.material.nodeTree.valid) {
-            return getAlbedoFromNodeTree(hit.material.nodeTree, hit.uv);
+        if (hit.material->useNodes && hit.material->nodeTree.valid) {
+            return getAlbedoFromNodeTree(hit.material->nodeTree, hit.uv);
         }
-        return hit.material.albedo;
+        return hit.material->albedo;
     }
     return render::ColorRGB(0, 0, 0);
 }
@@ -79,10 +79,10 @@ inline render::ColorRGB traceAlbedo(const Scene &scene, const Ray &ray, bool use
 inline render::ColorRGB traceEmission(const Scene &scene, const Ray &ray, bool useAABB = true) {
     Hit hit = intersectScene(scene, ray, render::metres(0.0f), geometry::RAY_T_MAX_TYPED, useAABB);
     if (hit.hit) {
-        if (hit.material.useNodes && hit.material.nodeTree.valid) {
-            return getEmissionFromNodeTree(hit.material.nodeTree, hit.uv);
+        if (hit.material->useNodes && hit.material->nodeTree.valid) {
+            return getEmissionFromNodeTree(hit.material->nodeTree, hit.uv);
         }
-        return render::to_color(hit.material.emission);
+        return render::to_color(hit.material->emission);
     }
     return render::ColorRGB(0, 0, 0);
 }
