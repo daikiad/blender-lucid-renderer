@@ -287,29 +287,40 @@ using Area = quantity<isq::area[mp_units::square(si::metre)], float>;
 using Volume = quantity<isq::volume[mp_units::cubic(si::metre)], float>;
 
 // ============================================================================
-// Part B.1: Barycentric Coordinates (dimensionless with vector character)
+// Part B.1: Barycentric Coordinates (dimensionless ratios)
 // ============================================================================
 // Barycentric coordinates (u, v) represent a point inside a triangle.
-// w = 1 - u - v is computed on demand. These are dimensionless ratios for interpolation.
+// w = 1 - u - v is computed on demand. These are simple dimensionless ratios, not quantities.
 
-QUANTITY_SPEC(barycentric_coord2, dimensionless, quantity_character::vector);
-using BarycentricCoord2 = quantity<barycentric_coord2[one], Vec2f>;
+// Simple wrapper for UV coordinates (not a quantity, just a semantic type)
+struct BarycentricCoord2 {
+    float u = 0.0f, v = 0.0f;
+
+    constexpr BarycentricCoord2() = default;
+    constexpr BarycentricCoord2(float u_, float v_) : u(u_), v(v_) {}
+
+    // Accessors
+    [[nodiscard]] constexpr float bary_u() const { return u; }
+    [[nodiscard]] constexpr float bary_v() const { return v; }
+    [[nodiscard]] constexpr float bary_w() const { return 1.0f - u - v; }
+
+    constexpr bool operator==(BarycentricCoord2 other) const {
+        return u == other.u && v == other.v;
+    }
+};
 
 // Dimensionless scalar type alias for convenience
 using Dimensionless = quantity<dimensionless[one], float>;
 
 // Helper: Create BarycentricCoord2 from float u, v values
 inline BarycentricCoord2 make_barycentric2(float u, float v) {
-    return BarycentricCoord2{Vec2f{u, v}};
+    return BarycentricCoord2{u, v};
 }
 
-// Accessors for barycentric coordinates (encapsulate extraction)
-inline float bary_u(const BarycentricCoord2& bary) { return bary.numerical_value_ref_in(one).x; }
-inline float bary_v(const BarycentricCoord2& bary) { return bary.numerical_value_ref_in(one).y; }
-inline float bary_w(const BarycentricCoord2& bary) { 
-    const Vec2f& uv = bary.numerical_value_ref_in(one);
-    return 1.0f - uv.x - uv.y;
-}
+// Free function accessors (for consistency with old API if needed)
+inline float bary_u(const BarycentricCoord2& bary) { return bary.bary_u(); }
+inline float bary_v(const BarycentricCoord2& bary) { return bary.bary_v(); }
+inline float bary_w(const BarycentricCoord2& bary) { return bary.bary_w(); }
 
 // ============================================================================
 // Part B.2: OrientedArea - Area with Vector Character (for cross products)

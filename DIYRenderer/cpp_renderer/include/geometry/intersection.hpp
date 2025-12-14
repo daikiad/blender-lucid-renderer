@@ -386,7 +386,7 @@ inline std::optional<render::Length> intersectTriangle(const Ray& ray,
     render::Length t = t_num / det;
     
     if (t >= tMin && t <= tMax) {
-        // Extract dimensionless values at boundary for Vec2f construction
+        // Simple float conversion for BarycentricCoord2
         outUV = render::make_barycentric2(
             u_ratio.numerical_value_in(mp_units::one),
             v_ratio.numerical_value_in(mp_units::one));
