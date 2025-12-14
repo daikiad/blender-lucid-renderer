@@ -183,6 +183,7 @@ struct Scene {
     std::vector<Mesh> meshes;
     std::vector<Light> nativeLights;  // Blender native lights (Point, Sun, Spot, Area)
     Environment environment;          // World environment settings
+    Camera camera;                    // Camera with exposure settings (defined in ray.hpp)
 };
 
 // ========== Mesh Finalization ==========

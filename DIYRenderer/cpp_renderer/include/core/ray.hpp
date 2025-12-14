@@ -36,6 +36,9 @@ struct Ray {
 
 /**
  * Camera - Rendering camera parameters (unit-safe)
+ * 
+ * Exposure is specified as EV (exposure value), matching Blender's Film → Exposure.
+ * EV = 0 means sensitivity = 1.0, EV = +1 doubles brightness, EV = -1 halves it.
  */
 struct Camera {
     render::Position pos;         // Camera position [m]
@@ -46,11 +49,13 @@ struct Camera {
     
     render::Angle fov;            // Field of view [rad]
     float aspect;                 // Aspect ratio (dimensionless)
+    float exposure_ev = 0.0f;    // Exposure value (Blender's Film → Exposure)
     
     Camera() 
         : pos(render::make_position(0.0f, 0.0f, 0.0f))
         , fov(render::degrees(60.0f))
-        , aspect(1.0f) {}
+        , aspect(1.0f)
+        , exposure_ev(0.0f) {}
     
     float fovRad() const {
         return fov.numerical_value_in(mp_units::si::radian);
@@ -58,6 +63,11 @@ struct Camera {
     
     float halfTanFov() const {
         return std::tan(fovRad() * 0.5f);
+    }
+    
+    // Get camera sensitivity from exposure EV
+    render::CameraSensitivity sensitivity() const {
+        return render::sensitivity_from_ev(exposure_ev);
     }
 };
 

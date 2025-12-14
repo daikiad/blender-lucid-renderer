@@ -36,35 +36,35 @@ protected:
 TEST_F(MISWeightTest, WeightForFirstArgument) {
     // mis_power_heuristic(pf, pg) should return weight for pf
     // When pf >> pg, weight should be close to 1
-    float weight = mis_power_heuristic(pdf_high, pdf_low);
-    EXPECT_GT(weight, 0.9f);
+    Dimensionless weight = mis_power_heuristic(pdf_high, pdf_low);
+    EXPECT_GT(weight.numerical_value_in(one), 0.9f);
     
     // When pf << pg, weight should be close to 0
-    float weight2 = mis_power_heuristic(pdf_low, pdf_high);
-    EXPECT_LT(weight2, 0.1f);
+    Dimensionless weight2 = mis_power_heuristic(pdf_low, pdf_high);
+    EXPECT_LT(weight2.numerical_value_in(one), 0.1f);
 }
 
 TEST_F(MISWeightTest, WeightsSumToOne) {
     // w_f + w_g should equal 1 (fundamental MIS property)
     // This test would have caught the argument order bug
-    float wf = mis_power_heuristic(pdf_medium, pdf_high);
-    float wg = mis_power_heuristic(pdf_high, pdf_medium);
-    EXPECT_NEAR(wf + wg, 1.0f, kEps);
+    Dimensionless wf = mis_power_heuristic(pdf_medium, pdf_high);
+    Dimensionless wg = mis_power_heuristic(pdf_high, pdf_medium);
+    EXPECT_NEAR((wf + wg).numerical_value_in(one), 1.0f, kEps);
     
     // Test with various combinations
-    float wf2 = mis_power_heuristic(pdf_low, pdf_high);
-    float wg2 = mis_power_heuristic(pdf_high, pdf_low);
-    EXPECT_NEAR(wf2 + wg2, 1.0f, kEps);
+    Dimensionless wf2 = mis_power_heuristic(pdf_low, pdf_high);
+    Dimensionless wg2 = mis_power_heuristic(pdf_high, pdf_low);
+    EXPECT_NEAR((wf2 + wg2).numerical_value_in(one), 1.0f, kEps);
     
-    float wf3 = mis_power_heuristic(pdf_low, pdf_medium);
-    float wg3 = mis_power_heuristic(pdf_medium, pdf_low);
-    EXPECT_NEAR(wf3 + wg3, 1.0f, kEps);
+    Dimensionless wf3 = mis_power_heuristic(pdf_low, pdf_medium);
+    Dimensionless wg3 = mis_power_heuristic(pdf_medium, pdf_low);
+    EXPECT_NEAR((wf3 + wg3).numerical_value_in(one), 1.0f, kEps);
 }
 
 TEST_F(MISWeightTest, EqualPdfsGiveHalfWeight) {
     // When both PDFs are equal, each strategy gets 0.5 weight
-    float weight = mis_power_heuristic(pdf_medium, pdf_medium);
-    EXPECT_NEAR(weight, 0.5f, kEps);
+    Dimensionless weight = mis_power_heuristic(pdf_medium, pdf_medium);
+    EXPECT_NEAR(weight.numerical_value_in(one), 0.5f, kEps);
 }
 
 TEST_F(MISWeightTest, WeightInValidRange) {
@@ -74,10 +74,11 @@ TEST_F(MISWeightTest, WeightInValidRange) {
     
     for (auto pf : pdfs) {
         for (auto pg : pdfs) {
-            float w = mis_power_heuristic(pf, pg);
-            EXPECT_GE(w, 0.0f) << "pf=" << pf.numerical_value_in(per_sr) 
+            Dimensionless w = mis_power_heuristic(pf, pg);
+            float w_val = w.numerical_value_in(one);
+            EXPECT_GE(w_val, 0.0f) << "pf=" << pf.numerical_value_in(per_sr) 
                                << ", pg=" << pg.numerical_value_in(per_sr);
-            EXPECT_LE(w, 1.0f) << "pf=" << pf.numerical_value_in(per_sr) 
+            EXPECT_LE(w_val, 1.0f) << "pf=" << pf.numerical_value_in(per_sr) 
                                << ", pg=" << pg.numerical_value_in(per_sr);
         }
     }
@@ -89,9 +90,9 @@ TEST_F(MISWeightTest, PowerHeuristicFormula) {
     float pg_val = pdf_high.numerical_value_in(per_sr);
     
     float expected = (pf_val * pf_val) / (pf_val * pf_val + pg_val * pg_val);
-    float actual = mis_power_heuristic(pdf_medium, pdf_high);
+    Dimensionless actual = mis_power_heuristic(pdf_medium, pdf_high);
     
-    EXPECT_NEAR(actual, expected, kEps);
+    EXPECT_NEAR(actual.numerical_value_in(one), expected, kEps);
 }
 
 TEST_F(MISWeightTest, ZeroPdfHandling) {
@@ -100,16 +101,16 @@ TEST_F(MISWeightTest, ZeroPdfHandling) {
     PdfW tiny_pdf = 1e-10f * per_sr;
     
     // Should not crash or produce NaN
-    float w1 = mis_power_heuristic(pdf_medium, zero_pdf);
-    float w2 = mis_power_heuristic(zero_pdf, pdf_medium);
-    float w3 = mis_power_heuristic(pdf_medium, tiny_pdf);
+    Dimensionless w1 = mis_power_heuristic(pdf_medium, zero_pdf);
+    Dimensionless w2 = mis_power_heuristic(zero_pdf, pdf_medium);
+    Dimensionless w3 = mis_power_heuristic(pdf_medium, tiny_pdf);
     
-    EXPECT_TRUE(std::isfinite(w1));
-    EXPECT_TRUE(std::isfinite(w2));
-    EXPECT_TRUE(std::isfinite(w3));
+    EXPECT_TRUE(std::isfinite(w1.numerical_value_in(one)));
+    EXPECT_TRUE(std::isfinite(w2.numerical_value_in(one)));
+    EXPECT_TRUE(std::isfinite(w3.numerical_value_in(one)));
     
     // With zero alternative, weight should be ~1
-    EXPECT_NEAR(w1, 1.0f, 0.01f);
+    EXPECT_NEAR(w1.numerical_value_in(one), 1.0f, 0.01f);
 }
 
 // ============================================================================
@@ -130,18 +131,20 @@ TEST_F(BSDFSampleWeightTest, BasicWeight) {
     
     // f = 0.5/sr, pdf = 0.5/sr, cos = 0.8
     // weight = (0.5/0.5) * 0.8 = 0.8
-    EXPECT_NEAR(weight.r, 0.8f, kEps);
-    EXPECT_NEAR(weight.g, 0.8f, kEps);
-    EXPECT_NEAR(weight.b, 0.8f, kEps);
+    auto [wr, wg, wb] = render::color_to_floats(weight);
+    EXPECT_NEAR(wr, 0.8f, kEps);
+    EXPECT_NEAR(wg, 0.8f, kEps);
+    EXPECT_NEAR(wb, 0.8f, kEps);
 }
 
 TEST_F(BSDFSampleWeightTest, ZeroPdfReturnsZero) {
     PdfW zero_pdf = 0.0f * per_sr;
     ColorRGB weight = bsdf_sample_weight(bsdf_white, 1.0f, zero_pdf);
     
-    EXPECT_NEAR(weight.r, 0.0f, kEps);
-    EXPECT_NEAR(weight.g, 0.0f, kEps);
-    EXPECT_NEAR(weight.b, 0.0f, kEps);
+    auto [wr, wg, wb] = render::color_to_floats(weight);
+    EXPECT_NEAR(wr, 0.0f, kEps);
+    EXPECT_NEAR(wg, 0.0f, kEps);
+    EXPECT_NEAR(wb, 0.0f, kEps);
 }
 
 TEST_F(BSDFSampleWeightTest, MinPdfThreshold) {
@@ -149,7 +152,8 @@ TEST_F(BSDFSampleWeightTest, MinPdfThreshold) {
     PdfW tiny_pdf = MIN_PDF * 0.5f;
     ColorRGB weight = bsdf_sample_weight(bsdf_white, 1.0f, tiny_pdf);
     
-    EXPECT_NEAR(weight.r, 0.0f, kEps);
+    auto [wr, wg, wb] = render::color_to_floats(weight);
+    EXPECT_NEAR(wr, 0.0f, kEps);
 }
 
 // ============================================================================
@@ -208,25 +212,28 @@ TEST_F(PDFConversionTest, AreaToPdfW_ZeroHandling) {
 // ============================================================================
 
 TEST(RadianceConversionTest, RoundTrip) {
-    ColorRGB original(0.5f, 0.7f, 0.3f);
+    ColorRGB original = render::make_color_rgb(0.5f, 0.7f, 0.3f);
     RadianceRGB radiance = to_radiance(original);
-    ColorRGB back = to_color(radiance);
+    ColorRGB back = render::apply_camera_sensitivity(radiance, render::kDefaultCameraSensitivity);
     
-    EXPECT_NEAR(original.r, back.r, kEps);
-    EXPECT_NEAR(original.g, back.g, kEps);
-    EXPECT_NEAR(original.b, back.b, kEps);
+    auto [or_, og, ob] = render::color_to_floats(original);
+    auto [br, bg, bb] = render::color_to_floats(back);
+    EXPECT_NEAR(or_, br, kEps);
+    EXPECT_NEAR(og, bg, kEps);
+    EXPECT_NEAR(ob, bb, kEps);
 }
 
 TEST(RadianceConversionTest, Multiplication) {
-    ColorRGB throughput(0.5f, 0.5f, 0.5f);
-    RadianceRGB emission = to_radiance(ColorRGB(2.0f, 2.0f, 2.0f));
+    ColorRGB throughput = render::make_color_rgb(0.5f, 0.5f, 0.5f);
+    RadianceRGB emission = to_radiance(render::make_color_rgb(2.0f, 2.0f, 2.0f));
     
     RadianceRGB result = throughput * emission;
-    ColorRGB result_color = to_color(result);
+    ColorRGB result_color = render::apply_camera_sensitivity(result, render::kDefaultCameraSensitivity);
     
-    EXPECT_NEAR(result_color.r, 1.0f, kEps);
-    EXPECT_NEAR(result_color.g, 1.0f, kEps);
-    EXPECT_NEAR(result_color.b, 1.0f, kEps);
+    auto [rr, rg, rb] = render::color_to_floats(result_color);
+    EXPECT_NEAR(rr, 1.0f, kEps);
+    EXPECT_NEAR(rg, 1.0f, kEps);
+    EXPECT_NEAR(rb, 1.0f, kEps);
 }
 
 // ============================================================================
@@ -244,13 +251,13 @@ TEST(MISConsistencyTest, LightAndBSDFWeightsSum) {
     // Typical diffuse BSDF: cosine weighted
     PdfW bsdf_pdf = 0.8f * per_sr;
     
-    float light_weight = mis_power_heuristic(light_pdf, bsdf_pdf);
-    float bsdf_weight = mis_power_heuristic(bsdf_pdf, light_pdf);
+    Dimensionless light_weight = mis_power_heuristic(light_pdf, bsdf_pdf);
+    Dimensionless bsdf_weight = mis_power_heuristic(bsdf_pdf, light_pdf);
     
-    EXPECT_NEAR(light_weight + bsdf_weight, 1.0f, kEps);
+    EXPECT_NEAR((light_weight + bsdf_weight).numerical_value_in(one), 1.0f, kEps);
     
     // BSDF has higher PDF, so should have higher weight
-    EXPECT_GT(bsdf_weight, light_weight);
+    EXPECT_GT(bsdf_weight.numerical_value_in(one), light_weight.numerical_value_in(one));
 }
 
 TEST(MISConsistencyTest, UsagePatternCorrectness) {
@@ -259,15 +266,15 @@ TEST(MISConsistencyTest, UsagePatternCorrectness) {
     PdfW alternative_pdf = 0.3f * per_sr;  // PDF of the alternative strategy
     
     // CORRECT: First argument is the strategy we sampled with
-    float weight = mis_power_heuristic(sampled_pdf, alternative_pdf);
+    Dimensionless weight = mis_power_heuristic(sampled_pdf, alternative_pdf);
     
     // The weight should reflect that sampled_pdf > alternative_pdf
     // So we should get a weight > 0.5
-    EXPECT_GT(weight, 0.5f);
+    EXPECT_GT(weight.numerical_value_in(one), 0.5f);
     
     // Verify formula: sampled² / (sampled² + alt²)
     float s = sampled_pdf.numerical_value_in(per_sr);
     float a = alternative_pdf.numerical_value_in(per_sr);
     float expected = (s*s) / (s*s + a*a);
-    EXPECT_NEAR(weight, expected, kEps);
+    EXPECT_NEAR(weight.numerical_value_in(one), expected, kEps);
 }

@@ -303,16 +303,11 @@ inline BarycentricCoord2 make_barycentric2(float u, float v) {
     return BarycentricCoord2{Vec2f{u, v}};
 }
 
-// Helper: Create BarycentricCoord2 from dimensionless quantities
-inline BarycentricCoord2 make_barycentric2(Dimensionless u, Dimensionless v) {
-    return BarycentricCoord2{Vec2f{u.numerical_value_in(one), v.numerical_value_in(one)}};
-}
-
 // Accessors for barycentric coordinates (encapsulate extraction)
-inline float bary_u(const BarycentricCoord2& bary) { return bary.numerical_value_in(one).x; }
-inline float bary_v(const BarycentricCoord2& bary) { return bary.numerical_value_in(one).y; }
+inline float bary_u(const BarycentricCoord2& bary) { return bary.numerical_value_ref_in(one).x; }
+inline float bary_v(const BarycentricCoord2& bary) { return bary.numerical_value_ref_in(one).y; }
 inline float bary_w(const BarycentricCoord2& bary) { 
-    Vec2f uv = bary.numerical_value_in(one);
+    const Vec2f& uv = bary.numerical_value_ref_in(one);
     return 1.0f - uv.x - uv.y;
 }
 
@@ -389,51 +384,23 @@ using Position = quantity_point<isq::displacement[si::metre], world_origin, Vec3
 // Helper to create Position from Vec3f
 inline Position make_position(Vec3f v) { return world_origin + quantity{v, isq::displacement[si::metre]}; }
 
-// Helper to create Position from coordinates
+// Helper to create Position from float coordinates
 inline Position make_position(float x, float y, float z) { return make_position(Vec3f{x, y, z}); }
+
+// Helper to create Position from Length coordinates (extraction boundary)
+inline Position make_position(Length x, Length y, Length z) {
+    return make_position(Vec3f{
+        x.numerical_value_in(si::metre),
+        y.numerical_value_in(si::metre),
+        z.numerical_value_in(si::metre)
+    });
+}
 
 // Get Displacement from world origin (for low-level geometry ONLY)
 // Prefer using Position - Position = Displacement for relative calculations
 inline Displacement displacement_from_origin(const Position& p) {
     return p.quantity_from(world_origin);
 }
-
-// Helper to compute component-wise min of two Positions (for AABB)
-// Note: Uses displacement_from_origin internally since Position is an affine point
-// and component-wise operations require access to coordinate values
-inline Position pos_component_min(const Position& a, const Position& b) {
-    Vec3f va = displacement_from_origin(a).numerical_value_in(si::metre);
-    Vec3f vb = displacement_from_origin(b).numerical_value_in(si::metre);
-    return make_position(std::min(va.x, vb.x), std::min(va.y, vb.y), std::min(va.z, vb.z));
-}
-
-// Helper to compute component-wise max of two Positions (for AABB)
-inline Position pos_component_max(const Position& a, const Position& b) {
-    Vec3f va = displacement_from_origin(a).numerical_value_in(si::metre);
-    Vec3f vb = displacement_from_origin(b).numerical_value_in(si::metre);
-    return make_position(std::max(va.x, vb.x), std::max(va.y, vb.y), std::max(va.z, vb.z));
-}
-
-// Helper to compute both component-wise min and max in one pass (for AABB construction)
-// Saves 2 extractions compared to calling pos_min + pos_max separately
-inline std::pair<Position, Position> pos_component_minmax(const Position& a, const Position& b) {
-    Vec3f va = displacement_from_origin(a).numerical_value_in(si::metre);
-    Vec3f vb = displacement_from_origin(b).numerical_value_in(si::metre);
-    return {
-        make_position(std::min(va.x, vb.x), std::min(va.y, vb.y), std::min(va.z, vb.z)),
-        make_position(std::max(va.x, vb.x), std::max(va.y, vb.y), std::max(va.z, vb.z))
-    };
-}
-
-// Deprecated shims for backward compatibility (to be removed later)
-[[deprecated("Use pos_component_min() for component-wise min of Position coordinates")]]
-inline Position pos_min(const Position& a, const Position& b) { return pos_component_min(a, b); }
-
-[[deprecated("Use pos_component_max() for component-wise max of Position coordinates")]]
-inline Position pos_max(const Position& a, const Position& b) { return pos_component_max(a, b); }
-
-[[deprecated("Use pos_component_minmax() for component-wise min/max of Position coordinates")]]
-inline std::pair<Position, Position> pos_minmax(const Position& a, const Position& b) { return pos_component_minmax(a, b); }
 
 // ============================================================================
 // Part E: Direction and Normal (Semantic Wrappers for Dimensionless Vectors)
@@ -563,7 +530,7 @@ inline Displacement operator*(Length len, Direction d) { return d * len; }
 // Get the squared length of a Displacement -> Area [m²]
 // This is the fundamental operation; disp_length uses this
 inline Area disp_length_squared(const Displacement& d) {
-    Vec3f v = d.numerical_value_in(si::metre);
+    const Vec3f& v = d.numerical_value_ref_in(si::metre);
     return v.length_squared() * mp_units::square(si::metre);
 }
 
@@ -578,20 +545,20 @@ inline Length area_sqrt(Area a) {
 // Get the length of a Displacement -> Length [m]
 // Direct extraction + sqrt (mp_units::sqrt is consteval only, so we extract once)
 inline Length disp_length(const Displacement& d) {
-    Vec3f v = d.numerical_value_in(si::metre);
+    const Vec3f& v = d.numerical_value_ref_in(si::metre);
     return v.length() * si::metre;
 }
 
 // Component accessors for Displacement -> Length [m]
 // Useful for AABB slab tests and other component-wise operations
 inline Length disp_x(const Displacement& d) {
-    return d.numerical_value_in(si::metre).x * si::metre;
+    return d.numerical_value_ref_in(si::metre).x * si::metre;
 }
 inline Length disp_y(const Displacement& d) {
-    return d.numerical_value_in(si::metre).y * si::metre;
+    return d.numerical_value_ref_in(si::metre).y * si::metre;
 }
 inline Length disp_z(const Displacement& d) {
-    return d.numerical_value_in(si::metre).z * si::metre;
+    return d.numerical_value_ref_in(si::metre).z * si::metre;
 }
 
 // Component accessors for Position -> Length [m]
@@ -599,6 +566,33 @@ inline Length disp_z(const Displacement& d) {
 inline Length pos_x(const Position& p) { return disp_x(displacement_from_origin(p)); }
 inline Length pos_y(const Position& p) { return disp_y(displacement_from_origin(p)); }
 inline Length pos_z(const Position& p) { return disp_z(displacement_from_origin(p)); }
+
+// Helper to compute component-wise min of two Positions (for AABB)
+// Uses unit-typed std::min on Length components
+inline Position pos_component_min(const Position& a, const Position& b) {
+    return make_position(
+        std::min(pos_x(a), pos_x(b)),
+        std::min(pos_y(a), pos_y(b)),
+        std::min(pos_z(a), pos_z(b))
+    );
+}
+
+// Helper to compute component-wise max of two Positions (for AABB)
+inline Position pos_component_max(const Position& a, const Position& b) {
+    return make_position(
+        std::max(pos_x(a), pos_x(b)),
+        std::max(pos_y(a), pos_y(b)),
+        std::max(pos_z(a), pos_z(b))
+    );
+}
+
+// Helper to compute both component-wise min and max in one pass (for AABB construction)
+inline std::pair<Position, Position> pos_component_minmax(const Position& a, const Position& b) {
+    return {
+        pos_component_min(a, b),
+        pos_component_max(a, b)
+    };
+}
 
 // Get Position component by axis index (0=x, 1=y, 2=z)
 inline Length pos_component(const Position& p, int axis) {
@@ -614,15 +608,15 @@ inline Length disp_component(const Displacement& d, int axis) {
 // Note: This is needed because mp-units doesn't support Displacement cross/dot directly.
 // The extraction strips units but allows component-wise math; results must be reattached.
 inline Vec3f disp_to_vec(const Displacement& d) {
-    return d.numerical_value_in(si::metre);
+    return d.numerical_value_ref_in(si::metre);
 }
 
 // Cross product magnitude: |e1 × e2| -> Area [m²]
 // Useful for triangle area calculation: Area = 0.5 * |e1 × e2|
 // Encapsulates the extraction boundary for cross product operations
 inline Area disp_cross_magnitude(const Displacement& e1, const Displacement& e2) {
-    Vec3f a = e1.numerical_value_in(si::metre);
-    Vec3f b = e2.numerical_value_in(si::metre);
+    const Vec3f& a = e1.numerical_value_ref_in(si::metre);
+    const Vec3f& b = e2.numerical_value_ref_in(si::metre);
     return length(cross(a, b)) * mp_units::square(si::metre);
 }
 
@@ -630,8 +624,8 @@ inline Area disp_cross_magnitude(const Displacement& e1, const Displacement& e2)
 // Returns the full cross product as an oriented area vector (not just magnitude).
 // Used in Möller-Trumbore: qvec = cross(tvec, e1) has dimension [m²] and direction.
 inline OrientedArea disp_cross(const Displacement& a, const Displacement& b) {
-    Vec3f va = a.numerical_value_in(si::metre);
-    Vec3f vb = b.numerical_value_in(si::metre);
+    const Vec3f& va = a.numerical_value_ref_in(si::metre);
+    const Vec3f& vb = b.numerical_value_ref_in(si::metre);
     return quantity{cross(va, vb), oriented_area[mp_units::square(si::metre)]};
 }
 
@@ -639,7 +633,8 @@ inline OrientedArea disp_cross(const Displacement& a, const Displacement& b) {
 // Direction is dimensionless (unit vector), so result has same dimension as Displacement.
 // Used in Möller-Trumbore: pvec = cross(d, e2) where d is ray direction.
 inline Displacement dir_cross_disp(const Direction& d, const Displacement& disp) {
-    Vec3f result = cross(d.vec(), disp.numerical_value_in(si::metre));
+    const Vec3f& vdisp = disp.numerical_value_ref_in(si::metre);
+    Vec3f result = cross(d.vec(), vdisp);
     return quantity{result, isq::displacement[si::metre]};
 }
 
@@ -649,8 +644,8 @@ inline Displacement dir_cross_disp(const Direction& d, const Displacement& disp)
 // Displacement · OrientedArea -> Volume [m³]
 // Used in Möller-Trumbore: dot(e2, qvec) where qvec is [m²] vector
 inline Volume disp_dot_oriented(const Displacement& d, const OrientedArea& oa) {
-    Vec3f vd = d.numerical_value_in(si::metre);
-    Vec3f voa = oa.numerical_value_in(mp_units::square(si::metre));
+    const Vec3f& vd = d.numerical_value_ref_in(si::metre);
+    const Vec3f& voa = oa.numerical_value_ref_in(mp_units::square(si::metre));
     return dot(vd, voa) * mp_units::cubic(si::metre);
 }
 
@@ -658,7 +653,7 @@ inline Volume disp_dot_oriented(const Displacement& d, const OrientedArea& oa) {
 // Direction is dimensionless, so result has same dimension as OrientedArea.
 // Used in Möller-Trumbore: dot(D, qvec) for computing barycentric v.
 inline Area dir_dot_oriented(const Direction& d, const OrientedArea& oa) {
-    Vec3f voa = oa.numerical_value_in(mp_units::square(si::metre));
+    const Vec3f& voa = oa.numerical_value_ref_in(mp_units::square(si::metre));
     return dot(d.vec(), voa) * mp_units::square(si::metre);
 }
 
@@ -670,8 +665,8 @@ inline Area dir_dot_oriented(const Direction& d, const OrientedArea& oa) {
 // This is the true inner product of two displacement vectors.
 // Dimensional analysis: [m] × [m] = [m²]
 inline Area disp_inner(const Displacement& a, const Displacement& b) {
-    Vec3f va = a.numerical_value_in(si::metre);
-    Vec3f vb = b.numerical_value_in(si::metre);
+    const Vec3f& va = a.numerical_value_ref_in(si::metre);
+    const Vec3f& vb = b.numerical_value_ref_in(si::metre);
     return dot(va, vb) * mp_units::square(si::metre);
 }
 
@@ -683,7 +678,7 @@ inline Area disp_inner(const Displacement& a, const Displacement& b) {
 // Dimensional analysis: [m] × [1] = [m]
 // This operation is ISQ-valid: ISO 80000 explicitly uses {unit vector} notation.
 inline Length project_onto(const Displacement& disp, const Direction& dir) {
-    Vec3f v = disp.numerical_value_in(si::metre);
+    const Vec3f& v = disp.numerical_value_ref_in(si::metre);
     return dot(v, dir.vec()) * si::metre;
 }
 
@@ -695,14 +690,14 @@ inline Length project_onto(const Direction& dir, const Displacement& disp) {
 // Normalize a Displacement to get Direction
 // Caller guarantees non-zero length. Still normalizes to handle floating-point drift.
 [[nodiscard]] inline Direction normalize_to_direction(const Displacement& d) {
-    Vec3f v = d.numerical_value_in(si::metre);
+    const Vec3f& v = d.numerical_value_ref_in(si::metre);
     return direction_from_unit_vector(normalize(v));
 }
 
 // Normalize and return both direction and length in one extraction
 // Caller guarantees non-zero length.
 [[nodiscard]] inline std::pair<Direction, Length> normalize_with_length(const Displacement& d) {
-    Vec3f v = d.numerical_value_in(si::metre);
+    const Vec3f& v = d.numerical_value_ref_in(si::metre);
     float len = v.length();
     return {direction_from_unit_vector(v / len), len * si::metre};
 }
@@ -844,6 +839,16 @@ inline constexpr auto MIN_PDF_A = 1e-6f * per_m2;
 // Part H: RGB Color Types (Channel-wise operations only)
 // ============================================================================
 // RGB is NOT a geometric vector - no dot/cross/magnitude allowed.
+// All RGB types use mp-units quantities for type safety:
+// - ColorRGB = RGB<Reflectance> (dimensionless [0,1] for albedo/reflectance)
+// - RadianceRGB = RGB<Radiance>  ([W/(sr·m²)])
+// - BSDFRGB = RGB<BSDF>         ([1/sr])
+
+// Reflectance: dimensionless quantity for albedo/reflectance values [0,1]
+using Reflectance = quantity<dimensionless[one], float>;
+
+// Helper to create Reflectance from float
+inline constexpr Reflectance reflectance(float v) { return v * one; }
 
 template <typename T>
 struct RGB {
@@ -875,33 +880,101 @@ struct RGB {
     // RGB is a color, not a geometric vector.
 };
 
-// Scalar multiplication for RGB<float>
-template <typename T>
-    requires std::is_arithmetic_v<T>
-constexpr RGB<float> operator*(RGB<float> c, T s) {
-    return {c.r * static_cast<float>(s), c.g * static_cast<float>(s), c.b * static_cast<float>(s)};
+// Type aliases for RGB types (defined early, before operators)
+using ColorRGB = RGB<Reflectance>;  // For albedo, reflectance (dimensionless, [0,1])
+
+// ============================================================================
+// Part H.1: ColorRGB Operators and Helpers
+// ============================================================================
+
+// Factory function to create ColorRGB from float values
+inline ColorRGB make_color_rgb(float r, float g, float b) {
+    return {reflectance(r), reflectance(g), reflectance(b)};
 }
 
-template <typename T>
-    requires std::is_arithmetic_v<T>
-constexpr RGB<float> operator*(T s, RGB<float> c) {
-    return c * s;
+// Helper to create zero ColorRGB
+inline ColorRGB zero_color_rgb() {
+    return {reflectance(0.0f), reflectance(0.0f), reflectance(0.0f)};
 }
 
-template <typename T>
-    requires std::is_arithmetic_v<T>
-constexpr RGB<float> operator/(RGB<float> c, T s) {
-    return {c.r / static_cast<float>(s), c.g / static_cast<float>(s), c.b / static_cast<float>(s)};
+// Scalar multiplication for ColorRGB
+inline ColorRGB operator*(ColorRGB c, float s) {
+    return {c.r * s, c.g * s, c.b * s};
+}
+inline ColorRGB operator*(float s, ColorRGB c) { return c * s; }
+
+// ColorRGB * Dimensionless -> ColorRGB (dimensionless factor)
+// Physical: [dimensionless] × [dimensionless] -> [dimensionless]
+// Used for: MIS weights, area ratios, and other dimensionless multipliers
+inline ColorRGB operator*(ColorRGB c, Dimensionless factor) {
+    return {c.r * factor, c.g * factor, c.b * factor};
+}
+inline ColorRGB operator*(Dimensionless factor, ColorRGB c) { return c * factor; }
+
+// Scalar division for ColorRGB
+inline ColorRGB operator/(ColorRGB c, float s) {
+    return {c.r / s, c.g / s, c.b / s};
 }
 
-// Type aliases
-using ColorRGB = RGB<float>;  // For albedo, reflectance (dimensionless, [0,1])
+// Element-wise product (Hadamard) for ColorRGB
+// [dimensionless] * [dimensionless] = [dimensionless]
+// mp-units correctly simplifies one*one -> one, so direct multiplication works
+inline ColorRGB operator*(ColorRGB a, ColorRGB b) {
+    return {a.r * b.r, a.g * b.g, a.b * b.b};
+}
 
-// Luminance (ITU-R BT.709 coefficients)
-constexpr float luminance(ColorRGB c) { return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b; }
+// Luminance (ITU-R BT.709 coefficients) - returns Reflectance (unit-typed)
+inline Reflectance luminance(ColorRGB c) {
+    return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
+}
 
-// Operator* for ColorRGB * ColorRGB (element-wise product for modulating colors)
-constexpr ColorRGB operator*(ColorRGB a, ColorRGB b) { return {a.r * b.r, a.g * b.g, a.b * b.b}; }
+// Check if any component is NaN or Inf (extracts numerical values)
+inline bool color_is_valid(ColorRGB c) {
+    float r = c.r.numerical_value_in(one);
+    float g = c.g.numerical_value_in(one);
+    float b = c.b.numerical_value_in(one);
+    return !std::isnan(r) && !std::isnan(g) && !std::isnan(b) &&
+           !std::isinf(r) && !std::isinf(g) && !std::isinf(b);
+}
+
+// Get max component value as float
+inline float color_max_component(ColorRGB c) {
+    return std::max({
+        c.r.numerical_value_in(one),
+        c.g.numerical_value_in(one),
+        c.b.numerical_value_in(one)
+    });
+}
+
+// Extract RGB components as float tuple for output to external systems
+inline std::tuple<float, float, float> color_to_floats(ColorRGB c) {
+    return {
+        c.r.numerical_value_in(one),
+        c.g.numerical_value_in(one),
+        c.b.numerical_value_in(one)
+    };
+}
+
+// Clamp ColorRGB to [0, max] range
+inline ColorRGB color_clamp(ColorRGB c, float max_val = 1.0f) {
+    auto min_refl = reflectance(0.0f);
+    auto max_refl = reflectance(max_val);
+    return {
+        std::clamp(c.r, min_refl, max_refl),
+        std::clamp(c.g, min_refl, max_refl),
+        std::clamp(c.b, min_refl, max_refl)
+    };
+}
+
+// Clamp ColorRGB to minimum 0 (no upper bound)
+inline ColorRGB color_clamp_min_zero(ColorRGB c) {
+    auto zero = reflectance(0.0f);
+    return {
+        std::max(c.r, zero),
+        std::max(c.g, zero),
+        std::max(c.b, zero)
+    };
+}
 
 // ============================================================================
 // Part I: Radiance Type
@@ -955,6 +1028,20 @@ inline BSDFRGB operator*(BSDFRGB c, float s) { return {c.r * s, c.g * s, c.b * s
 
 inline BSDFRGB operator*(float s, BSDFRGB c) { return c * s; }
 
+// Luminance for RadianceRGB - returns Radiance (unit-typed)
+// Useful for checking if emission is non-zero without stripping units
+inline Radiance luminance(RadianceRGB c) {
+    return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
+}
+
+// Minimum radiance threshold for emission checks
+inline constexpr auto MIN_RADIANCE = 1e-6f * radiance_unit;
+
+// Check if RadianceRGB has non-negligible emission (unit-typed comparison)
+inline bool is_emissive(RadianceRGB emission) {
+    return luminance(emission) > MIN_RADIANCE;
+}
+
 // ============================================================================
 // Part I.2: Cross-Type RGB Operators (Unit-Typed Arithmetic)
 // ============================================================================
@@ -966,6 +1053,7 @@ inline BSDFRGB operator*(float s, BSDFRGB c) { return c * s; }
 // BSDFRGB * ColorRGB -> BSDFRGB (modulate by albedo/kd)
 // Physical: [1/sr] × [dimensionless] -> [1/sr]
 inline BSDFRGB operator*(BSDFRGB bsdf, ColorRGB color) {
+    // [1/sr] * [one] = [1/sr]
     return {bsdf.r * color.r, bsdf.g * color.g, bsdf.b * color.b};
 }
 inline BSDFRGB operator*(ColorRGB color, BSDFRGB bsdf) { return bsdf * color; }
@@ -973,23 +1061,39 @@ inline BSDFRGB operator*(ColorRGB color, BSDFRGB bsdf) { return bsdf * color; }
 // BSDFRGB / PdfW -> ColorRGB (importance sampling weight)
 // Physical: [1/sr] / [1/sr] -> [dimensionless]
 inline ColorRGB operator/(BSDFRGB f, PdfW pdf) {
-    if (pdf < MIN_PDF) return ColorRGB(0.0f, 0.0f, 0.0f);
-    // Unit-typed division: [1/sr] / [1/sr] = [one] (dimensionless)
-    return ColorRGB(
-        (f.r / pdf).numerical_value_in(one),
-        (f.g / pdf).numerical_value_in(one),
-        (f.b / pdf).numerical_value_in(one)
-    );
+    if (pdf < MIN_PDF) return zero_color_rgb();
+    // [1/sr] / [1/sr] = [dimensionless] = Reflectance
+    return ColorRGB{f.r / pdf, f.g / pdf, f.b / pdf};
 }
 
-// --- RadianceRGB / ColorRGB Cross-Type Operators ---
+// Lambertian diffuse BSDF from albedo: albedo / π → [1/sr]
+// [dimensionless] * [1/sr] = [1/sr]
+inline BSDFRGB diffuse_bsdf_from_albedo(ColorRGB albedo) {
+    constexpr float INV_PI = 0.31830988618f;
+    return {
+        albedo.r * INV_PI * per_sr,
+        albedo.g * INV_PI * per_sr,
+        albedo.b * INV_PI * per_sr
+    };
+}
+
+// --- RadianceRGB / ColorRGB / Dimensionless Cross-Type Operators ---
 
 // ColorRGB * RadianceRGB -> RadianceRGB (throughput × emission)
 // Physical: [dimensionless] × [W/(sr·m²)] -> [W/(sr·m²)]
 inline RadianceRGB operator*(ColorRGB throughput, RadianceRGB rad) {
+    // [one] * [W/(sr·m²)] = [W/(sr·m²)]
     return {rad.r * throughput.r, rad.g * throughput.g, rad.b * throughput.b};
 }
 inline RadianceRGB operator*(RadianceRGB rad, ColorRGB throughput) { return throughput * rad; }
+
+// RadianceRGB * Dimensionless -> RadianceRGB (attenuation factor)
+// Physical: [W/(sr·m²)] × [dimensionless] -> [W/(sr·m²)]
+// Used for: inverse_square_factor, area_ratio, and other dimensionless multipliers
+inline RadianceRGB operator*(RadianceRGB rad, Dimensionless factor) {
+    return {rad.r * factor, rad.g * factor, rad.b * factor};
+}
+inline RadianceRGB operator*(Dimensionless factor, RadianceRGB rad) { return rad * factor; }
 
 // RadianceRGB / float -> RadianceRGB (averaging)
 inline RadianceRGB operator/(RadianceRGB rad, float s) {
@@ -997,31 +1101,51 @@ inline RadianceRGB operator/(RadianceRGB rad, float s) {
 }
 
 // ============================================================================
-// Part I.3: Type Conversion Helpers (Interface Boundaries Only)
+// Part I.3: Camera Sensitivity (Radiance → Pixel Value Conversion)
 // ============================================================================
-// Use these ONLY at interface boundaries (final output, debug, etc.)
+// Camera sensitivity converts radiance to pixel values in a physically correct way.
+// Unit: [sr·m²/W] - inverse of radiance, so Radiance × Sensitivity = dimensionless
+//
+// This corresponds to Blender's Film → Exposure setting (EV-based).
+// Exposure = 2^EV where EV=0 means sensitivity = 1.0 [sr·m²/W]
 
-// RadianceRGB -> ColorRGB (strip units for final output)
-inline ColorRGB to_color(RadianceRGB rad) {
-    return ColorRGB(
-        rad.r.numerical_value_in(radiance_unit),
-        rad.g.numerical_value_in(radiance_unit),
-        rad.b.numerical_value_in(radiance_unit)
-    );
+// Camera sensitivity unit: [sr·m²/W]
+inline constexpr auto camera_sensitivity_unit = 
+    si::steradian * mp_units::square(si::metre) / si::watt;
+
+// Camera sensitivity type [sr·m²/W]
+using CameraSensitivity = quantity<camera_sensitivity_unit, float>;
+
+// Default camera sensitivity (EV = 0)
+inline constexpr auto kDefaultCameraSensitivity = 1.0f * camera_sensitivity_unit;
+
+// Create camera sensitivity from EV (exposure value)
+// EV = 0 → sensitivity = 1.0
+// EV = +1 → sensitivity = 2.0 (brighter)
+// EV = -1 → sensitivity = 0.5 (darker)
+// This matches Blender's Film → Exposure behavior
+inline CameraSensitivity sensitivity_from_ev(float ev) {
+    return std::pow(2.0f, ev) * camera_sensitivity_unit;
 }
 
-// BSDFRGB -> ColorRGB (strip units)
-inline ColorRGB to_color(BSDFRGB bsdf) {
-    return ColorRGB(
-        bsdf.r.numerical_value_in(per_sr),
-        bsdf.g.numerical_value_in(per_sr),
-        bsdf.b.numerical_value_in(per_sr)
-    );
+// RadianceRGB × CameraSensitivity → ColorRGB (physically correct conversion)
+// [W/(sr·m²)] × [sr·m²/W] = [dimensionless]
+inline ColorRGB apply_camera_sensitivity(RadianceRGB rad, CameraSensitivity sens) {
+    // [W/(sr·m²)] × [sr·m²/W] = [dimensionless] = Reflectance
+    return ColorRGB{rad.r * sens, rad.g * sens, rad.b * sens};
 }
+
+// ============================================================================
+// Part I.3b: Type Conversion Helpers (Boundary Functions)
+// ============================================================================
+// These are boundary functions where numerical_value_in extraction is allowed.
+// They convert between typed color representations at the system edges.
 
 // ColorRGB -> RadianceRGB (create radiance from emission color values)
+// Boundary: Used when treating a ColorRGB as emission radiance values
 inline RadianceRGB to_radiance(ColorRGB color) {
-    return make_radiance_rgb(color.r, color.g, color.b);
+    auto [r, g, b] = color_to_floats(color);
+    return make_radiance_rgb(r, g, b);
 }
 
 // ============================================================================
@@ -1036,19 +1160,19 @@ inline constexpr PdfW zero_pdf_w() { return 0.0f * per_sr; }
 inline constexpr auto MIN_AREA = 1e-6f * mp_units::square(mp_units::si::metre);
 inline constexpr auto MIN_LENGTH = 1e-6f * mp_units::si::metre;
 
-// Inverse square falloff factor: 1/d² -> dimensionless
+// Inverse square falloff factor: 1/d² -> Dimensionless
 // Common pattern for point/spot light attenuation
-// Returns: 1 m² / d² (dimensionless)
-inline float inverse_square_factor(Length dist) {
+// Returns: 1 m² / d² (dimensionless quantity)
+inline Dimensionless inverse_square_factor(Length dist) {
     Area dist_sq = dist * dist;
-    return (1.0f * mp_units::square(mp_units::si::metre) / dist_sq).numerical_value_in(mp_units::one);
+    return 1.0f * mp_units::square(mp_units::si::metre) / dist_sq;
 }
 
 // Helper: compute dimensionless ratio between two Area values
 // Useful for light selection probability = area_i / total_area
-inline float area_ratio(Area numerator, Area denominator) {
-    if (denominator < MIN_AREA) return 0.0f;
-    return (numerator / denominator).numerical_value_in(mp_units::one);
+inline Dimensionless area_ratio(Area numerator, Area denominator) {
+    if (denominator < MIN_AREA) return 0.0f * one;
+    return numerator / denominator;
 }
 
 // ============================================================================
@@ -1059,7 +1183,7 @@ inline float area_ratio(Area numerator, Area denominator) {
 // This is the main importance sampling weight calculation.
 // Returns dimensionless ColorRGB that can be multiplied with throughput.
 inline ColorRGB bsdf_sample_weight(BSDFRGB f, float abs_cos_theta, PdfW pdf) {
-    if (pdf < MIN_PDF) return ColorRGB(0.0f, 0.0f, 0.0f);
+    if (pdf < MIN_PDF) return zero_color_rgb();
     // Use typed division: BSDFRGB [1/sr] / PdfW [1/sr] -> ColorRGB [dimensionless]
     ColorRGB base = f / pdf;
     return base * abs_cos_theta;
@@ -1070,11 +1194,11 @@ inline ColorRGB bsdf_sample_weight(BSDFRGB f, float abs_cos_theta, PdfW pdf) {
 // Usage: When you sampled via strategy F and want to weight the contribution,
 //        call mis_power_heuristic(pdf_of_F, pdf_of_alternative_G)
 // Property: mis_power_heuristic(pf, pg) + mis_power_heuristic(pg, pf) ≈ 1
-inline float mis_power_heuristic(PdfW pf, PdfW pg) {
+inline Dimensionless mis_power_heuristic(PdfW pf, PdfW pg) {
     auto f2 = pf * pf;
     auto g2 = pg * pg;
     auto epsilon = 1e-10f * per_sr * per_sr;
-    return (f2 / (f2 + g2 + epsilon)).numerical_value_in(mp_units::one);
+    return f2 / (f2 + g2 + epsilon);
 }
 
 // ============================================================================
@@ -1089,8 +1213,8 @@ inline PdfW compute_pdf_w_from_area(Length dist, Area area, float abs_cos_theta)
     }
     // dist² [m²] / area [m²] = dimensionless ratio
     auto dist_sq = dist * dist;
-    // Unit-typed division, extract dimensionless result at the end
-    return ((dist_sq / area) / abs_cos_theta).numerical_value_in(one) * per_sr;
+    // Unit-typed: [m²] / [m²] / [1] / [sr] = [1/sr] = PdfW
+    return (dist_sq / area) / abs_cos_theta / si::steradian;
 }
 
 // ============================================================================

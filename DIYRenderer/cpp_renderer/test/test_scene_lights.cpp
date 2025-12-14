@@ -46,7 +46,7 @@ TEST_F(SceneLightsTest, SingleEmissiveMesh) {
     };
     emissive.triangles.push_back(makeTriangle(0, 1, 2, emissive.vertices));
     emissive.material = Material(
-        render::ColorRGB(1.0f, 1.0f, 1.0f),
+        render::make_color_rgb(1.0f, 1.0f, 1.0f),
         0.0f, 0.5f,
         render::make_radiance_rgb(10.0f, 10.0f, 10.0f)
     );
@@ -73,7 +73,7 @@ TEST_F(SceneLightsTest, SingleNativePointLight) {
     };
     floor.triangles.push_back(makeTriangle(0, 1, 2, floor.vertices));
     floor.material = Material(
-        render::ColorRGB(0.8f, 0.8f, 0.8f),
+        render::make_color_rgb(0.8f, 0.8f, 0.8f),
         0.0f, 0.5f,
         render::zero_radiance_rgb()
     );
@@ -145,7 +145,7 @@ TEST_F(SceneLightsTest, FindNativeLightIndexWithEmissiveMeshes) {
     emissive.triangles.push_back(makeTriangle(0, 1, 2, emissive.vertices));
     emissive.triangles.push_back(makeTriangle(0, 2, 3, emissive.vertices));
     emissive.material = Material(
-        render::ColorRGB(1.0f, 1.0f, 1.0f),
+        render::make_color_rgb(1.0f, 1.0f, 1.0f),
         0.0f, 0.5f,
         render::make_radiance_rgb(10.0f, 10.0f, 10.0f)
     );
@@ -197,7 +197,7 @@ TEST_F(SceneLightsTest, CDFIsNormalized) {
     emissive.triangles.push_back(makeTriangle(0, 1, 2, emissive.vertices));
     emissive.triangles.push_back(makeTriangle(0, 3, 1, emissive.vertices));
     emissive.material = Material(
-        render::ColorRGB(1.0f, 1.0f, 1.0f),
+        render::make_color_rgb(1.0f, 1.0f, 1.0f),
         0.0f, 0.5f,
         render::make_radiance_rgb(10.0f, 10.0f, 10.0f)
     );
@@ -222,7 +222,7 @@ TEST_F(SceneLightsTest, SelectLightReturnsValidIndex) {
     };
     emissive.triangles.push_back(makeTriangle(0, 1, 2, emissive.vertices));
     emissive.material = Material(
-        render::ColorRGB(1.0f, 1.0f, 1.0f),
+        render::make_color_rgb(1.0f, 1.0f, 1.0f),
         0.0f, 0.5f,
         render::make_radiance_rgb(10.0f, 10.0f, 10.0f)
     );
@@ -256,7 +256,7 @@ TEST_F(SceneLightsTest, GetPdfForLightSumsToOne) {
     emissive.triangles.push_back(makeTriangle(0, 1, 2, emissive.vertices));
     emissive.triangles.push_back(makeTriangle(0, 2, 3, emissive.vertices));
     emissive.material = Material(
-        render::ColorRGB(1.0f, 1.0f, 1.0f),
+        render::make_color_rgb(1.0f, 1.0f, 1.0f),
         0.0f, 0.5f,
         render::make_radiance_rgb(10.0f, 10.0f, 10.0f)
     );
@@ -288,7 +288,7 @@ TEST_F(SceneLightsTest, NonEmissiveMeshesIgnored) {
     };
     floor.triangles.push_back(makeTriangle(0, 1, 2, floor.vertices));
     floor.material = Material(
-        render::ColorRGB(0.8f, 0.8f, 0.8f),
+        render::make_color_rgb(0.8f, 0.8f, 0.8f),
         0.0f, 0.5f,
         render::zero_radiance_rgb()  // No emission
     );
@@ -313,7 +313,7 @@ TEST_F(SceneLightsTest, DegenerateTrianglesIgnored) {
     };
     emissive.triangles.push_back(makeTriangle(0, 1, 2, emissive.vertices));
     emissive.material = Material(
-        render::ColorRGB(1.0f, 1.0f, 1.0f),
+        render::make_color_rgb(1.0f, 1.0f, 1.0f),
         0.0f, 0.5f,
         render::make_radiance_rgb(10.0f, 10.0f, 10.0f)
     );

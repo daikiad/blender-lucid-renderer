@@ -42,15 +42,19 @@ inline bool relativeEqual(float a, float b, float relEps = kRelativeEpsilon) {
 }
 
 inline bool colorApproxEqual(const render::ColorRGB& a, const render::ColorRGB& b, float eps = kEpsilon) {
-    return approxEqual(a.r, b.r, eps) && 
-           approxEqual(a.g, b.g, eps) && 
-           approxEqual(a.b, b.b, eps);
+    auto [ar, ag, ab] = render::color_to_floats(a);
+    auto [br, bg, bb] = render::color_to_floats(b);
+    return approxEqual(ar, br, eps) && 
+           approxEqual(ag, bg, eps) && 
+           approxEqual(ab, bb, eps);
 }
 
 inline bool colorRelativeEqual(const render::ColorRGB& a, const render::ColorRGB& b, float relEps = kRelativeEpsilon) {
-    return relativeEqual(a.r, b.r, relEps) && 
-           relativeEqual(a.g, b.g, relEps) && 
-           relativeEqual(a.b, b.b, relEps);
+    auto [ar, ag, ab] = render::color_to_floats(a);
+    auto [br, bg, bb] = render::color_to_floats(b);
+    return relativeEqual(ar, br, relEps) && 
+           relativeEqual(ag, bg, relEps) && 
+           relativeEqual(ab, bb, relEps);
 }
 
 // =============================================================================
@@ -104,7 +108,7 @@ inline Scene createSingleTriangleScene() {
     };
     mesh.triangles.push_back(makeTriangle(0, 1, 2, mesh.vertices));
     mesh.material = Material(
-        render::ColorRGB(0.8f, 0.8f, 0.8f),  // albedo
+        render::make_color_rgb(0.8f, 0.8f, 0.8f),  // albedo
         0.0f,  // metallic
         0.5f,  // roughness
         render::zero_radiance_rgb()  // emission
@@ -132,7 +136,7 @@ inline Scene createCornellBoxScene() {
         floor.triangles.push_back(makeTriangle(0, 1, 2, floor.vertices));
         floor.triangles.push_back(makeTriangle(0, 2, 3, floor.vertices));
         floor.material = Material(
-            render::ColorRGB(0.73f, 0.73f, 0.73f),
+            render::make_color_rgb(0.73f, 0.73f, 0.73f),
             0.0f, 0.5f, render::zero_radiance_rgb()
         );
         scene.meshes.push_back(std::move(floor));
@@ -150,7 +154,7 @@ inline Scene createCornellBoxScene() {
         ceiling.triangles.push_back(makeTriangle(0, 2, 1, ceiling.vertices));
         ceiling.triangles.push_back(makeTriangle(0, 3, 2, ceiling.vertices));
         ceiling.material = Material(
-            render::ColorRGB(0.73f, 0.73f, 0.73f),
+            render::make_color_rgb(0.73f, 0.73f, 0.73f),
             0.0f, 0.5f, render::zero_radiance_rgb()
         );
         scene.meshes.push_back(std::move(ceiling));
@@ -168,7 +172,7 @@ inline Scene createCornellBoxScene() {
         backWall.triangles.push_back(makeTriangle(0, 1, 2, backWall.vertices));
         backWall.triangles.push_back(makeTriangle(0, 2, 3, backWall.vertices));
         backWall.material = Material(
-            render::ColorRGB(0.73f, 0.73f, 0.73f),
+            render::make_color_rgb(0.73f, 0.73f, 0.73f),
             0.0f, 0.5f, render::zero_radiance_rgb()
         );
         scene.meshes.push_back(std::move(backWall));
@@ -186,7 +190,7 @@ inline Scene createCornellBoxScene() {
         leftWall.triangles.push_back(makeTriangle(0, 1, 2, leftWall.vertices));
         leftWall.triangles.push_back(makeTriangle(0, 2, 3, leftWall.vertices));
         leftWall.material = Material(
-            render::ColorRGB(0.65f, 0.05f, 0.05f),
+            render::make_color_rgb(0.65f, 0.05f, 0.05f),
             0.0f, 0.5f, render::zero_radiance_rgb()
         );
         scene.meshes.push_back(std::move(leftWall));
@@ -204,7 +208,7 @@ inline Scene createCornellBoxScene() {
         rightWall.triangles.push_back(makeTriangle(0, 2, 1, rightWall.vertices));
         rightWall.triangles.push_back(makeTriangle(0, 3, 2, rightWall.vertices));
         rightWall.material = Material(
-            render::ColorRGB(0.12f, 0.45f, 0.15f),
+            render::make_color_rgb(0.12f, 0.45f, 0.15f),
             0.0f, 0.5f, render::zero_radiance_rgb()
         );
         scene.meshes.push_back(std::move(rightWall));
@@ -222,7 +226,7 @@ inline Scene createCornellBoxScene() {
         light.triangles.push_back(makeTriangle(0, 2, 1, light.vertices));
         light.triangles.push_back(makeTriangle(0, 3, 2, light.vertices));
         light.material = Material(
-            render::ColorRGB(1.0f, 1.0f, 1.0f),
+            render::make_color_rgb(1.0f, 1.0f, 1.0f),
             0.0f, 0.5f,
             render::make_radiance_rgb(15.0f, 15.0f, 15.0f)
         );
@@ -250,7 +254,7 @@ inline Scene createMirrorPointLightScene() {
         floor.triangles.push_back(makeTriangle(0, 1, 2, floor.vertices));
         floor.triangles.push_back(makeTriangle(0, 2, 3, floor.vertices));
         floor.material = Material(
-            render::ColorRGB(0.8f, 0.8f, 0.8f),
+            render::make_color_rgb(0.8f, 0.8f, 0.8f),
             0.0f, 0.5f, render::zero_radiance_rgb()
         );
         scene.meshes.push_back(std::move(floor));
@@ -268,7 +272,7 @@ inline Scene createMirrorPointLightScene() {
         mirror.triangles.push_back(makeTriangle(0, 1, 2, mirror.vertices));
         mirror.triangles.push_back(makeTriangle(0, 2, 3, mirror.vertices));
         mirror.material = Material(
-            render::ColorRGB(0.95f, 0.95f, 0.95f),
+            render::make_color_rgb(0.95f, 0.95f, 0.95f),
             1.0f,   // metallic
             0.0f,   // roughness (will be clamped to MIN_ROUGHNESS)
             render::zero_radiance_rgb()

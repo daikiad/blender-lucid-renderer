@@ -82,7 +82,7 @@ inline render::ColorRGB traceEmission(const Scene &scene, const Ray &ray, bool u
         if (hit.material->useNodes && hit.material->nodeTree.valid) {
             return getEmissionFromNodeTree(hit.material->nodeTree, hit.uv);
         }
-        return render::to_color(hit.material->emission);
+        return render::apply_camera_sensitivity(hit.material->emission, render::kDefaultCameraSensitivity);
     }
     return render::ColorRGB(0, 0, 0);
 }

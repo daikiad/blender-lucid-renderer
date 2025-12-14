@@ -243,7 +243,11 @@ public:
                         auto world_dir = render::make_direction_or_default(world_dir_vec, camera_.forward);
                         Ray ray(camera_.pos, world_dir);
                         
-                        render::ColorRGB color(0, 0, 0);
+                        render::RadianceRGB radiance(
+                            render::Radiance::zero(),
+                            render::Radiance::zero(),
+                            render::Radiance::zero()
+                        );
                         
                         // 複数サンプルの平均
                         for (int s = 0; s < samples; ++s) {
@@ -270,18 +274,22 @@ public:
                             
                             // アルゴリズムに応じてパストレーシング
                             if (algorithm_ == "simple") {
-                                color = color + traceSimple(scene_, sample_ray, max_depth);
+                                radiance = radiance + traceSimple(scene_, sample_ray, max_depth);
                             } else if (algorithm_ == "mis") {
-                                color = color + traceMIS(scene_, scene_lights, sample_ray, max_depth);
+                                radiance = radiance + traceMIS(scene_, scene_lights, sample_ray, max_depth);
                             } else {
-                                color = color + traceNEE(scene_, scene_lights, sample_ray, max_depth);
+                                radiance = radiance + traceNEE(scene_, scene_lights, sample_ray, max_depth);
                             }
                         }
                         
-                        // 負の値をクランプ
-                        float r = std::max(0.0f, color.r);
-                        float g = std::max(0.0f, color.g);
-                        float b = std::max(0.0f, color.b);
+                        // カメラ感度を適用（平均化は Python 側で行う）
+                        // 累積値をサンプル数で割らず、そのまま返す
+                        // Python 側で total_samples で正規化する
+                        render::ColorRGB color = render::apply_camera_sensitivity(radiance, camera_.sensitivity());
+                        
+                        // 負の値をクランプして float に抽出
+                        color = render::color_clamp_min_zero(color);
+                        auto [r, g, b] = render::color_to_floats(color);
                         
                         // RGBA としてバッファに格納
                         pixels[pixel_idx * 4 + 0] = r;
@@ -358,22 +366,23 @@ public:
                 if (mode == "normal") {
                     color = traceNormal(scene_, ray);
                     // -1..1 を 0..1 にマッピング
-                    color = color * 0.5f + render::ColorRGB(0.5f, 0.5f, 0.5f);
+                    color = color * 0.5f + render::make_color_rgb(0.5f, 0.5f, 0.5f);
                 } else if (mode == "albedo") {
                     color = traceAlbedo(scene_, ray);
                 } else if (mode == "emission") {
                     color = traceEmission(scene_, ray);
                 } else {
-                    color = render::ColorRGB(1, 0, 1);  // マゼンタ（エラー表示）
+                    color = render::make_color_rgb(1.0f, 0.0f, 1.0f);  // マゼンタ（エラー表示）
                 }
                 
                 // Y反転を考慮したインデックス
                 int flipped_y = tile_h - 1 - py;
                 int flipped_idx = flipped_y * tile_w + px;
                 
-                pixels[flipped_idx * 4 + 0] = color.r;
-                pixels[flipped_idx * 4 + 1] = color.g;
-                pixels[flipped_idx * 4 + 2] = color.b;
+                auto [r, g, b] = render::color_to_floats(color);
+                pixels[flipped_idx * 4 + 0] = r;
+                pixels[flipped_idx * 4 + 1] = g;
+                pixels[flipped_idx * 4 + 2] = b;
                 pixels[flipped_idx * 4 + 3] = 1.0f;
             }
         }
@@ -491,13 +500,13 @@ private:
             // Material
             if (mesh_j.contains("material")) {
                 const auto& mat = mesh_j["material"];
-                render::ColorRGB albedo(0.8f, 0.8f, 0.8f);
+                render::ColorRGB albedo = render::make_color_rgb(0.8f, 0.8f, 0.8f);
                 float metallic = 0.0f, roughness = 0.5f;
                 render::RadianceRGB emission = render::make_radiance_rgb(0.0f, 0.0f, 0.0f);
                 float transmission = 0.0f, ior = 1.45f;
                 
                 if (mat.contains("base_color")) {
-                    albedo = render::ColorRGB(
+                    albedo = render::make_color_rgb(
                         mat["base_color"][0].get<float>(), 
                         mat["base_color"][1].get<float>(), 
                         mat["base_color"][2].get<float>()
@@ -549,7 +558,7 @@ private:
             const auto& envJson = j["environment"];
             
             if (envJson.contains("color") && envJson["color"].is_array()) {
-                scene.environment.color = render::ColorRGB(
+                scene.environment.color = render::make_color_rgb(
                     envJson["color"][0].get<float>(),
                     envJson["color"][1].get<float>(),
                     envJson["color"][2].get<float>()
@@ -560,8 +569,9 @@ private:
                 scene.environment.strength = envJson["strength"].get<float>();
             }
             
-            std::cerr << "[Environment] color=(" << scene.environment.color.r << ", "
-                      << scene.environment.color.g << ", " << scene.environment.color.b 
+            auto [er, eg, eb] = render::color_to_floats(scene.environment.color);
+            std::cerr << "[Environment] color=(" << er << ", "
+                      << eg << ", " << eb 
                       << "), strength=" << scene.environment.strength << std::endl;
         }
         
@@ -594,9 +604,9 @@ private:
             }
             
             // Color and energy
-            render::ColorRGB color(1.0f, 1.0f, 1.0f);
+            render::ColorRGB color = render::make_color_rgb(1.0f, 1.0f, 1.0f);
             if (lightJson.contains("color")) {
-                color = render::ColorRGB(
+                color = render::make_color_rgb(
                     lightJson["color"][0].get<float>(),
                     lightJson["color"][1].get<float>(),
                     lightJson["color"][2].get<float>()
@@ -627,6 +637,9 @@ private:
                 if (area < EPSILON) area = 1.0f;
                 light.area = area * mp_units::square(mp_units::si::metre);
                 
+                // Extract color components as floats
+                auto [cr, cg, cb] = render::color_to_floats(color);
+                
                 // Point light: I = Power / (4π) [W/sr]
                 // In NEE, contribution = I / r² = Power / (4π * r²)
                 // We store Power / (4π) as emission, apply 1/r² in integration
@@ -636,18 +649,18 @@ private:
                     // L = Power / (π * surfaceArea) where surfaceArea = 4πr²
                     // L = Power / (4π²r²)
                     light.emission = render::make_radiance_rgb(
-                        color.r * (energy / (M_PI * area)),
-                        color.g * (energy / (M_PI * area)),
-                        color.b * (energy / (M_PI * area))
+                        cr * (energy / (M_PI * area)),
+                        cg * (energy / (M_PI * area)),
+                        cb * (energy / (M_PI * area))
                     );
                 } else {
                     // True point light: store intensity I = Power / (4π)
                     // 1/r² applied during sampling
                     float factor = energy / (4.0f * M_PI);
                     light.emission = render::make_radiance_rgb(
-                        color.r * factor,
-                        color.g * factor,
-                        color.b * factor
+                        cr * factor,
+                        cg * factor,
+                        cb * factor
                     );
                 }
                 
@@ -655,12 +668,15 @@ private:
                 light.type = LightType::SUN;
                 light.area = 1.0f * mp_units::square(mp_units::si::metre);  // Sun is directional, area is symbolic
                 
+                // Extract color components as floats
+                auto [cr, cg, cb] = render::color_to_floats(color);
+                
                 // Sun: energy is already irradiance (W/m²)
                 // Use directly as we treat it as parallel rays
                 light.emission = render::make_radiance_rgb(
-                    color.r * energy,
-                    color.g * energy,
-                    color.b * energy
+                    cr * energy,
+                    cg * energy,
+                    cb * energy
                 );
                 
             } else if (typeStr == "SPOT") {
@@ -672,6 +688,9 @@ private:
                 light.spotBlend = lightJson.value("spot_blend", 0.0f);
                 light.area = 1.0f * mp_units::square(mp_units::si::metre);
                 
+                // Extract color components as floats
+                auto [cr, cg, cb] = render::color_to_floats(color);
+                
                 // Spot light: same as point but concentrated in cone
                 // Blender's spot energy is total power, distributed in cone
                 // Solid angle of cone = 2π(1 - cos(θ/2))
@@ -681,9 +700,9 @@ private:
                 // Intensity in the cone direction = Power / solidAngle
                 float factor = energy / solidAngle;
                 light.emission = render::make_radiance_rgb(
-                    color.r * factor,
-                    color.g * factor,
-                    color.b * factor
+                    cr * factor,
+                    cg * factor,
+                    cb * factor
                 );
                 
             } else if (typeStr == "AREA") {
@@ -740,11 +759,12 @@ private:
                 // Area light: Lambertian emitter
                 // Radiance L = Power / (π * Area) [W/m²/sr]
                 // The π factor accounts for Lambertian cosine distribution
+                auto [cr, cg, cb] = render::color_to_floats(color);
                 float factor = energy / (M_PI * area);
                 light.emission = render::make_radiance_rgb(
-                    color.r * factor,
-                    color.g * factor,
-                    color.b * factor
+                    cr * factor,
+                    cg * factor,
+                    cb * factor
                 );
                 
                 std::cerr << "[SceneParser] Area light shape=" << shapeStr 

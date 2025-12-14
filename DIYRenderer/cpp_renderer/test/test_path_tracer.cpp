@@ -61,14 +61,17 @@ protected:
         values.reserve(numSamples);
         
         for (int i = 0; i < numSamples; ++i) {
-            render::ColorRGB sample;
+            render::RadianceRGB radiance;
             switch (integrator) {
-                case 0: sample = traceSimple(scene, ray, kMaxDepth); break;
-                case 1: sample = traceNEE(scene, *lights, ray, kMaxDepth); break;
-                case 2: sample = traceMIS(scene, *lights, ray, kMaxDepth); break;
+                case 0: radiance = traceSimple(scene, ray, kMaxDepth); break;
+                case 1: radiance = traceNEE(scene, *lights, ray, kMaxDepth); break;
+                case 2: radiance = traceMIS(scene, *lights, ray, kMaxDepth); break;
             }
+            // Convert to color for luminance calculation
+            render::ColorRGB sample = render::apply_camera_sensitivity(radiance, render::kDefaultCameraSensitivity);
             // Luminance
-            float lum = sample.r * 0.2126f + sample.g * 0.7152f + sample.b * 0.0722f;
+            auto [sr, sg, sb] = render::color_to_floats(sample);
+            float lum = sr * 0.2126f + sg * 0.7152f + sb * 0.0722f;
             values.push_back(lum);
         }
         
@@ -92,38 +95,33 @@ protected:
         return diff < sigmas * combinedStdErr;
     }
     
-    // Legacy helpers for simple tests
+    // Legacy helpers for simple tests (uses default camera sensitivity)
     render::ColorRGB renderPixelSimple(const Scene& scene, const Ray& ray, int samples) {
-        render::ColorRGB result(0.0f, 0.0f, 0.0f);
+        render::RadianceRGB result = render::zero_radiance_rgb();
         for (int i = 0; i < samples; ++i) {
-            render::ColorRGB sample = traceSimple(scene, ray, kMaxDepth);
-            result.r += sample.r;
-            result.g += sample.g;
-            result.b += sample.b;
+            render::RadianceRGB sample = traceSimple(scene, ray, kMaxDepth);
+            result += sample;
         }
-        return render::ColorRGB(result.r / samples, result.g / samples, result.b / samples);
+        // Apply default sensitivity (EV=0) and average
+        return render::apply_camera_sensitivity(result, render::kDefaultCameraSensitivity) / static_cast<float>(samples);
     }
     
     render::ColorRGB renderPixelNEE(const Scene& scene, const SceneLights& lights, const Ray& ray, int samples) {
-        render::ColorRGB result(0.0f, 0.0f, 0.0f);
+        render::RadianceRGB result = render::zero_radiance_rgb();
         for (int i = 0; i < samples; ++i) {
-            render::ColorRGB sample = traceNEE(scene, lights, ray, kMaxDepth);
-            result.r += sample.r;
-            result.g += sample.g;
-            result.b += sample.b;
+            render::RadianceRGB sample = traceNEE(scene, lights, ray, kMaxDepth);
+            result += sample;
         }
-        return render::ColorRGB(result.r / samples, result.g / samples, result.b / samples);
+        return render::apply_camera_sensitivity(result, render::kDefaultCameraSensitivity) / static_cast<float>(samples);
     }
     
     render::ColorRGB renderPixelMIS(const Scene& scene, const SceneLights& lights, const Ray& ray, int samples) {
-        render::ColorRGB result(0.0f, 0.0f, 0.0f);
+        render::RadianceRGB result = render::zero_radiance_rgb();
         for (int i = 0; i < samples; ++i) {
-            render::ColorRGB sample = traceMIS(scene, lights, ray, kMaxDepth);
-            result.r += sample.r;
-            result.g += sample.g;
-            result.b += sample.b;
+            render::RadianceRGB sample = traceMIS(scene, lights, ray, kMaxDepth);
+            result += sample;
         }
-        return render::ColorRGB(result.r / samples, result.g / samples, result.b / samples);
+        return render::apply_camera_sensitivity(result, render::kDefaultCameraSensitivity) / static_cast<float>(samples);
     }
 };
 
@@ -133,7 +131,7 @@ protected:
 
 TEST_F(PathTracerTest, EmptySceneReturnsEnvironment) {
     Scene scene;
-    scene.environment.color = render::ColorRGB(0.5f, 0.5f, 0.5f);
+    scene.environment.color = render::make_color_rgb(0.5f, 0.5f, 0.5f);
     scene.environment.strength = 1.0f;
     
     SceneLights lights;
@@ -142,9 +140,9 @@ TEST_F(PathTracerTest, EmptySceneReturnsEnvironment) {
     Ray ray(render::make_position(0.0f, 0.0f, 0.0f),
             render::direction_from_unit_vector(render::Vec3f(0.0f, 0.0f, -1.0f)));
     
-    render::ColorRGB resultSimple = traceSimple(scene, ray, kMaxDepth);
-    render::ColorRGB resultNEE = traceNEE(scene, lights, ray, kMaxDepth);
-    render::ColorRGB resultMIS = traceMIS(scene, lights, ray, kMaxDepth);
+    render::ColorRGB resultSimple = render::apply_camera_sensitivity(traceSimple(scene, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+    render::ColorRGB resultNEE = render::apply_camera_sensitivity(traceNEE(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+    render::ColorRGB resultMIS = render::apply_camera_sensitivity(traceMIS(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
     
     // All should return environment color
     EXPECT_TRUE(colorApproxEqual(resultSimple, scene.environment.color, 0.01f));
@@ -164,7 +162,7 @@ TEST_F(PathTracerTest, DirectLightHit) {
     };
     emissive.triangles.push_back(makeTriangle(0, 1, 2, emissive.vertices));
     emissive.material = Material(
-        render::ColorRGB(1.0f, 1.0f, 1.0f),
+        render::make_color_rgb(1.0f, 1.0f, 1.0f),
         0.0f, 0.5f,
         render::make_radiance_rgb(5.0f, 5.0f, 5.0f)
     );
@@ -177,9 +175,9 @@ TEST_F(PathTracerTest, DirectLightHit) {
     Ray ray(render::make_position(0.0f, 0.5f, 0.0f),
             render::direction_from_unit_vector(render::Vec3f(0.0f, 0.0f, -1.0f)));
     
-    render::ColorRGB resultSimple = traceSimple(scene, ray, kMaxDepth);
-    render::ColorRGB resultNEE = traceNEE(scene, lights, ray, kMaxDepth);
-    render::ColorRGB resultMIS = traceMIS(scene, lights, ray, kMaxDepth);
+    render::ColorRGB resultSimple = render::apply_camera_sensitivity(traceSimple(scene, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+    render::ColorRGB resultNEE = render::apply_camera_sensitivity(traceNEE(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+    render::ColorRGB resultMIS = render::apply_camera_sensitivity(traceMIS(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
     
     // All should see the emissive surface
     EXPECT_GT(resultSimple.r, 1.0f);
@@ -300,19 +298,15 @@ TEST_F(PathTracerTest, OutputIsNonNegative) {
         Ray ray(render::make_position(0.0f, 1.0f, 0.5f),
                 render::direction_from_unit_vector(dir));
         
-        render::ColorRGB result = traceMIS(scene, lights, ray, kMaxDepth);
+        render::ColorRGB result = render::apply_camera_sensitivity(traceMIS(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
         
-        EXPECT_GE(result.r, 0.0f) << "Negative red at sample " << i;
-        EXPECT_GE(result.g, 0.0f) << "Negative green at sample " << i;
-        EXPECT_GE(result.b, 0.0f) << "Negative blue at sample " << i;
+        // Use color_is_valid for NaN/Inf checking
+        EXPECT_TRUE(render::color_is_valid(result)) << "Invalid color at sample " << i;
         
-        EXPECT_FALSE(std::isnan(result.r)) << "NaN red at sample " << i;
-        EXPECT_FALSE(std::isnan(result.g)) << "NaN green at sample " << i;
-        EXPECT_FALSE(std::isnan(result.b)) << "NaN blue at sample " << i;
-        
-        EXPECT_FALSE(std::isinf(result.r)) << "Inf red at sample " << i;
-        EXPECT_FALSE(std::isinf(result.g)) << "Inf green at sample " << i;
-        EXPECT_FALSE(std::isinf(result.b)) << "Inf blue at sample " << i;
+        auto [rr, rg, rb] = render::color_to_floats(result);
+        EXPECT_GE(rr, 0.0f) << "Negative red at sample " << i;
+        EXPECT_GE(rg, 0.0f) << "Negative green at sample " << i;
+        EXPECT_GE(rb, 0.0f) << "Negative blue at sample " << i;
     }
 }
 
@@ -320,7 +314,7 @@ TEST_F(PathTracerTest, WhiteFurnaceTest) {
     // White furnace: uniform environment, white diffuse surface
     // Expected result: albedo color (energy conserving)
     Scene scene;
-    scene.environment.color = render::ColorRGB(1.0f, 1.0f, 1.0f);
+    scene.environment.color = render::make_color_rgb(1.0f, 1.0f, 1.0f);
     scene.environment.strength = 1.0f;
     
     Mesh sphere;
@@ -342,7 +336,7 @@ TEST_F(PathTracerTest, WhiteFurnaceTest) {
     sphere.triangles.push_back(makeTriangle(1, 5, 3, sphere.vertices));
     sphere.triangles.push_back(makeTriangle(1, 2, 5, sphere.vertices));
     sphere.material = Material(
-        render::ColorRGB(0.5f, 0.5f, 0.5f),  // 50% albedo
+        render::make_color_rgb(0.5f, 0.5f, 0.5f),  // 50% albedo
         0.0f, 1.0f,  // Pure diffuse
         render::zero_radiance_rgb()
     );

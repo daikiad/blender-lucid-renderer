@@ -74,10 +74,11 @@ inline render::RadianceRGB getEmission(const Hit& hit) {
 /**
  * Simple path tracer using BSDF sampling only (no NEE)
  * Most basic implementation - good for testing
+ * Returns RadianceRGB - caller applies camera sensitivity for final ColorRGB
  */
-inline render::ColorRGB traceSimple(const Scene& scene, const Ray& ray, int maxDepth) {
+inline render::RadianceRGB traceSimple(const Scene& scene, const Ray& ray, int maxDepth) {
     render::RadianceRGB result = render::zero_radiance_rgb();
-    render::ColorRGB throughput(1, 1, 1);
+    render::ColorRGB throughput = render::make_color_rgb(1.0f, 1.0f, 1.0f);
     Ray currentRay = ray;
     render::Length tMin = render::metres(0.0f);  // First ray starts from camera
     
@@ -128,7 +129,7 @@ inline render::ColorRGB traceSimple(const Scene& scene, const Ray& ray, int maxD
             if (absNdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
                 render::ColorRGB weight = render::bsdf_sample_weight(bsdfSample.f, absNdotL, bsdfSample.pdf);
                 
-                const float MAX_WEIGHT = 10.0f;
+                constexpr auto MAX_WEIGHT = render::reflectance(10.0f);
                 weight.r = std::min(weight.r, MAX_WEIGHT);
                 weight.g = std::min(weight.g, MAX_WEIGHT);
                 weight.b = std::min(weight.b, MAX_WEIGHT);
@@ -141,16 +142,14 @@ inline render::ColorRGB traceSimple(const Scene& scene, const Ray& ray, int maxD
         
         // Russian Roulette
         if (depth >= 3) {
-            float maxThroughput = std::max({throughput.r, throughput.g, throughput.b});
+            float maxThroughput = render::color_max_component(throughput);
             float rrProb = std::min(maxThroughput, 0.95f);
             if (randf() > rrProb) break;
             throughput = throughput * (1.0f / rrProb);
         }
         
         // Check for NaN/Inf
-        if (std::isnan(throughput.r) || std::isinf(throughput.r) ||
-            std::isnan(throughput.g) || std::isinf(throughput.g) ||
-            std::isnan(throughput.b) || std::isinf(throughput.b)) {
+        if (!render::color_is_valid(throughput)) {
             break;
         }
         
@@ -159,7 +158,7 @@ inline render::ColorRGB traceSimple(const Scene& scene, const Ray& ray, int maxD
         tMin = geometry::RAY_T_MIN_TYPED;  // Subsequent rays need offset
     }
     
-    return render::to_color(result);  // RadianceRGB -> ColorRGB at interface boundary
+    return result;  // Return RadianceRGB, let caller apply camera sensitivity
 }
 
 // ========== NEE Path Tracer ==========
@@ -167,11 +166,12 @@ inline render::ColorRGB traceSimple(const Scene& scene, const Ray& ray, int maxD
 /**
  * Path tracer with Next Event Estimation
  * Uses light sampling for direct illumination
+ * Returns RadianceRGB - caller applies camera sensitivity for final ColorRGB
  */
-inline render::ColorRGB traceNEE(const Scene& scene, const SceneLights& sceneLights, 
+inline render::RadianceRGB traceNEE(const Scene& scene, const SceneLights& sceneLights, 
                      const Ray& ray, int maxDepth) {
     render::RadianceRGB result = render::zero_radiance_rgb();
-    render::ColorRGB throughput(1, 1, 1);
+    render::ColorRGB throughput = render::make_color_rgb(1.0f, 1.0f, 1.0f);
     Ray currentRay = ray;
     render::Length tMin = render::metres(0.0f);  // First ray starts from camera
     
@@ -203,14 +203,15 @@ inline render::ColorRGB traceNEE(const Scene& scene, const SceneLights& sceneLig
         }
         
         // Add emission only on first hit
-        float emissionStrength = render::to_color(emission).r + render::to_color(emission).g + render::to_color(emission).b;
-        if (emissionStrength > 1e-6f && depth == 0) {
+        // Use is_emissive for checking emission strength (unit-typed)
+        bool hasEmission = render::is_emissive(emission);
+        if (hasEmission && depth == 0) {
             result += throughput * emission;
         }
         
         // Next Event Estimation
         bool isTransmissive = mat.transmission > 0.5f;
-        if (sceneLights.hasLights() && emissionStrength < 1e-6f && !isTransmissive) {
+        if (sceneLights.hasLights() && !hasEmission && !isTransmissive) {
             float lightSelectProb;
             int lightIdx = sceneLights.selectLight(randf(), lightSelectProb);
             
@@ -264,16 +265,14 @@ inline render::ColorRGB traceNEE(const Scene& scene, const SceneLights& sceneLig
         
         // Russian Roulette
         if (depth >= 3) {
-            float maxThroughput = std::max({throughput.r, throughput.g, throughput.b});
+            float maxThroughput = render::color_max_component(throughput);
             float rrProb = std::min(maxThroughput, 0.95f);
             if (randf() > rrProb) break;
             throughput = throughput * (1.0f / rrProb);
         }
         
         // Check for NaN/Inf
-        if (std::isnan(throughput.r) || std::isinf(throughput.r) ||
-            std::isnan(throughput.g) || std::isinf(throughput.g) ||
-            std::isnan(throughput.b) || std::isinf(throughput.b)) {
+        if (!render::color_is_valid(throughput)) {
             break;
         }
         
@@ -282,7 +281,7 @@ inline render::ColorRGB traceNEE(const Scene& scene, const SceneLights& sceneLig
         tMin = geometry::RAY_T_MIN_TYPED;  // Subsequent rays need offset
     }
     
-    return render::to_color(result);
+    return result;  // Return RadianceRGB, let caller apply camera sensitivity
 }
 
 // ========== MIS Path Tracer ==========
@@ -290,11 +289,12 @@ inline render::ColorRGB traceNEE(const Scene& scene, const SceneLights& sceneLig
 /**
  * Path tracer with Multiple Importance Sampling
  * Combines BSDF and light sampling with proper MIS weights
+ * Returns RadianceRGB - caller applies camera sensitivity for final ColorRGB
  */
-inline render::ColorRGB traceMIS(const Scene& scene, const SceneLights& sceneLights, 
+inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& sceneLights, 
                      const Ray& ray, int maxDepth) {
     render::RadianceRGB result = render::zero_radiance_rgb();
-    render::ColorRGB throughput(1, 1, 1);
+    render::ColorRGB throughput = render::make_color_rgb(1.0f, 1.0f, 1.0f);
     Ray currentRay = ray;
     render::PdfW lastBsdfPdf = render::zero_pdf_w();
     render::Length tMin = render::metres(0.0f);  // First ray starts from camera
@@ -331,9 +331,9 @@ inline render::ColorRGB traceMIS(const Scene& scene, const SceneLights& sceneLig
             // MIS weight for BSDF sampling strategy hitting a light
             // mis_power_heuristic(pf, pg) returns weight for strategy f
             // Here we sampled via BSDF, so pf = bsdfPdf
-            float misWeight = (bsdfPdf > render::MIN_PDF && lightPdf > render::MIN_PDF)
+            render::Dimensionless misWeight = (bsdfPdf > render::MIN_PDF && lightPdf > render::MIN_PDF)
                                 ? render::mis_power_heuristic(bsdfPdf, lightPdf)
-                                : 1.0f;
+                                : render::Dimensionless{1.0f};
             result += throughput * lightHit.emission * misWeight;
             break;
         }
@@ -357,10 +357,9 @@ inline render::ColorRGB traceMIS(const Scene& scene, const SceneLights& sceneLig
         }
         
         // Add emission with MIS weight
-        render::ColorRGB emission_color = render::to_color(emission);
-        float emissionStrength = emission_color.r + emission_color.g + emission_color.b;
-        if (emissionStrength > 1e-6f) {
-            float misWeight = 1.0f;
+        bool hasEmission = render::is_emissive(emission);
+        if (hasEmission) {
+            render::Dimensionless misWeight{1.0f};
             if (sceneLights.hasLights() && lastBsdfPdf > render::MIN_PDF) {
                 int lightIdx = findLightIndex(hit.meshIdx, hit.triIdx);
                 if (lightIdx >= 0) {
@@ -381,9 +380,8 @@ inline render::ColorRGB traceMIS(const Scene& scene, const SceneLights& sceneLig
         }
         
         // Next Event Estimation with MIS
-        bool isEmissive = emissionStrength > 1e-6f;
         bool isTransmissive = mat.transmission > 0.5f;
-        if (sceneLights.hasLights() && !isEmissive && !isTransmissive) {
+        if (sceneLights.hasLights() && !hasEmission && !isTransmissive) {
             float lightSelectProb;
             int lightIdx = sceneLights.selectLight(randf(), lightSelectProb);
             
@@ -406,10 +404,9 @@ inline render::ColorRGB traceMIS(const Scene& scene, const SceneLights& sceneLig
                             render::PdfW pdfLight_typed = ls.pdf * lightSelectProb;
                             render::PdfW pdfBsdf_typed = pdfBSDF(mat, wo, ls.direction, shadingNormal);
                             
-                            float misWeight = render::mis_power_heuristic(pdfLight_typed, pdfBsdf_typed);
+                            render::Dimensionless misWeight = render::mis_power_heuristic(pdfLight_typed, pdfBsdf_typed);
                             
                             // f [1/sr] * L [W/(sr·m²)] * cosθ * misWeight / pdf
-                            render::ColorRGB bsdf_color = render::to_color(f);
                             // Use typed bsdf_sample_weight pattern: ColorRGB = f/pdf * cos
                             render::ColorRGB bsdf_weight = render::bsdf_sample_weight(f, NdotL, pdfLight_typed);
                             render::RadianceRGB contrib = (bsdf_weight * misWeight) * ls.emission;
@@ -452,16 +449,14 @@ inline render::ColorRGB traceMIS(const Scene& scene, const SceneLights& sceneLig
         
         // Russian Roulette
         if (depth >= 3) {
-            float maxThroughput = std::max({throughput.r, throughput.g, throughput.b});
+            float maxThroughput = render::color_max_component(throughput);
             float rrProb = std::min(maxThroughput, 0.95f);
             if (randf() > rrProb) break;
             throughput = throughput * (1.0f / rrProb);
         }
         
         // Check for NaN/Inf
-        if (std::isnan(throughput.r) || std::isinf(throughput.r) ||
-            std::isnan(throughput.g) || std::isinf(throughput.g) ||
-            std::isnan(throughput.b) || std::isinf(throughput.b)) {
+        if (!render::color_is_valid(throughput)) {
             break;
         }
         
@@ -473,5 +468,5 @@ inline render::ColorRGB traceMIS(const Scene& scene, const SceneLights& sceneLig
         // Note: lastBsdfPdf already set in "Store PDF for next bounce MIS" section
     }
     
-    return render::to_color(result);
+    return result;  // Return RadianceRGB, let caller apply camera sensitivity
 }

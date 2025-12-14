@@ -61,14 +61,14 @@ struct SceneLights {
         for (size_t mi = 0; mi < scene.meshes.size(); ++mi) {
             const Mesh& mesh = scene.meshes[mi];
             
-            // Check if mesh has emission
-            render::ColorRGB emission = render::to_color(mesh.material.emission);
+            // Check if mesh has emission using is_emissive (unit-typed)
+            render::RadianceRGB emission = mesh.material.emission;
             if (mesh.material.useNodes && mesh.material.nodeTree.valid) {
-                emission = getEmissionFromNodeTree(mesh.material.nodeTree, render::Vec2f(0.0f, 0.0f));
+                render::ColorRGB emissionColor = getEmissionFromNodeTree(mesh.material.nodeTree, render::Vec2f(0.0f, 0.0f));
+                emission = render::to_radiance(emissionColor);
             }
             
-            float emissionStrength = emission.r + emission.g + emission.b;
-            if (emissionStrength < 1e-6f) continue;
+            if (!render::is_emissive(emission)) continue;
             
             // Add each triangle as a light
             for (size_t ti = 0; ti < mesh.triangles.size(); ++ti) {
@@ -79,7 +79,7 @@ struct SceneLights {
                 light.v1 = mesh.vertices[tri.i1];
                 light.v2 = mesh.vertices[tri.i2];
                 light.normal = tri.faceNormal;
-                light.emission = render::make_radiance_rgb(emission.r, emission.g, emission.b);
+                light.emission = emission;  // Already RadianceRGB
                 light.area = triangleArea(light.v0, light.v1, light.v2);
                 light.meshIndex = (int)mi;
                 light.triangleIndex = (int)ti;
@@ -116,7 +116,8 @@ struct SceneLights {
         render::Area cumulative = 0.0f * mp_units::square(mp_units::si::metre);
         for (size_t i = 0; i < lights.size(); ++i) {
             cumulative += lights[i].area;
-            cdf[i] = render::area_ratio(cumulative, totalEmissiveArea);
+            // Extract at storage boundary (cdf is float array for std::lower_bound)
+            cdf[i] = render::area_ratio(cumulative, totalEmissiveArea).numerical_value_in(mp_units::one);
         }
     }
     
@@ -136,8 +137,8 @@ struct SceneLights {
         int idx = (int)(it - cdf.begin());
         idx = std::min(idx, (int)lights.size() - 1);
         
-        // Selection probability = area_i / total_area (dimensionless)
-        selectionProb = render::area_ratio(lights[idx].area, totalEmissiveArea);
+        // Selection probability = area_i / total_area (extract at interface boundary)
+        selectionProb = render::area_ratio(lights[idx].area, totalEmissiveArea).numerical_value_in(mp_units::one);
         
         return idx;
     }
@@ -148,7 +149,8 @@ struct SceneLights {
      */
     float getPdfForLight(int lightIdx) const {
         if (lightIdx < 0 || lightIdx >= (int)lights.size()) return 0.0f;
-        return render::area_ratio(lights[lightIdx].area, totalEmissiveArea);
+        // Extract at interface boundary (return type is float)
+        return render::area_ratio(lights[lightIdx].area, totalEmissiveArea).numerical_value_in(mp_units::one);
     }
     
     /**

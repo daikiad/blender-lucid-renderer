@@ -39,11 +39,12 @@ inline float fresnelSchlick(float cosTheta, float f0) {
  */
 inline render::ColorRGB fresnelSchlickColor(float cosTheta, const render::ColorRGB& f0) {
     float f = std::pow(1.0f - cosTheta, 5.0f);
-    return render::ColorRGB(
+    // f0.r etc are Reflectance (quantity<one>), so arithmetic works naturally
+    return render::ColorRGB{
         f0.r + (1.0f - f0.r) * f,
         f0.g + (1.0f - f0.g) * f,
         f0.b + (1.0f - f0.b) * f
-    );
+    };
 }
 
 /**

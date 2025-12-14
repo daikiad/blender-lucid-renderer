@@ -173,7 +173,7 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
             warnedNodes.insert(nodeName);
             std::cerr << "[NodeEval] Node not found: " << nodeName << " (warning once)\n";
         }
-        return render::ColorRGB(0.8f, 0.8f, 0.8f);  // Default gray instead of magenta
+        return render::make_color_rgb(0.8f, 0.8f, 0.8f);  // Default gray instead of magenta
     }
     
     // ===== Principled BSDF Node =====
@@ -199,7 +199,7 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
             }
             
             if(!baseColorSocket) {
-                return render::ColorRGB(0.8f, 0.8f, 0.8f);  // Default gray
+                return render::make_color_rgb(0.8f, 0.8f, 0.8f);  // Default gray
             }
             
             if(baseColorSocket->is_linked) {
@@ -210,11 +210,11 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
                 if(baseColorSocket->default_value.type == SocketValue::VEC4) {
                     return baseColorSocket->default_value.v4;  // VEC4 uses v4 field (already Color3)
                 } else if(baseColorSocket->default_value.type == SocketValue::VEC3) {
-                    return render::ColorRGB(baseColorSocket->default_value.v3.x,
+                    return render::make_color_rgb(baseColorSocket->default_value.v3.x,
                                        baseColorSocket->default_value.v3.y,
                                        baseColorSocket->default_value.v3.z);
                 }
-                return render::ColorRGB(0.8f, 0.8f, 0.8f);
+                return render::make_color_rgb(0.8f, 0.8f, 0.8f);
             }
         } else if(socketName == "Base Color") {
             // Direct query of Base Color
@@ -223,12 +223,12 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
                 if(socket->default_value.type == SocketValue::VEC4) {
                     return socket->default_value.v4;
                 } else if(socket->default_value.type == SocketValue::VEC3) {
-                    return render::ColorRGB(socket->default_value.v3.x,
+                    return render::make_color_rgb(socket->default_value.v3.x,
                                        socket->default_value.v3.y,
                                        socket->default_value.v3.z);
                 }
             }
-            return render::ColorRGB(0.8f, 0.8f, 0.8f);
+            return render::make_color_rgb(0.8f, 0.8f, 0.8f);
         }
     } else if(node->type == "ShaderNodeEmission") {
         // ===== Emission Node =====
@@ -237,7 +237,7 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
             const NodeSocket *colorSocket = node->findInput("Color");
             const NodeSocket *strengthSocket = node->findInput("Strength");
             
-            render::ColorRGB color(1.0f, 1.0f, 1.0f);  // Default white
+            render::ColorRGB color = render::make_color_rgb(1.0f, 1.0f, 1.0f);  // Default white
             float strength = 1.0f;          // Default strength
             
             // Evaluate color (can be connected or constant)
@@ -247,7 +247,7 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
                 } else if(colorSocket->default_value.type == SocketValue::VEC4) {
                     color = colorSocket->default_value.v4;  // RGBA → use v4 field
                 } else if(colorSocket->default_value.type == SocketValue::VEC3) {
-                    color = render::ColorRGB(colorSocket->default_value.v3.x,
+                    color = render::make_color_rgb(colorSocket->default_value.v3.x,
                                         colorSocket->default_value.v3.y,
                                         colorSocket->default_value.v3.z);
                 }
@@ -271,7 +271,7 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
             const NodeSocket *colorSocket = node->findInput("Color");
             
             if(!colorSocket) {
-                return render::ColorRGB(0.8f, 0.8f, 0.8f);  // Default gray
+                return render::make_color_rgb(0.8f, 0.8f, 0.8f);  // Default gray
             }
             
             if(colorSocket->is_linked) {
@@ -282,11 +282,11 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
                 if(colorSocket->default_value.type == SocketValue::VEC4) {
                     return colorSocket->default_value.v4;  // RGBA → use v4 field (already Color3)
                 } else if(colorSocket->default_value.type == SocketValue::VEC3) {
-                    return render::ColorRGB(colorSocket->default_value.v3.x,
+                    return render::make_color_rgb(colorSocket->default_value.v3.x,
                                        colorSocket->default_value.v3.y,
                                        colorSocket->default_value.v3.z);
                 }
-                return render::ColorRGB(0.8f, 0.8f, 0.8f);
+                return render::make_color_rgb(0.8f, 0.8f, 0.8f);
             }
         }
     } else if(node->type == "ShaderNodeRGB") {
@@ -297,14 +297,14 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
                 if(output.default_value.type == SocketValue::VEC4) {
                     return output.default_value.v4;  // RGBA → use v4 field (already Color3)
                 } else if(output.default_value.type == SocketValue::VEC3) {
-                    return render::ColorRGB(output.default_value.v3.x,
+                    return render::make_color_rgb(output.default_value.v3.x,
                                        output.default_value.v3.y,
                                        output.default_value.v3.z);
                 }
             }
         }
         // Fallback: return white if no valid color found
-        return render::ColorRGB(1.0f, 1.0f, 1.0f);
+        return render::make_color_rgb(1.0f, 1.0f, 1.0f);
     } else if(node->type == "ShaderNodeMix" || node->type == "ShaderNodeMixRGB") {
         // ===== Mix Node =====
         // Blends two colors using various blend modes (Mix, Add, Multiply, etc.)
@@ -313,7 +313,7 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
         const NodeSocket *bSocket = node->findInput("B");
         
         float fac = 0.5f;
-        render::ColorRGB colorA(0, 0, 0), colorB(1, 1, 1);
+        render::ColorRGB colorA = render::zero_color_rgb(), colorB = render::make_color_rgb(1.0f, 1.0f, 1.0f);
         
         if(facSocket && !facSocket->is_linked) {
             if(facSocket->default_value.type == SocketValue::FLOAT) {
@@ -327,7 +327,7 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
             } else if(aSocket->default_value.type == SocketValue::VEC4) {
                 colorA = aSocket->default_value.v4;
             } else if(aSocket->default_value.type == SocketValue::VEC3) {
-                colorA = render::ColorRGB(aSocket->default_value.v3.x,
+                colorA = render::make_color_rgb(aSocket->default_value.v3.x,
                                      aSocket->default_value.v3.y,
                                      aSocket->default_value.v3.z);
             }
@@ -339,7 +339,7 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
             } else if(bSocket->default_value.type == SocketValue::VEC4) {
                 colorB = bSocket->default_value.v4;
             } else if(bSocket->default_value.type == SocketValue::VEC3) {
-                colorB = render::ColorRGB(bSocket->default_value.v3.x,
+                colorB = render::make_color_rgb(bSocket->default_value.v3.x,
                                      bSocket->default_value.v3.y,
                                      bSocket->default_value.v3.z);
             }
@@ -354,8 +354,8 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
         const NodeSocket *color2Socket = node->findInput("Color2");
         const NodeSocket *scaleSocket = node->findInput("Scale");
         
-        render::ColorRGB color1(0.8f, 0.8f, 0.8f);  // Default white
-        render::ColorRGB color2(0.2f, 0.2f, 0.2f);  // Default black
+        render::ColorRGB color1 = render::make_color_rgb(0.8f, 0.8f, 0.8f);  // Default white
+        render::ColorRGB color2 = render::make_color_rgb(0.2f, 0.2f, 0.2f);  // Default black
         float scale = 5.0f;  // Default scale
         
         if(color1Socket) {
@@ -364,7 +364,7 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
             } else if(color1Socket->default_value.type == SocketValue::VEC4) {
                 color1 = color1Socket->default_value.v4;
             } else if(color1Socket->default_value.type == SocketValue::VEC3) {
-                color1 = render::ColorRGB(color1Socket->default_value.v3.x,
+                color1 = render::make_color_rgb(color1Socket->default_value.v3.x,
                                      color1Socket->default_value.v3.y,
                                      color1Socket->default_value.v3.z);
             }
@@ -376,7 +376,7 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
             } else if(color2Socket->default_value.type == SocketValue::VEC4) {
                 color2 = color2Socket->default_value.v4;
             } else if(color2Socket->default_value.type == SocketValue::VEC3) {
-                color2 = render::ColorRGB(color2Socket->default_value.v3.x,
+                color2 = render::make_color_rgb(color2Socket->default_value.v3.x,
                                      color2Socket->default_value.v3.y,
                                      color2Socket->default_value.v3.z);
             }
@@ -413,7 +413,7 @@ render::ColorRGB evaluateNode(const NodeTree &tree, const std::string &nodeName,
         warnedNodeTypes.insert(node->type);
         std::cerr << "[NodeEval] Unhandled node type: " << node->type << " (further warnings suppressed)\n";
     }
-    return render::ColorRGB(0.8f, 0.8f, 0.8f);  // Default gray for unimplemented nodes
+    return render::make_color_rgb(0.8f, 0.8f, 0.8f);  // Default gray for unimplemented nodes
 }
 
 /**
@@ -440,21 +440,21 @@ render::ColorRGB getAlbedoFromNodeTree(const NodeTree &tree, const render::Vec2f
     
     if(!tree.valid) {
         std::cerr << "[NodeEval] Tree not valid, returning gray\n";
-        return render::ColorRGB(0.8f, 0.8f, 0.8f);  // Default gray
+        return render::make_color_rgb(0.8f, 0.8f, 0.8f);  // Default gray
     }
     
     // Find Material Output node (entry point)
     const MaterialNode *outputNode = tree.findOutputNode();
     if(!outputNode) {
         std::cerr << "[NodeEval] No Material Output node found\n";
-        return render::ColorRGB(0.8f, 0.8f, 0.8f);
+        return render::make_color_rgb(0.8f, 0.8f, 0.8f);
     }
     
     // Get Surface input (should be connected to a shader like Principled BSDF)
     const NodeSocket *surfaceSocket = outputNode->findInput("Surface");
     if(!surfaceSocket || !surfaceSocket->is_linked) {
         std::cerr << "[NodeEval] Surface socket not connected\n";
-        return render::ColorRGB(0.8f, 0.8f, 0.8f);
+        return render::make_color_rgb(0.8f, 0.8f, 0.8f);
     }
     
     if(callCount <= 3) {
@@ -465,7 +465,8 @@ render::ColorRGB getAlbedoFromNodeTree(const NodeTree &tree, const render::Vec2f
     render::ColorRGB result = evaluateNode(tree, surfaceSocket->linked_node, surfaceSocket->linked_socket, uv);
     
     if(callCount <= 3) {
-        std::cerr << "[NodeEval] Result: (" << result.r << "," << result.g << "," << result.b << ")\n";
+        auto [rr, rg, rb] = render::color_to_floats(result);
+        std::cerr << "[NodeEval] Result: (" << rr << "," << rg << "," << rb << ")\n";
     }
     
     return result;
@@ -490,19 +491,19 @@ render::ColorRGB getAlbedoFromNodeTree(const NodeTree &tree, const render::Vec2f
  */
 render::ColorRGB getEmissionFromNodeTree(const NodeTree &tree, const render::Vec2f &uv) {
     if(!tree.valid) {
-        return render::ColorRGB(0.0f, 0.0f, 0.0f);  // No emission
+        return render::make_color_rgb(0.0f, 0.0f, 0.0f);  // No emission
     }
     
     // Find Material Output node
     const MaterialNode *outputNode = tree.findOutputNode();
     if(!outputNode) {
-        return render::ColorRGB(0.0f, 0.0f, 0.0f);
+        return render::make_color_rgb(0.0f, 0.0f, 0.0f);
     }
     
     // Get Surface input
     const NodeSocket *surfaceSocket = outputNode->findInput("Surface");
     if(!surfaceSocket || !surfaceSocket->is_linked) {
-        return render::ColorRGB(0.0f, 0.0f, 0.0f);
+        return render::make_color_rgb(0.0f, 0.0f, 0.0f);
     }
     
     // Check if connected node is Emission shader
@@ -544,14 +545,14 @@ render::ColorRGB getEmissionFromNodeTree(const NodeTree &tree, const render::Vec
                 if(strengthSocket && strengthSocket->default_value.type == SocketValue::FLOAT) {
                     strength = strengthSocket->default_value.f;
                 }
-                return render::ColorRGB(emissionSocket->default_value.v3.x,
+                return render::make_color_rgb(emissionSocket->default_value.v3.x,
                                    emissionSocket->default_value.v3.y,
                                    emissionSocket->default_value.v3.z) * strength;
             }
         }
     }
     
-    return render::ColorRGB(0.0f, 0.0f, 0.0f);
+    return render::make_color_rgb(0.0f, 0.0f, 0.0f);
 }
 
 /**

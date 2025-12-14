@@ -31,17 +31,17 @@ class MISBehaviorTest : public ::testing::Test {
 protected:
     // Test that MIS properly weights BSDF vs light sampling
     void verifyMISWeights(PdfW bsdfPdf, PdfW lightPdf) {
-        float wBsdf = mis_power_heuristic(bsdfPdf, lightPdf);
-        float wLight = mis_power_heuristic(lightPdf, bsdfPdf);
+        Dimensionless wBsdf = mis_power_heuristic(bsdfPdf, lightPdf);
+        Dimensionless wLight = mis_power_heuristic(lightPdf, bsdfPdf);
         
         // Weights should sum to 1
-        EXPECT_NEAR(wBsdf + wLight, 1.0f, kEps);
+        EXPECT_NEAR((wBsdf + wLight).numerical_value_in(one), 1.0f, kEps);
         
         // Higher PDF should get higher weight
         if (bsdfPdf > lightPdf + MIN_PDF) {
-            EXPECT_GT(wBsdf, wLight);
+            EXPECT_GT(wBsdf.numerical_value_in(one), wLight.numerical_value_in(one));
         } else if (lightPdf > bsdfPdf + MIN_PDF) {
-            EXPECT_GT(wLight, wBsdf);
+            EXPECT_GT(wLight.numerical_value_in(one), wBsdf.numerical_value_in(one));
         }
     }
 };
@@ -49,10 +49,10 @@ protected:
 // Test: Equal PDFs should give equal weights
 TEST_F(MISBehaviorTest, EqualPDFsGiveEqualWeights) {
     PdfW pdf = 1.0f * per_sr;
-    float w1 = mis_power_heuristic(pdf, pdf);
-    float w2 = mis_power_heuristic(pdf, pdf);
-    EXPECT_NEAR(w1, 0.5f, kEps);
-    EXPECT_NEAR(w2, 0.5f, kEps);
+    Dimensionless w1 = mis_power_heuristic(pdf, pdf);
+    Dimensionless w2 = mis_power_heuristic(pdf, pdf);
+    EXPECT_NEAR(w1.numerical_value_in(one), 0.5f, kEps);
+    EXPECT_NEAR(w2.numerical_value_in(one), 0.5f, kEps);
 }
 
 // Test: Higher BSDF PDF means BSDF sampling wins
@@ -60,11 +60,11 @@ TEST_F(MISBehaviorTest, HigherBSDFPDFWins) {
     PdfW highPdf = 10.0f * per_sr;
     PdfW lowPdf = 1.0f * per_sr;
     
-    float wBsdf = mis_power_heuristic(highPdf, lowPdf);
-    float wLight = mis_power_heuristic(lowPdf, highPdf);
+    Dimensionless wBsdf = mis_power_heuristic(highPdf, lowPdf);
+    Dimensionless wLight = mis_power_heuristic(lowPdf, highPdf);
     
-    EXPECT_GT(wBsdf, 0.9f);  // BSDF should dominate
-    EXPECT_LT(wLight, 0.1f);  // Light should be minimal
+    EXPECT_GT(wBsdf.numerical_value_in(one), 0.9f);  // BSDF should dominate
+    EXPECT_LT(wLight.numerical_value_in(one), 0.1f);  // Light should be minimal
 }
 
 // Test: MIS weights sum to 1 for any valid PDFs
@@ -92,11 +92,11 @@ TEST_F(MISBehaviorTest, ZeroPDFHandling) {
     PdfW normalPdf = 1.0f * per_sr;
     
     // Zero PDF should give weight 0 to that strategy
-    float wZero = mis_power_heuristic(zeroPdf, normalPdf);
-    float wNormal = mis_power_heuristic(normalPdf, zeroPdf);
+    Dimensionless wZero = mis_power_heuristic(zeroPdf, normalPdf);
+    Dimensionless wNormal = mis_power_heuristic(normalPdf, zeroPdf);
     
-    EXPECT_NEAR(wZero, 0.0f, kEps);
-    EXPECT_NEAR(wNormal, 1.0f, kEps);
+    EXPECT_NEAR(wZero.numerical_value_in(one), 0.0f, kEps);
+    EXPECT_NEAR(wNormal.numerical_value_in(one), 1.0f, kEps);
 }
 
 // =============================================================================
@@ -107,7 +107,7 @@ class BSDFSampleBehaviorTest : public ::testing::Test {
 protected:
     MaterialParams createDiffuseMaterial(float r, float g, float b) {
         MaterialParams mat;
-        mat.albedo = ColorRGB{r, g, b};
+        mat.albedo = render::make_color_rgb(r, g, b);
         mat.roughness = 1.0f;
         mat.metallic = 0.0f;
         mat.transmission = 0.0f;
@@ -116,7 +116,7 @@ protected:
     
     MaterialParams createGlossyMaterial(float roughness) {
         MaterialParams mat;
-        mat.albedo = ColorRGB{0.8f, 0.8f, 0.8f};
+        mat.albedo = render::make_color_rgb(0.8f, 0.8f, 0.8f);
         mat.roughness = roughness;
         mat.metallic = 0.9f;
         mat.transmission = 0.0f;
@@ -125,7 +125,7 @@ protected:
     
     MaterialParams createGlassMaterial(float ior, float roughness) {
         MaterialParams mat;
-        mat.albedo = ColorRGB{1.0f, 1.0f, 1.0f};
+        mat.albedo = render::make_color_rgb(1.0f, 1.0f, 1.0f);
         mat.roughness = roughness;
         mat.metallic = 0.0f;
         mat.transmission = 1.0f;
@@ -235,16 +235,14 @@ protected:
             
             if (sample.useWeight) {
                 // Weight already includes cos/pdf
-                float lum = 0.2126f * sample.weight.r + 
-                           0.7152f * sample.weight.g + 
-                           0.0722f * sample.weight.b;
+                auto [wr, wg, wb] = render::color_to_floats(sample.weight);
+                float lum = 0.2126f * wr + 0.7152f * wg + 0.0722f * wb;
                 sum += lum;
             } else if (sample.pdf > MIN_PDF) {
                 float NdotL = std::abs(dot(n.vec(), sample.wi.vec()));
                 ColorRGB weight = bsdf_sample_weight(sample.f, NdotL, sample.pdf);
-                float lum = 0.2126f * weight.r + 
-                           0.7152f * weight.g + 
-                           0.0722f * weight.b;
+                auto [wr, wg, wb] = render::color_to_floats(weight);
+                float lum = 0.2126f * wr + 0.7152f * wg + 0.0722f * wb;
                 sum += lum;
             }
         }
@@ -256,7 +254,7 @@ protected:
 // Test: White diffuse should reflect ~1/π of incoming light
 TEST_F(BSDFConsistencyTest, DiffuseReflectance) {
     MaterialParams mat;
-    mat.albedo = ColorRGB{1.0f, 1.0f, 1.0f};  // White
+    mat.albedo = render::make_color_rgb(1.0f, 1.0f, 1.0f);  // White
     mat.roughness = 1.0f;
     mat.metallic = 0.0f;
     mat.transmission = 0.0f;
@@ -274,7 +272,7 @@ TEST_F(BSDFConsistencyTest, DiffuseReflectance) {
 // Test: Glossy metal should have high reflectance at normal incidence
 TEST_F(BSDFConsistencyTest, GlossyMetalReflectance) {
     MaterialParams mat;
-    mat.albedo = ColorRGB{0.95f, 0.95f, 0.95f};  // Silver-like
+    mat.albedo = render::make_color_rgb(0.95f, 0.95f, 0.95f);  // Silver-like
     mat.roughness = 0.1f;
     mat.metallic = 1.0f;
     mat.transmission = 0.0f;
@@ -292,7 +290,7 @@ TEST_F(BSDFConsistencyTest, GlossyMetalReflectance) {
 // Test: Low roughness should concentrate energy in specular direction
 TEST_F(BSDFConsistencyTest, LowRoughnessConcentration) {
     MaterialParams mat;
-    mat.albedo = ColorRGB{0.8f, 0.8f, 0.8f};
+    mat.albedo = render::make_color_rgb(0.8f, 0.8f, 0.8f);
     mat.roughness = 0.02f;  // Very smooth
     mat.metallic = 1.0f;
     mat.transmission = 0.0f;
@@ -333,7 +331,7 @@ class PDFConsistencyTest : public ::testing::Test {};
 // Test: PDF should be positive for valid samples
 TEST(PDFConsistencyTest, PositivePDFForValidSamples) {
     MaterialParams mat;
-    mat.albedo = ColorRGB{0.8f, 0.8f, 0.8f};
+    mat.albedo = render::make_color_rgb(0.8f, 0.8f, 0.8f);
     mat.roughness = 0.5f;
     mat.metallic = 0.0f;
     mat.transmission = 0.0f;
@@ -374,7 +372,7 @@ TEST(PDFConsistencyTest, PositivePDFForValidSamples) {
 // Test: Weight components should be non-negative
 TEST(PDFConsistencyTest, NonNegativeWeight) {
     MaterialParams mat;
-    mat.albedo = ColorRGB{0.8f, 0.8f, 0.8f};
+    mat.albedo = render::make_color_rgb(0.8f, 0.8f, 0.8f);
     mat.roughness = 0.1f;
     mat.metallic = 0.5f;
     mat.transmission = 0.0f;
@@ -403,7 +401,7 @@ TEST(PDFConsistencyTest, NonNegativeWeight) {
 TEST(EnergyConservationTest, DiffuseTotalReflectanceBounded) {
     // Estimate total hemispheric reflectance via Monte Carlo
     MaterialParams mat;
-    mat.albedo = ColorRGB{1.0f, 1.0f, 1.0f};
+    mat.albedo = render::make_color_rgb(1.0f, 1.0f, 1.0f);
     mat.roughness = 1.0f;
     mat.metallic = 0.0f;
     mat.transmission = 0.0f;
@@ -421,11 +419,13 @@ TEST(EnergyConservationTest, DiffuseTotalReflectanceBounded) {
         
         float contrib = 0.0f;
         if (sample.useWeight) {
-            contrib = sample.weight.r;  // For white material, all channels equal
+            auto [wr, wg, wb] = render::color_to_floats(sample.weight);
+            contrib = wr;  // For white material, all channels equal
         } else if (sample.pdf > MIN_PDF) {
             float NdotL = std::abs(dot(n.vec(), sample.wi.vec()));
             ColorRGB weight = bsdf_sample_weight(sample.f, NdotL, sample.pdf);
-            contrib = weight.r;
+            auto [wr, wg, wb] = render::color_to_floats(weight);
+            contrib = wr;
         }
         sum += contrib;
     }
@@ -439,7 +439,7 @@ TEST(EnergyConservationTest, DiffuseTotalReflectanceBounded) {
 
 TEST(EnergyConservationTest, MetalReflectanceBounded) {
     MaterialParams mat;
-    mat.albedo = ColorRGB{1.0f, 1.0f, 1.0f};
+    mat.albedo = render::make_color_rgb(1.0f, 1.0f, 1.0f);
     mat.roughness = 0.2f;
     mat.metallic = 1.0f;
     mat.transmission = 0.0f;
@@ -457,11 +457,13 @@ TEST(EnergyConservationTest, MetalReflectanceBounded) {
         
         float contrib = 0.0f;
         if (sample.useWeight) {
-            contrib = sample.weight.r;
+            auto [wr, wg, wb] = render::color_to_floats(sample.weight);
+            contrib = wr;
         } else if (sample.pdf > MIN_PDF) {
             float NdotL = std::abs(dot(n.vec(), sample.wi.vec()));
             ColorRGB weight = bsdf_sample_weight(sample.f, NdotL, sample.pdf);
-            contrib = weight.r;
+            auto [wr, wg, wb] = render::color_to_floats(weight);
+            contrib = wr;
         }
         sum += contrib;
     }

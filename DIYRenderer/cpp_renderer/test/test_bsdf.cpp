@@ -80,21 +80,24 @@ TEST_F(FresnelSchlickTest, HalfAngle_ExpectedValue) {
 // ============================================================================
 
 TEST(FresnelSchlickColorTest, BasicColorReflectance) {
-    ColorRGB f0 = {0.9f, 0.6f, 0.3f};  // Gold-like
+    ColorRGB f0 = render::make_color_rgb(0.9f, 0.6f, 0.3f);  // Gold-like
     ColorRGB result = fresnelSchlickColor(1.0f, f0);
     
-    EXPECT_NEAR(result.r, f0.r, kEps);
-    EXPECT_NEAR(result.g, f0.g, kEps);
-    EXPECT_NEAR(result.b, f0.b, kEps);
+    auto [rr, rg, rb] = render::color_to_floats(result);
+    auto [f0r, f0g, f0b] = render::color_to_floats(f0);
+    EXPECT_NEAR(rr, f0r, kEps);
+    EXPECT_NEAR(rg, f0g, kEps);
+    EXPECT_NEAR(rb, f0b, kEps);
 }
 
 TEST(FresnelSchlickColorTest, GrazingAngle_White) {
-    ColorRGB f0 = {0.9f, 0.6f, 0.3f};
+    ColorRGB f0 = render::make_color_rgb(0.9f, 0.6f, 0.3f);
     ColorRGB result = fresnelSchlickColor(0.0f, f0);
     
-    EXPECT_NEAR(result.r, 1.0f, kEps);
-    EXPECT_NEAR(result.g, 1.0f, kEps);
-    EXPECT_NEAR(result.b, 1.0f, kEps);
+    auto [rr, rg, rb] = render::color_to_floats(result);
+    EXPECT_NEAR(rr, 1.0f, kEps);
+    EXPECT_NEAR(rg, 1.0f, kEps);
+    EXPECT_NEAR(rb, 1.0f, kEps);
 }
 
 // ============================================================================

@@ -73,12 +73,8 @@ struct BSDFSample {
  */
 inline render::BSDFRGB evalDiffuse(const MaterialParams& mat, float NdotL, float NdotV) {
     if (NdotL <= 0.0f || NdotV <= 0.0f) return render::zero_bsdf_rgb();
-    // albedo [dimensionless] / π → [1/sr]
-    return render::make_bsdf_rgb(
-        mat.albedo.r * GGX_INV_PI,
-        mat.albedo.g * GGX_INV_PI,
-        mat.albedo.b * GGX_INV_PI
-    );
+    // albedo / π → [1/sr] (uses boundary helper)
+    return render::diffuse_bsdf_from_albedo(mat.albedo);
 }
 
 /**
@@ -104,11 +100,17 @@ inline render::BSDFRGB evalSpecular(const MaterialParams& mat, const render::Dir
     float G2_over_denom = 0.5f / (NdotV * lambdaL + NdotL * lambdaV + GGX_EPSILON);
     
     // Compute F0 using ColorRGB
-    render::ColorRGB f0 = mat.albedo * mat.metallic + render::ColorRGB(0.04f, 0.04f, 0.04f) * (1.0f - mat.metallic);
+    render::ColorRGB f0 = mat.albedo * mat.metallic + render::make_color_rgb(0.04f, 0.04f, 0.04f) * (1.0f - mat.metallic);
     render::ColorRGB F = fresnelSchlickColor(VdotH, f0);
     
     float spec = D * G2_over_denom;
-    return render::make_bsdf_rgb(spec * F.r, spec * F.g, spec * F.b);
+    // Keep units through BSDF construction: [1/sr] * [dimensionless] -> [1/sr]
+    const render::BSDF spec_bsdf = spec * render::per_sr;
+    return render::BSDFRGB{
+        spec_bsdf * F.r,
+        spec_bsdf * F.g,
+        spec_bsdf * F.b,
+    };
 }
 
 /**
@@ -186,7 +188,7 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const render::Direction&
             float w = G2 / (G1 + GGX_EPSILON);
             
             sample.useWeight = true;
-            sample.weight = render::ColorRGB(w, w, w);
+            sample.weight = render::make_color_rgb(w, w, w);
             sample.pdf = 1.0f * render::per_sr;
             sample.isDelta = false;
             sample.type = BSDFSample::SPECULAR;
@@ -210,7 +212,7 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const render::Direction&
                 float w = G2 / (G1 + GGX_EPSILON);
                 
                 sample.useWeight = true;
-                sample.weight = render::ColorRGB(w, w, w);
+                sample.weight = render::make_color_rgb(w, w, w);
                 sample.pdf = 1.0f * render::per_sr;
                 sample.isDelta = false;
                 sample.type = BSDFSample::SPECULAR;
@@ -225,7 +227,7 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const render::Direction&
                 float w = G2 / (G1 + GGX_EPSILON);
                 
                 sample.useWeight = true;
-                sample.weight = render::ColorRGB(w, w, w);
+                sample.weight = render::make_color_rgb(w, w, w);
                 sample.pdf = 1.0f * render::per_sr;
                 sample.isDelta = false;
                 sample.type = BSDFSample::TRANSMISSION;
@@ -271,12 +273,7 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const render::Direction&
         // sample the narrow specular lobe, so BSDF sampling should get full weight
         constexpr float DELTA_ROUGHNESS_THRESHOLD = 0.05f;
         if (roughness < DELTA_ROUGHNESS_THRESHOLD && mat.metallic > 0.5f) {
-            // Compute weight = f * cos / pdf for pre-weighted sampling
-            float weight_denom = (sample.pdf > render::MIN_PDF) 
-                ? sample.pdf.numerical_value_in(render::per_sr) : 1.0f;
-            render::ColorRGB f_color = render::to_color(sample.f);
-            float w = f_color.r * NdotL / weight_denom;  // Assume grayscale for simplicity
-            sample.weight = render::ColorRGB(w, w, w);
+            sample.weight = render::bsdf_sample_weight(sample.f, NdotL, sample.pdf);
             sample.useWeight = true;
         } else {
             sample.useWeight = false;
