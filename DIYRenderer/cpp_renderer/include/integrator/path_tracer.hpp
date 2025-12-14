@@ -323,8 +323,11 @@ inline render::ColorRGB traceMIS(const Scene& scene, const SceneLights& sceneLig
                 }
             }
             render::PdfW bsdfPdf = lastBsdfPdf;
+            // MIS weight for BSDF sampling strategy hitting a light
+            // mis_power_heuristic(pf, pg) returns weight for strategy f
+            // Here we sampled via BSDF, so pf = bsdfPdf
             float misWeight = (bsdfPdf > render::MIN_PDF && lightPdf > render::MIN_PDF)
-                                ? render::mis_power_heuristic(lightPdf, bsdfPdf)
+                                ? render::mis_power_heuristic(bsdfPdf, lightPdf)
                                 : 1.0f;
             result += throughput * lightHit.emission * misWeight;
             break;
@@ -361,7 +364,10 @@ inline render::ColorRGB traceMIS(const Scene& scene, const SceneLights& sceneLig
                         const Light& l = sceneLights.lights[lightIdx];
                         render::PdfW lightPdf = pdfLightSample(l, currentRay.origin, hit.point, hit.normal) * selectProb;
                         if (lightPdf > render::MIN_PDF) {
-                            misWeight = render::mis_power_heuristic(lightPdf, lastBsdfPdf);
+                            // MIS weight for BSDF sampling strategy hitting emissive surface
+                            // mis_power_heuristic(pf, pg) returns weight for strategy f
+                            // Here we sampled via BSDF, so pf = lastBsdfPdf
+                            misWeight = render::mis_power_heuristic(lastBsdfPdf, lightPdf);
                         }
                     }
                 }

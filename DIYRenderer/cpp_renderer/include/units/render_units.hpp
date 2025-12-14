@@ -1066,6 +1066,10 @@ inline ColorRGB bsdf_sample_weight(BSDFRGB f, float abs_cos_theta, PdfW pdf) {
 }
 
 // MIS power heuristic (balance heuristic with power=2)
+// Returns weight for sampling strategy with pdf pf.
+// Usage: When you sampled via strategy F and want to weight the contribution,
+//        call mis_power_heuristic(pdf_of_F, pdf_of_alternative_G)
+// Property: mis_power_heuristic(pf, pg) + mis_power_heuristic(pg, pf) ≈ 1
 inline float mis_power_heuristic(PdfW pf, PdfW pg) {
     auto f2 = pf * pf;
     auto g2 = pg * pg;
