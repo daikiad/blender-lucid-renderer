@@ -1,3 +1,15 @@
 .vscode/
 *.pyc
 DIYRenderer/cpp_renderer/build
+DIYRenderer/cpp_renderer/build_pybind
+.DS_Store
+test_scenes/
+archive/
+
+# Coverage
+coverage/
+coverage_report/
+*.gcno
+*.gcda
+*.gcov
+coverage.info
