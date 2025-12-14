@@ -23,6 +23,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # =============================================================================
+# Coverage Option
+# =============================================================================
+option(COVERAGE "Enable code coverage measurement (gcov)" OFF)
+
+if(COVERAGE)
+    message(STATUS "Code coverage enabled")
+    set(COVERAGE_FLAGS "--coverage -fprofile-arcs -ftest-coverage")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COVERAGE_FLAGS}")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${COVERAGE_FLAGS}")
+endif()
+
+# =============================================================================
 # Python Setup (for Blender compatibility)
 # =============================================================================
 # Use UV's Python 3.11 (Blender uses Python 3.11)
@@ -154,3 +166,78 @@ target_link_libraries(test_integrator_e2e PRIVATE
 # Use -O3 for faster rendering in E2E tests
 target_compile_options(test_integrator_e2e PRIVATE -O3 -march=native)
 gtest_discover_tests(test_integrator_e2e)
+
+# --- test_scene_lights: SceneLights and light index mapping tests ---
+add_executable(test_scene_lights 
+    test/test_scene_lights.cpp
+    src/node_evaluator.cpp
+)
+target_include_directories(test_scene_lights PRIVATE include)
+target_link_libraries(test_scene_lights PRIVATE 
+    mp-units::mp-units 
+    nlohmann_json::nlohmann_json
+    GTest::gtest 
+    GTest::gtest_main
+)
+target_compile_options(test_scene_lights PRIVATE -O2)
+gtest_discover_tests(test_scene_lights)
+
+# --- test_path_tracer: Path tracer convergence/regression tests ---
+add_executable(test_path_tracer 
+    test/test_path_tracer.cpp
+    src/node_evaluator.cpp
+)
+target_include_directories(test_path_tracer PRIVATE include)
+target_link_libraries(test_path_tracer PRIVATE 
+    mp-units::mp-units 
+    nlohmann_json::nlohmann_json
+    GTest::gtest 
+    GTest::gtest_main
+)
+target_compile_options(test_path_tracer PRIVATE -O3 -march=native)
+gtest_discover_tests(test_path_tracer)
+
+# =============================================================================
+# Coverage Target
+# =============================================================================
+if(COVERAGE)
+    find_program(LCOV lcov)
+    find_program(GENHTML genhtml)
+    find_program(GCOV_15 gcov-15 PATHS /opt/homebrew/bin /usr/local/bin)
+    
+    if(LCOV AND GENHTML)
+        # Set gcov tool option for GCC 15 compatibility
+        if(GCOV_15)
+            set(GCOV_TOOL_OPT "--gcov-tool" "${GCOV_15}")
+            message(STATUS "Using gcov-15 for coverage: ${GCOV_15}")
+        else()
+            set(GCOV_TOOL_OPT "")
+        endif()
+        
+        add_custom_target(coverage
+            COMMENT "Generating coverage report..."
+            # Clean previous coverage data
+            COMMAND ${LCOV} ${GCOV_TOOL_OPT} --directory . --zerocounters
+            # Run all tests
+            COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+            # Capture coverage data
+            COMMAND ${LCOV} ${GCOV_TOOL_OPT} --ignore-errors gcov,gcov,inconsistent,inconsistent --directory . --capture --output-file coverage.info
+            # Remove system headers and test files from coverage
+            COMMAND ${LCOV} ${GCOV_TOOL_OPT} --ignore-errors unused --remove coverage.info 
+                '/usr/*' 
+                '*/test/*' 
+                '*/.conan2/*'
+                '*/mp-units/*'
+                '*/nlohmann/*'
+                '*/gtest/*'
+                '*/opt/homebrew/*'
+                --output-file coverage.info
+            # Generate HTML report
+            COMMAND ${GENHTML} coverage.info --output-directory coverage_report --ignore-errors source,inconsistent
+            COMMAND ${CMAKE_COMMAND} -E echo "Coverage report: ${CMAKE_BINARY_DIR}/coverage_report/index.html"
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        )
+    else()
+        message(WARNING "lcov/genhtml not found. Install with: brew install lcov")
+    endif()
+endif()
