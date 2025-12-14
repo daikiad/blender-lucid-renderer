@@ -72,9 +72,12 @@ target_compile_options(diyrenderer PRIVATE -O3 -march=native -ffast-math -flto)
 target_link_options(diyrenderer PRIVATE -flto)
 
 # =============================================================================
-# Test Target: test_render_units (Google Test)
+# Test Targets (Google Test)
 # =============================================================================
 enable_testing()
+include(GoogleTest)
+
+# --- test_render_units: Unit type system tests ---
 add_executable(test_render_units test/render_units_test.cpp)
 target_include_directories(test_render_units PRIVATE include)
 target_link_libraries(test_render_units PRIVATE 
@@ -83,5 +86,48 @@ target_link_libraries(test_render_units PRIVATE
     GTest::gtest_main
 )
 target_compile_options(test_render_units PRIVATE -O2)
-include(GoogleTest)
 gtest_discover_tests(test_render_units)
+
+# --- test_geometry: Ray-primitive intersection tests ---
+add_executable(test_geometry test/test_geometry.cpp)
+target_include_directories(test_geometry PRIVATE include)
+target_link_libraries(test_geometry PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
+target_compile_options(test_geometry PRIVATE -O2)
+gtest_discover_tests(test_geometry)
+
+# --- test_bsdf: BSDF and material function tests ---
+add_executable(test_bsdf test/test_bsdf.cpp)
+target_include_directories(test_bsdf PRIVATE include)
+target_link_libraries(test_bsdf PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
+target_compile_options(test_bsdf PRIVATE -O2)
+gtest_discover_tests(test_bsdf)
+
+# --- test_light: Light source and sampling tests ---
+add_executable(test_light test/test_light.cpp)
+target_include_directories(test_light PRIVATE include)
+target_link_libraries(test_light PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
+target_compile_options(test_light PRIVATE -O2)
+gtest_discover_tests(test_light)
+
+# --- test_random: RNG quality tests ---
+add_executable(test_random test/test_random.cpp)
+target_include_directories(test_random PRIVATE include)
+target_link_libraries(test_random PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
+target_compile_options(test_random PRIVATE -O2)
+gtest_discover_tests(test_random)

@@ -65,8 +65,24 @@ inline render::Direction worldToLocal(const render::Direction& world, const rend
 // ========== GGX Normal Distribution Function ==========
 
 /**
- * GGX NDF: D(m) = α² / (π * (cos²θ * (α² - 1) + 1)²)
- * In Blender/Cycles, alpha = roughness², so a2 = roughness⁴
+ * GGX/Trowbridge-Reitz Normal Distribution Function
+ * 
+ * D(m) = α² / (π * (cos²θ * (α² - 1) + 1)²)
+ * 
+ * In Blender/Cycles convention: alpha = roughness², so α² = roughness⁴
+ * 
+ * At peak (NdotH=1): D = 1 / (π * α²)
+ *   - Smoother surfaces (small α) → higher D at peak
+ *   - Rougher surfaces (large α) → lower D at peak, but wider distribution
+ * 
+ * Note: GGX_EPSILON is added to denominator for numerical stability.
+ * This affects very smooth surfaces (roughness < ~0.1) where theoretical D
+ * would be extremely large. For roughness=0.01, theoretical D ≈ 3e7 but
+ * actual D ≈ 0.003 due to epsilon clamping.
+ * 
+ * @param NdotH dot product of normal and half-vector [0, 1]
+ * @param roughness surface roughness [0, 1], clamped to MIN_ROUGHNESS in practice
+ * @return NDF value (not a probability, can be > 1)
  */
 inline float ggxD(float NdotH, float roughness) {
     float alpha = roughness * roughness;  // α = roughness²

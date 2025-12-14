@@ -49,9 +49,26 @@ inline render::ColorRGB fresnelSchlickColor(float cosTheta, const render::ColorR
 /**
  * Exact Fresnel for dielectric
  * 
- * @param cosThetaI cosine of incident angle (positive)
- * @param eta ratio n_incident / n_transmitted (e.g., 1/1.5 when entering glass from air)
- * @return Fresnel reflectance (0 to 1)
+ * Computes Fresnel reflectance using exact dielectric Fresnel equations.
+ * Uses Snell's law: sin(θ_t) = eta * sin(θ_i)
+ * 
+ * @param cosThetaI cosine of incident angle (positive, will be clamped)
+ * @param eta ratio n_incident / n_transmitted
+ * 
+ * Examples:
+ *   - Air (n=1.0) → Glass (n=1.5): eta = 1.0/1.5 = 0.667
+ *   - Glass (n=1.5) → Air (n=1.0): eta = 1.5/1.0 = 1.5
+ * 
+ * Total Internal Reflection (TIR):
+ *   TIR occurs when eta > 1 and sin(θ_i) > 1/eta (i.e., going from dense to sparse medium).
+ *   At TIR, returns 1.0 (perfect reflection).
+ *   Critical angle: θ_c = arcsin(1/eta), e.g., ~41.8° for glass→air.
+ * 
+ * Usage in BSDF sampling (see bsdf.hpp):
+ *   float eta = frontFace ? (1.0f / ior) : ior;
+ *   float F = fresnelDielectric(cosThetaI, eta);
+ * 
+ * @return Fresnel reflectance [0, 1]
  */
 inline float fresnelDielectric(float cosThetaI, float eta) {
     // Clamp cosThetaI to valid range
