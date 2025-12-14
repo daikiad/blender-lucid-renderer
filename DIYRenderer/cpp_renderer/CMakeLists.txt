@@ -142,3 +142,15 @@ target_link_libraries(test_integrator PRIVATE
 )
 target_compile_options(test_integrator PRIVATE -O2)
 gtest_discover_tests(test_integrator)
+
+# --- test_integrator_e2e: End-to-end integrator comparison tests ---
+add_executable(test_integrator_e2e test/test_integrator_e2e.cpp)
+target_include_directories(test_integrator_e2e PRIVATE include)
+target_link_libraries(test_integrator_e2e PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
+# Use -O3 for faster rendering in E2E tests
+target_compile_options(test_integrator_e2e PRIVATE -O3 -march=native)
+gtest_discover_tests(test_integrator_e2e)

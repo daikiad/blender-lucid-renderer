@@ -266,7 +266,21 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const render::Direction&
         float pdf_raw = (specProb * pdfSpec + (1.0f - specProb) * pdfDiff) * (1.0f - mat.transmission);
         sample.pdf = pdf_raw * render::per_sr;
         
-        sample.useWeight = false;
+        // For near-delta specular (very low roughness), use weight-based sampling
+        // This ensures MIS weight = 1.0 because light sampling cannot efficiently
+        // sample the narrow specular lobe, so BSDF sampling should get full weight
+        constexpr float DELTA_ROUGHNESS_THRESHOLD = 0.05f;
+        if (roughness < DELTA_ROUGHNESS_THRESHOLD && mat.metallic > 0.5f) {
+            // Compute weight = f * cos / pdf for pre-weighted sampling
+            float weight_denom = (sample.pdf > render::MIN_PDF) 
+                ? sample.pdf.numerical_value_in(render::per_sr) : 1.0f;
+            render::ColorRGB f_color = render::to_color(sample.f);
+            float w = f_color.r * NdotL / weight_denom;  // Assume grayscale for simplicity
+            sample.weight = render::ColorRGB(w, w, w);
+            sample.useWeight = true;
+        } else {
+            sample.useWeight = false;
+        }
         sample.isDelta = false;
         sample.type = BSDFSample::SPECULAR;
     } else {

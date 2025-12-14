@@ -316,10 +316,15 @@ inline render::ColorRGB traceMIS(const Scene& scene, const SceneLights& sceneLig
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
             render::PdfW lightPdf = render::zero_pdf_w();
             if (sceneLights.hasLights() && lightHit.lightIndex >= 0) {
-                float selectProb = sceneLights.getPdfForLight(lightHit.lightIndex);
-                if (selectProb > 0.0f) {
-                    const Light& l = sceneLights.lights[lightHit.lightIndex];
-                    lightPdf = pdfLightSample(l, currentRay.origin, lightHit.point, lightHit.normal) * selectProb;
+                // lightHit.lightIndex is index into scene.nativeLights, not sceneLights.lights
+                // Convert to sceneLights.lights index
+                int sceneLightIdx = sceneLights.findNativeLightIndex(lightHit.lightIndex);
+                if (sceneLightIdx >= 0) {
+                    float selectProb = sceneLights.getPdfForLight(sceneLightIdx);
+                    if (selectProb > 0.0f) {
+                        const Light& l = sceneLights.lights[sceneLightIdx];
+                        lightPdf = pdfLightSample(l, currentRay.origin, lightHit.point, lightHit.normal) * selectProb;
+                    }
                 }
             }
             render::PdfW bsdfPdf = lastBsdfPdf;
@@ -436,7 +441,13 @@ inline render::ColorRGB traceMIS(const Scene& scene, const SceneLights& sceneLig
             }
         }
         
-        // Store PDF for next bounce MIS (0 if using pre-computed weight)
+        // Store PDF for next bounce MIS
+        // For useWeight paths (specular/transmission with pre-computed weight), we don't have
+        // a proper PDF value. Treat them as pseudo-delta: set PDF to 0 so MIS weight becomes 1.0.
+        // This is correct because:
+        // 1. For true delta distributions (perfect mirrors), light sampling PDF = 0, so BSDF wins
+        // 2. For GGX transmission with complex Jacobians, using weight directly avoids instability
+        // 3. The path contribution is already correct via the pre-computed weight
         lastBsdfPdf = bsdfSample.useWeight ? render::zero_pdf_w() : bsdfSample.pdf;
         
         // Russian Roulette

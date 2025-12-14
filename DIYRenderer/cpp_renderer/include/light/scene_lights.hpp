@@ -48,6 +48,9 @@ struct SceneLights {
     // Unit-typed properties
     render::Area totalEmissiveArea{0.0f * mp_units::square(mp_units::si::metre)};  // [m²]
     
+    // Index where native lights start in lights[] (after emissive mesh triangles)
+    int nativeLightStartIndex = 0;
+    
     SceneLights() {}
     
     void buildFromScene(const Scene& scene) {
@@ -94,6 +97,9 @@ struct SceneLights {
         }
         
         // Add native Blender lights
+        // Record where native lights start (after emissive mesh triangles)
+        nativeLightStartIndex = static_cast<int>(lights.size());
+        
         for (const Light& nativeLight : scene.nativeLights) {
             Light light = nativeLight;
             
@@ -143,6 +149,16 @@ struct SceneLights {
     float getPdfForLight(int lightIdx) const {
         if (lightIdx < 0 || lightIdx >= (int)lights.size()) return 0.0f;
         return render::area_ratio(lights[lightIdx].area, totalEmissiveArea);
+    }
+    
+    /**
+     * Find the index in lights[] for a given scene.nativeLights index
+     * @param nativeLightIndex Index into scene.nativeLights (from intersectNativeLights)
+     * @return Index into lights[], or -1 if not found
+     */
+    int findNativeLightIndex(int nativeLightIndex) const {
+        int idx = nativeLightStartIndex + nativeLightIndex;
+        return (idx >= 0 && idx < static_cast<int>(lights.size())) ? idx : -1;
     }
     
     bool hasLights() const { return !lights.empty(); }
