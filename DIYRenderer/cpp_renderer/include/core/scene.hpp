@@ -173,8 +173,8 @@ struct Mesh {
  * final_radiance = color × strength [W/(sr·m²)]
  */
 struct Environment {
-    render::ColorRGB color{0.05f, 0.05f, 0.05f};  // Background color (RGB, each [0,∞])
-    float strength = 1.0f;                         // Emission strength multiplier (dimensionless)
+    render::AttenuationRGB color{0.05f, 0.05f, 0.05f};  // Background color coefficient [0,1]
+    float strength = 1.0f;                               // Emission strength multiplier (dimensionless)
 };
 
 // ========== Scene Structure ==========

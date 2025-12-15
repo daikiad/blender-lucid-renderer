@@ -41,6 +41,41 @@ inline bool relativeEqual(float a, float b, float relEps = kRelativeEpsilon) {
     return std::abs(a - b) / maxVal < relEps;
 }
 
+// Attenuation RGB comparison (for albedo, coefficients [0,1])
+inline bool attenuationApproxEqual(const render::AttenuationRGB& a, const render::AttenuationRGB& b, float eps = kEpsilon) {
+    auto [ar, ag, ab] = render::color_to_floats(a);
+    auto [br, bg, bb] = render::color_to_floats(b);
+    return approxEqual(ar, br, eps) && 
+           approxEqual(ag, bg, eps) && 
+           approxEqual(ab, bb, eps);
+}
+
+inline bool attenuationRelativeEqual(const render::AttenuationRGB& a, const render::AttenuationRGB& b, float relEps = kRelativeEpsilon) {
+    auto [ar, ag, ab] = render::color_to_floats(a);
+    auto [br, bg, bb] = render::color_to_floats(b);
+    return relativeEqual(ar, br, relEps) && 
+           relativeEqual(ag, bg, relEps) && 
+           relativeEqual(ab, bb, relEps);
+}
+
+// Throughput RGB comparison (for path weights [0,∞))
+inline bool throughputApproxEqual(const render::ThroughputRGB& a, const render::ThroughputRGB& b, float eps = kEpsilon) {
+    auto [ar, ag, ab] = render::color_to_floats(a);
+    auto [br, bg, bb] = render::color_to_floats(b);
+    return approxEqual(ar, br, eps) && 
+           approxEqual(ag, bg, eps) && 
+           approxEqual(ab, bb, eps);
+}
+
+inline bool throughputRelativeEqual(const render::ThroughputRGB& a, const render::ThroughputRGB& b, float relEps = kRelativeEpsilon) {
+    auto [ar, ag, ab] = render::color_to_floats(a);
+    auto [br, bg, bb] = render::color_to_floats(b);
+    return relativeEqual(ar, br, relEps) && 
+           relativeEqual(ag, bg, relEps) && 
+           relativeEqual(ab, bb, relEps);
+}
+
+// Legacy aliases for ColorRGB (deprecated, use AttenuationRGB or ThroughputRGB)
 inline bool colorApproxEqual(const render::ColorRGB& a, const render::ColorRGB& b, float eps = kEpsilon) {
     auto [ar, ag, ab] = render::color_to_floats(a);
     auto [br, bg, bb] = render::color_to_floats(b);

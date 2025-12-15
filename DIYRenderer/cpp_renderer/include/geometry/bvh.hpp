@@ -182,9 +182,9 @@ inline Hit intersectScene(const Scene& scene, const Ray& ray,
  * Get environment/background color for ray
  * @param ray   Ray direction (for future HDRI support)
  * @param env   Environment settings
- * @return Environment radiance (ColorRGB)
+ * @return Environment color coefficient (AttenuationRGB)
  */
-inline render::ColorRGB getEnvironmentColor(const Ray& ray, const Environment& env) {
+inline render::AttenuationRGB getEnvironmentColor(const Ray& ray, const Environment& env) {
     return env.color * env.strength;
 }
 

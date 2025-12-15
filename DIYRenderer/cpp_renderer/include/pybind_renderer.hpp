@@ -285,10 +285,10 @@ public:
                         // カメラ感度を適用（平均化は Python 側で行う）
                         // 累積値をサンプル数で割らず、そのまま返す
                         // Python 側で total_samples で正規化する
-                        render::ColorRGB color = render::apply_camera_sensitivity(radiance, camera_.sensitivity());
+                        render::AttenuationRGB color = render::apply_camera_sensitivity(radiance, camera_.sensitivity());
                         
                         // 負の値をクランプして float に抽出
-                        color = render::color_clamp_min_zero(color);
+                        color = render::attenuation_clamp_min_zero(color);
                         auto [r, g, b] = render::color_to_floats(color);
                         
                         // RGBA としてバッファに格納
@@ -362,17 +362,17 @@ public:
                 auto world_dir = render::make_direction_or_default(world_dir_vec, camera_.forward);
                 Ray ray(camera_.pos, world_dir);
                 
-                render::ColorRGB color(0, 0, 0);
+                render::AttenuationRGB color(0, 0, 0);
                 if (mode == "normal") {
                     color = traceNormal(scene_, ray);
                     // -1..1 を 0..1 にマッピング
-                    color = color * 0.5f + render::make_color_rgb(0.5f, 0.5f, 0.5f);
+                    color = color * 0.5f + render::make_attenuation_rgb(0.5f, 0.5f, 0.5f);
                 } else if (mode == "albedo") {
                     color = traceAlbedo(scene_, ray);
                 } else if (mode == "emission") {
                     color = traceEmission(scene_, ray);
                 } else {
-                    color = render::make_color_rgb(1.0f, 0.0f, 1.0f);  // マゼンタ（エラー表示）
+                    color = render::make_attenuation_rgb(1.0f, 0.0f, 1.0f);  // マゼンタ（エラー表示）
                 }
                 
                 // Y反転を考慮したインデックス
@@ -500,13 +500,13 @@ private:
             // Material
             if (mesh_j.contains("material")) {
                 const auto& mat = mesh_j["material"];
-                render::ColorRGB albedo = render::make_color_rgb(0.8f, 0.8f, 0.8f);
+                render::AttenuationRGB albedo = render::make_attenuation_rgb(0.8f, 0.8f, 0.8f);
                 float metallic = 0.0f, roughness = 0.5f;
                 render::RadianceRGB emission = render::make_radiance_rgb(0.0f, 0.0f, 0.0f);
                 float transmission = 0.0f, ior = 1.45f;
                 
                 if (mat.contains("base_color")) {
-                    albedo = render::make_color_rgb(
+                    albedo = render::make_attenuation_rgb(
                         mat["base_color"][0].get<float>(), 
                         mat["base_color"][1].get<float>(), 
                         mat["base_color"][2].get<float>()
@@ -604,9 +604,9 @@ private:
             }
             
             // Color and energy
-            render::ColorRGB color = render::make_color_rgb(1.0f, 1.0f, 1.0f);
+            render::AttenuationRGB color = render::make_attenuation_rgb(1.0f, 1.0f, 1.0f);
             if (lightJson.contains("color")) {
-                color = render::make_color_rgb(
+                color = render::make_attenuation_rgb(
                     lightJson["color"][0].get<float>(),
                     lightJson["color"][1].get<float>(),
                     lightJson["color"][2].get<float>()

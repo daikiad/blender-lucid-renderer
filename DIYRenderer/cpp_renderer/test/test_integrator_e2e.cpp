@@ -240,7 +240,7 @@ protected:
                 sum += lum;
             } else if (sample.pdf > MIN_PDF) {
                 float NdotL = std::abs(dot(n.vec(), sample.wi.vec()));
-                ColorRGB weight = bsdf_sample_weight(sample.f, NdotL, sample.pdf);
+                ThroughputRGB weight = bsdf_sample_weight(sample.f, NdotL, sample.pdf);
                 auto [wr, wg, wb] = render::color_to_floats(weight);
                 float lum = 0.2126f * wr + 0.7152f * wg + 0.0722f * wb;
                 sum += lum;
@@ -423,7 +423,7 @@ TEST(EnergyConservationTest, DiffuseTotalReflectanceBounded) {
             contrib = wr;  // For white material, all channels equal
         } else if (sample.pdf > MIN_PDF) {
             float NdotL = std::abs(dot(n.vec(), sample.wi.vec()));
-            ColorRGB weight = bsdf_sample_weight(sample.f, NdotL, sample.pdf);
+            ThroughputRGB weight = bsdf_sample_weight(sample.f, NdotL, sample.pdf);
             auto [wr, wg, wb] = render::color_to_floats(weight);
             contrib = wr;
         }
@@ -461,7 +461,7 @@ TEST(EnergyConservationTest, MetalReflectanceBounded) {
             contrib = wr;
         } else if (sample.pdf > MIN_PDF) {
             float NdotL = std::abs(dot(n.vec(), sample.wi.vec()));
-            ColorRGB weight = bsdf_sample_weight(sample.f, NdotL, sample.pdf);
+            ThroughputRGB weight = bsdf_sample_weight(sample.f, NdotL, sample.pdf);
             auto [wr, wg, wb] = render::color_to_floats(weight);
             contrib = wr;
         }

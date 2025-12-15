@@ -74,11 +74,11 @@ inline render::RadianceRGB getEmission(const Hit& hit) {
 /**
  * Simple path tracer using BSDF sampling only (no NEE)
  * Most basic implementation - good for testing
- * Returns RadianceRGB - caller applies camera sensitivity for final ColorRGB
+ * Returns RadianceRGB - caller applies camera sensitivity for final pixel value
  */
 inline render::RadianceRGB traceSimple(const Scene& scene, const Ray& ray, int maxDepth) {
     render::RadianceRGB result = render::zero_radiance_rgb();
-    render::ColorRGB throughput = render::make_color_rgb(1.0f, 1.0f, 1.0f);
+    render::ThroughputRGB throughput = render::unit_throughput_rgb();
     Ray currentRay = ray;
     render::Length tMin = render::metres(0.0f);  // First ray starts from camera
     
@@ -127,13 +127,10 @@ inline render::RadianceRGB traceSimple(const Scene& scene, const Ray& ray, int m
         } else {
             float absNdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
             if (absNdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
-                render::ColorRGB weight = render::bsdf_sample_weight(bsdfSample.f, absNdotL, bsdfSample.pdf);
+                render::ThroughputRGB weight = render::bsdf_sample_weight(bsdfSample.f, absNdotL, bsdfSample.pdf);
                 
-                constexpr auto MAX_WEIGHT = render::reflectance(10.0f);
-                weight.r = std::min(weight.r, MAX_WEIGHT);
-                weight.g = std::min(weight.g, MAX_WEIGHT);
-                weight.b = std::min(weight.b, MAX_WEIGHT);
-                
+                // Note: We no longer clamp throughput weights - that would bias the estimator.
+                // The ThroughputRGB type makes this intent clear.
                 throughput = throughput * weight;
             } else {
                 break;
@@ -142,14 +139,14 @@ inline render::RadianceRGB traceSimple(const Scene& scene, const Ray& ray, int m
         
         // Russian Roulette
         if (depth >= 3) {
-            float maxThroughput = render::color_max_component(throughput);
+            float maxThroughput = render::throughput_max_component(throughput);
             float rrProb = std::min(maxThroughput, 0.95f);
             if (randf() > rrProb) break;
             throughput = throughput * (1.0f / rrProb);
         }
         
         // Check for NaN/Inf
-        if (!render::color_is_valid(throughput)) {
+        if (!render::throughput_is_valid(throughput)) {
             break;
         }
         
@@ -166,12 +163,12 @@ inline render::RadianceRGB traceSimple(const Scene& scene, const Ray& ray, int m
 /**
  * Path tracer with Next Event Estimation
  * Uses light sampling for direct illumination
- * Returns RadianceRGB - caller applies camera sensitivity for final ColorRGB
+ * Returns RadianceRGB - caller applies camera sensitivity for final pixel value
  */
 inline render::RadianceRGB traceNEE(const Scene& scene, const SceneLights& sceneLights, 
                      const Ray& ray, int maxDepth) {
     render::RadianceRGB result = render::zero_radiance_rgb();
-    render::ColorRGB throughput = render::make_color_rgb(1.0f, 1.0f, 1.0f);
+    render::ThroughputRGB throughput = render::unit_throughput_rgb();
     Ray currentRay = ray;
     render::Length tMin = render::metres(0.0f);  // First ray starts from camera
     
@@ -233,7 +230,7 @@ inline render::RadianceRGB traceNEE(const Scene& scene, const SceneLights& scene
                             render::PdfW pdfLight = ls.pdf * lightSelectProb;
                             
                             // f [1/sr] * L [W/(sr·m²)] * cosθ / pdf = contrib [W/(sr·m²)]
-                            render::ColorRGB bsdf_weight = render::bsdf_sample_weight(f, NdotL, pdfLight);
+                            render::ThroughputRGB bsdf_weight = render::bsdf_sample_weight(f, NdotL, pdfLight);
                             render::RadianceRGB contrib = bsdf_weight * ls.emission;
                             result += throughput * contrib;
                         }
@@ -256,7 +253,7 @@ inline render::RadianceRGB traceNEE(const Scene& scene, const SceneLights& scene
         } else {
             float NdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
             if (NdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
-                render::ColorRGB weight = render::bsdf_sample_weight(bsdfSample.f, NdotL, bsdfSample.pdf);
+                render::ThroughputRGB weight = render::bsdf_sample_weight(bsdfSample.f, NdotL, bsdfSample.pdf);
                 throughput = throughput * weight;
             } else {
                 break;
@@ -265,14 +262,14 @@ inline render::RadianceRGB traceNEE(const Scene& scene, const SceneLights& scene
         
         // Russian Roulette
         if (depth >= 3) {
-            float maxThroughput = render::color_max_component(throughput);
+            float maxThroughput = render::throughput_max_component(throughput);
             float rrProb = std::min(maxThroughput, 0.95f);
             if (randf() > rrProb) break;
             throughput = throughput * (1.0f / rrProb);
         }
         
         // Check for NaN/Inf
-        if (!render::color_is_valid(throughput)) {
+        if (!render::throughput_is_valid(throughput)) {
             break;
         }
         
@@ -289,12 +286,12 @@ inline render::RadianceRGB traceNEE(const Scene& scene, const SceneLights& scene
 /**
  * Path tracer with Multiple Importance Sampling
  * Combines BSDF and light sampling with proper MIS weights
- * Returns RadianceRGB - caller applies camera sensitivity for final ColorRGB
+ * Returns RadianceRGB - caller applies camera sensitivity for final pixel value
  */
 inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& sceneLights, 
                      const Ray& ray, int maxDepth) {
     render::RadianceRGB result = render::zero_radiance_rgb();
-    render::ColorRGB throughput = render::make_color_rgb(1.0f, 1.0f, 1.0f);
+    render::ThroughputRGB throughput = render::unit_throughput_rgb();
     Ray currentRay = ray;
     render::PdfW lastBsdfPdf = render::zero_pdf_w();
     render::Length tMin = render::metres(0.0f);  // First ray starts from camera
@@ -407,8 +404,8 @@ inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& scene
                             render::Dimensionless misWeight = render::mis_power_heuristic(pdfLight_typed, pdfBsdf_typed);
                             
                             // f [1/sr] * L [W/(sr·m²)] * cosθ * misWeight / pdf
-                            // Use typed bsdf_sample_weight pattern: ColorRGB = f/pdf * cos
-                            render::ColorRGB bsdf_weight = render::bsdf_sample_weight(f, NdotL, pdfLight_typed);
+                            // Use typed bsdf_sample_weight pattern: ThroughputRGB = f/pdf * cos
+                            render::ThroughputRGB bsdf_weight = render::bsdf_sample_weight(f, NdotL, pdfLight_typed);
                             render::RadianceRGB contrib = (bsdf_weight * misWeight) * ls.emission;
                             result += throughput * contrib;
                         }
@@ -431,7 +428,7 @@ inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& scene
         } else {
             float NdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
             if (NdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
-                render::ColorRGB weight = render::bsdf_sample_weight(bsdfSample.f, NdotL, bsdfSample.pdf);
+                render::ThroughputRGB weight = render::bsdf_sample_weight(bsdfSample.f, NdotL, bsdfSample.pdf);
                 throughput = throughput * weight;
             } else {
                 break;
@@ -449,14 +446,14 @@ inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& scene
         
         // Russian Roulette
         if (depth >= 3) {
-            float maxThroughput = render::color_max_component(throughput);
+            float maxThroughput = render::throughput_max_component(throughput);
             float rrProb = std::min(maxThroughput, 0.95f);
             if (randf() > rrProb) break;
             throughput = throughput * (1.0f / rrProb);
         }
         
         // Check for NaN/Inf
-        if (!render::color_is_valid(throughput)) {
+        if (!render::throughput_is_valid(throughput)) {
             break;
         }
         

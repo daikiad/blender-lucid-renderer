@@ -6,7 +6,8 @@
  * - BSDFRGB [1/sr] for reflectance per solid angle
  * - PdfW [1/sr] for probability densities
  * - Direction for all direction vectors
- * - ColorRGB (dimensionless) for path weights
+ * - AttenuationRGB (dimensionless [0,1]) for material coefficients
+ * - ThroughputRGB (dimensionless [0,∞)) for path weights
  */
 
 #pragma once
@@ -19,7 +20,7 @@
 // ========== Material Parameters ==========
 
 struct MaterialParams {
-    render::ColorRGB albedo;         // Base color (dimensionless [0,1])
+    render::AttenuationRGB albedo;   // Base color (dimensionless [0,1])
     float metallic;
     float roughness;
     float transmission;
@@ -40,13 +41,13 @@ struct MaterialParams {
  * 
  * - f: BSDF value [1/sr]
  * - pdf: probability density [1/sr]
- * - weight: f × |cosθ| / pdf (dimensionless)
+ * - weight: f × |cosθ| / pdf (ThroughputRGB, range [0,∞))
  */
 struct BSDFSample {
     render::Direction wi;             // Sampled direction (normalized)
     render::BSDFRGB f;                // BSDF value [1/sr]
     render::PdfW pdf;                 // Probability density [1/sr]
-    render::ColorRGB weight;          // Direct throughput = f × |NdotL| / pdf
+    render::ThroughputRGB weight;     // Direct throughput = f × |NdotL| / pdf
     bool useWeight;                   // If true, use weight directly
     bool isDelta;                     // Is this a delta distribution?
     
@@ -56,7 +57,7 @@ struct BSDFSample {
         : wi(render::direction_from_unit_vector(render::Vec3f(0.0f, 0.0f, 1.0f)))
         , f(render::zero_bsdf_rgb())
         , pdf(0.0f * render::per_sr)
-        , weight(1.0f, 1.0f, 1.0f)
+        , weight(render::unit_throughput_rgb())
         , useWeight(false)
         , isDelta(false)
         , type(DIFFUSE) {}
@@ -99,9 +100,9 @@ inline render::BSDFRGB evalSpecular(const MaterialParams& mat, const render::Dir
     float lambdaV = ggx_safe_sqrt(a2 + (1.0f - a2) * NdotV * NdotV);
     float G2_over_denom = 0.5f / (NdotV * lambdaL + NdotL * lambdaV + GGX_EPSILON);
     
-    // Compute F0 using ColorRGB
-    render::ColorRGB f0 = mat.albedo * mat.metallic + render::make_color_rgb(0.04f, 0.04f, 0.04f) * (1.0f - mat.metallic);
-    render::ColorRGB F = fresnelSchlickColor(VdotH, f0);
+    // Compute F0 using AttenuationRGB
+    render::AttenuationRGB f0 = mat.albedo * mat.metallic + render::make_attenuation_rgb(0.04f, 0.04f, 0.04f) * (1.0f - mat.metallic);
+    render::AttenuationRGB F = fresnelSchlickColor(VdotH, f0);
     
     float spec = D * G2_over_denom;
     // Keep units through BSDF construction: [1/sr] * [dimensionless] -> [1/sr]
@@ -129,15 +130,16 @@ inline render::BSDFRGB evalBSDF(const MaterialParams& mat, const render::Directi
     auto h = render::make_direction_or_default(h_vec);
     float VdotH = std::max(render::dot(wo.vec(), h.vec()), 0.0f);
     
-    // Use ColorRGB for Fresnel calculation
-    render::ColorRGB f0(0.04f, 0.04f, 0.04f);
-    render::ColorRGB F = fresnelSchlickColor(VdotH, f0);
+    // Use AttenuationRGB for Fresnel calculation
+    render::AttenuationRGB f0 = render::make_attenuation_rgb(0.04f, 0.04f, 0.04f);
+    render::AttenuationRGB F = fresnelSchlickColor(VdotH, f0);
     
     render::BSDFRGB diffuse = evalDiffuse(mat, NdotL, NdotV);
-    render::ColorRGB kd((1.0f - F.r) * (1.0f - mat.metallic),
-                        (1.0f - F.g) * (1.0f - mat.metallic),
-                        (1.0f - F.b) * (1.0f - mat.metallic));
-    diffuse = diffuse * kd;  // BSDFRGB * ColorRGB -> BSDFRGB
+    render::AttenuationRGB kd = render::make_attenuation_rgb(
+        (1.0f - F.r.numerical_value_in(render::one)) * (1.0f - mat.metallic),
+        (1.0f - F.g.numerical_value_in(render::one)) * (1.0f - mat.metallic),
+        (1.0f - F.b.numerical_value_in(render::one)) * (1.0f - mat.metallic));
+    diffuse = diffuse * kd;  // BSDFRGB * AttenuationRGB -> BSDFRGB
     
     return diffuse + specular;  // BSDFRGB + BSDFRGB -> BSDFRGB
 }
@@ -188,7 +190,7 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const render::Direction&
             float w = G2 / (G1 + GGX_EPSILON);
             
             sample.useWeight = true;
-            sample.weight = render::make_color_rgb(w, w, w);
+            sample.weight = render::make_throughput_rgb(w, w, w);
             sample.pdf = 1.0f * render::per_sr;
             sample.isDelta = false;
             sample.type = BSDFSample::SPECULAR;
@@ -212,7 +214,7 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const render::Direction&
                 float w = G2 / (G1 + GGX_EPSILON);
                 
                 sample.useWeight = true;
-                sample.weight = render::make_color_rgb(w, w, w);
+                sample.weight = render::make_throughput_rgb(w, w, w);
                 sample.pdf = 1.0f * render::per_sr;
                 sample.isDelta = false;
                 sample.type = BSDFSample::SPECULAR;
@@ -227,7 +229,7 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const render::Direction&
                 float w = G2 / (G1 + GGX_EPSILON);
                 
                 sample.useWeight = true;
-                sample.weight = render::make_color_rgb(w, w, w);
+                sample.weight = render::make_throughput_rgb(w, w, w);
                 sample.pdf = 1.0f * render::per_sr;
                 sample.isDelta = false;
                 sample.type = BSDFSample::TRANSMISSION;

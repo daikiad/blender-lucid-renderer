@@ -127,7 +127,7 @@ protected:
 TEST_F(BSDFSampleWeightTest, BasicWeight) {
     // weight = (f / pdf) * cos_theta
     float cos_theta = 0.8f;
-    ColorRGB weight = bsdf_sample_weight(bsdf_gray, cos_theta, pdf_cosine);
+    ThroughputRGB weight = bsdf_sample_weight(bsdf_gray, cos_theta, pdf_cosine);
     
     // f = 0.5/sr, pdf = 0.5/sr, cos = 0.8
     // weight = (0.5/0.5) * 0.8 = 0.8
@@ -139,7 +139,7 @@ TEST_F(BSDFSampleWeightTest, BasicWeight) {
 
 TEST_F(BSDFSampleWeightTest, ZeroPdfReturnsZero) {
     PdfW zero_pdf = 0.0f * per_sr;
-    ColorRGB weight = bsdf_sample_weight(bsdf_white, 1.0f, zero_pdf);
+    ThroughputRGB weight = bsdf_sample_weight(bsdf_white, 1.0f, zero_pdf);
     
     auto [wr, wg, wb] = render::color_to_floats(weight);
     EXPECT_NEAR(wr, 0.0f, kEps);
@@ -150,7 +150,7 @@ TEST_F(BSDFSampleWeightTest, ZeroPdfReturnsZero) {
 TEST_F(BSDFSampleWeightTest, MinPdfThreshold) {
     // PDF below MIN_PDF should return zero
     PdfW tiny_pdf = MIN_PDF * 0.5f;
-    ColorRGB weight = bsdf_sample_weight(bsdf_white, 1.0f, tiny_pdf);
+    ThroughputRGB weight = bsdf_sample_weight(bsdf_white, 1.0f, tiny_pdf);
     
     auto [wr, wg, wb] = render::color_to_floats(weight);
     EXPECT_NEAR(wr, 0.0f, kEps);
@@ -212,9 +212,9 @@ TEST_F(PDFConversionTest, AreaToPdfW_ZeroHandling) {
 // ============================================================================
 
 TEST(RadianceConversionTest, RoundTrip) {
-    ColorRGB original = render::make_color_rgb(0.5f, 0.7f, 0.3f);
+    AttenuationRGB original = render::make_attenuation_rgb(0.5f, 0.7f, 0.3f);
     RadianceRGB radiance = to_radiance(original);
-    ColorRGB back = render::apply_camera_sensitivity(radiance, render::kDefaultCameraSensitivity);
+    AttenuationRGB back = render::apply_camera_sensitivity(radiance, render::kDefaultCameraSensitivity);
     
     auto [or_, og, ob] = render::color_to_floats(original);
     auto [br, bg, bb] = render::color_to_floats(back);
@@ -224,11 +224,11 @@ TEST(RadianceConversionTest, RoundTrip) {
 }
 
 TEST(RadianceConversionTest, Multiplication) {
-    ColorRGB throughput = render::make_color_rgb(0.5f, 0.5f, 0.5f);
-    RadianceRGB emission = to_radiance(render::make_color_rgb(2.0f, 2.0f, 2.0f));
+    ThroughputRGB throughput = render::make_throughput_rgb(0.5f, 0.5f, 0.5f);
+    RadianceRGB emission = to_radiance(render::make_attenuation_rgb(2.0f, 2.0f, 2.0f));
     
     RadianceRGB result = throughput * emission;
-    ColorRGB result_color = render::apply_camera_sensitivity(result, render::kDefaultCameraSensitivity);
+    AttenuationRGB result_color = render::apply_camera_sensitivity(result, render::kDefaultCameraSensitivity);
     
     auto [rr, rg, rb] = render::color_to_floats(result_color);
     EXPECT_NEAR(rr, 1.0f, kEps);

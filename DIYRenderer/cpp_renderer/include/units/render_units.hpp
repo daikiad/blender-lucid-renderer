@@ -10,20 +10,21 @@
  * 2. Vec3f is registered as a vector representation type for mp-units
  * 3. Position uses quantity_point for affine space semantics
  * 4. PDFs are mp-units quantities with custom units (1/sr, 1/m²)
- * 5. RGB is a separate 3-channel bundle (not a geometric vector)
+ * 5. RGB uses quantity_spec-based type safety (attenuation vs throughput)
  *
  * Key types:
- * - Displacement: quantity<isq::displacement[m], Vec3f>   (vector, P-P result)
- * - Velocity:     quantity<isq::velocity[m/s], Vec3f>     (vector)
- * - Position:     quantity_point<isq::displacement[m], ...> (affine point)
- * - Direction:    Normalized Vec3f (dimensionless, semantic wrapper)
- * - Normal:       Surface normal (dimensionless, semantic wrapper)
- * - PdfW:         quantity<per_sr, float>  [1/sr]
- * - PdfA:         quantity<per_m2, float>  [1/m²]
- * - ColorRGB:     RGB<float> for albedo/reflectance
- * - RadianceRGB:  RGB<Radiance> for spectral radiance
- * - BSDF:         quantity<per_sr, float> [1/sr] for BSDF evaluation
- * - BSDFRGB:      RGB<BSDF> for spectral BSDF
+ * - Displacement:    quantity<isq::displacement[m], Vec3f>   (vector, P-P result)
+ * - Velocity:        quantity<isq::velocity[m/s], Vec3f>     (vector)
+ * - Position:        quantity_point<isq::displacement[m], ...> (affine point)
+ * - Direction:       Normalized Vec3f (dimensionless, semantic wrapper)
+ * - Normal:          Surface normal (dimensionless, semantic wrapper)
+ * - PdfW:            quantity<per_sr, float>  [1/sr]
+ * - PdfA:            quantity<per_m2, float>  [1/m²]
+ * - AttenuationRGB:  RGB<Attenuation> [0,1] material coefficients (quantity_spec)
+ * - ThroughputRGB:   RGB<Throughput>  [0,∞) path weights (quantity_spec)
+ * - RadianceRGB:     RGB<Radiance> [W/(sr·m²)] spectral radiance
+ * - BSDF:            quantity<per_sr, float> [1/sr] for BSDF evaluation
+ * - BSDFRGB:         RGB<BSDF> [1/sr] spectral BSDF
  */
 
 #pragma once
@@ -847,19 +848,55 @@ inline constexpr auto MIN_PDF_A = 1e-6f * per_m2;
 // Note: kGeometryEpsilon is defined earlier in the file near kAreaEpsilon
 
 // ============================================================================
-// Part H: RGB Color Types (Channel-wise operations only)
+// Part H: RGB Types with mp-units quantity_spec Type Safety
 // ============================================================================
 // RGB is NOT a geometric vector - no dot/cross/magnitude allowed.
-// All RGB types use mp-units quantities for type safety:
-// - ColorRGB = RGB<Reflectance> (dimensionless [0,1] for albedo/reflectance)
-// - RadianceRGB = RGB<Radiance>  ([W/(sr·m²)])
-// - BSDFRGB = RGB<BSDF>         ([1/sr])
+// 
+// We use mp-units quantity_spec to define semantically distinct dimensionless types:
+// - attenuation: Material coefficients [0,1] (albedo, F0, transmittance, kd)
+// - throughput:  Path weights [0,∞) (β, importance sampling weights)
+//
+// This is the proper mp-units approach: different quantity_specs prevent mixing
+// even when both are dimensionless. No tag templates needed!
 
-// Reflectance: dimensionless quantity for albedo/reflectance values [0,1]
-using Reflectance = quantity<dimensionless[one], float>;
+// ============================================================================
+// Part H.0: Quantity Specifications for Dimensionless RGB Types
+// ============================================================================
+// Define quantity_specs as distinct "kinds" of dimensionless quantities.
+// This uses the same pattern as oriented_area (see Part B.2).
 
-// Helper to create Reflectance from float
-inline constexpr Reflectance reflectance(float v) { return v * one; }
+// Attenuation: dimensionless material coefficients [0,1]
+// Used for: albedo, Fresnel F0, transmittance, tint, kd, environment color
+QUANTITY_SPEC(attenuation, dimensionless);
+
+// Throughput: dimensionless path weights [0,∞)
+// Used for: throughput β, BSDFSample::weight, importance sampling weights
+QUANTITY_SPEC(throughput, dimensionless);
+
+// Scalar quantity types using the new quantity_specs
+using Attenuation = quantity<attenuation[one], float>;
+using Throughput = quantity<throughput[one], float>;
+
+// Helper to create Attenuation from float
+inline constexpr Attenuation make_attenuation(float v) { return v * attenuation[one]; }
+
+// Helper to create Throughput from float
+inline constexpr Throughput make_throughput(float v) { return v * throughput[one]; }
+
+// Legacy aliases for backward compatibility
+// DEPRECATED: Use Attenuation instead
+using DimensionlessCoeff = Attenuation;
+using Reflectance = Attenuation;
+
+// Legacy helpers for backward compatibility
+// DEPRECATED: Use make_attenuation() instead
+inline constexpr Attenuation dimensionless_coeff(float v) { return make_attenuation(v); }
+inline constexpr Attenuation reflectance(float v) { return make_attenuation(v); }
+
+// ============================================================================
+// Part H.1: RGB Template (simplified - no Tag parameter needed)
+// ============================================================================
+// The quantity type T itself provides type safety via quantity_spec.
 
 template <typename T>
 struct RGB {
@@ -868,7 +905,7 @@ struct RGB {
     constexpr RGB() : r{}, g{}, b{} {}
     constexpr RGB(T r_, T g_, T b_) : r(r_), g(g_), b(b_) {}
 
-    // Channel-wise arithmetic
+    // Channel-wise arithmetic (only between same types - enforced by T)
     constexpr RGB operator+(RGB other) const { return {r + other.r, g + other.g, b + other.b}; }
     constexpr RGB operator-(RGB other) const { return {r - other.r, g - other.g, b - other.b}; }
 
@@ -888,59 +925,78 @@ struct RGB {
     constexpr bool operator==(RGB other) const { return r == other.r && g == other.g && b == other.b; }
 
     // NOTE: dot(), cross(), length() are intentionally NOT defined.
-    // RGB is a color, not a geometric vector.
+    // RGB is a color/weight, not a geometric vector.
 };
 
-// Type aliases for RGB types (defined early, before operators)
-using ColorRGB = RGB<Reflectance>;  // For albedo, reflectance (dimensionless, [0,1])
-
 // ============================================================================
-// Part H.1: ColorRGB Operators and Helpers
+// Part H.2: Type Aliases for RGB Types
 // ============================================================================
 
-// Factory function to create ColorRGB from float values
-inline ColorRGB make_color_rgb(float r, float g, float b) {
-    return {reflectance(r), reflectance(g), reflectance(b)};
+// AttenuationRGB: Material coefficients with expected range [0,1]
+// Uses quantity<attenuation[one], float> - distinct from ThroughputRGB at compile time
+using AttenuationRGB = RGB<Attenuation>;
+
+// ThroughputRGB: Path weights with range [0,∞)
+// Uses quantity<throughput[one], float> - distinct from AttenuationRGB at compile time
+using ThroughputRGB = RGB<Throughput>;
+
+// Legacy alias for gradual migration (will be removed)
+// DEPRECATED: Use AttenuationRGB or ThroughputRGB instead
+using ColorRGB = AttenuationRGB;
+
+// ============================================================================
+// Part H.3: AttenuationRGB Operators and Helpers
+// ============================================================================
+// AttenuationRGB is for material coefficients with expected range [0,1].
+// Clamp operations are valid and encouraged for this type.
+
+// Factory function to create AttenuationRGB from float values
+inline AttenuationRGB make_attenuation_rgb(float r, float g, float b) {
+    return {make_attenuation(r), make_attenuation(g), make_attenuation(b)};
 }
 
-// Helper to create zero ColorRGB
-inline ColorRGB zero_color_rgb() {
-    return {reflectance(0.0f), reflectance(0.0f), reflectance(0.0f)};
+// Helper to create zero AttenuationRGB
+inline AttenuationRGB zero_attenuation_rgb() {
+    return {make_attenuation(0.0f), make_attenuation(0.0f), make_attenuation(0.0f)};
 }
 
-// Scalar multiplication for ColorRGB
-inline ColorRGB operator*(ColorRGB c, float s) {
+// Scalar multiplication for AttenuationRGB
+inline AttenuationRGB operator*(AttenuationRGB c, float s) {
     return {c.r * s, c.g * s, c.b * s};
 }
-inline ColorRGB operator*(float s, ColorRGB c) { return c * s; }
+inline AttenuationRGB operator*(float s, AttenuationRGB c) { return c * s; }
 
-// ColorRGB * Dimensionless -> ColorRGB (dimensionless factor)
+// AttenuationRGB * Dimensionless -> AttenuationRGB (dimensionless factor)
 // Physical: [dimensionless] × [dimensionless] -> [dimensionless]
 // Used for: MIS weights, area ratios, and other dimensionless multipliers
-inline ColorRGB operator*(ColorRGB c, Dimensionless factor) {
+inline AttenuationRGB operator*(AttenuationRGB c, Dimensionless factor) {
     return {c.r * factor, c.g * factor, c.b * factor};
 }
-inline ColorRGB operator*(Dimensionless factor, ColorRGB c) { return c * factor; }
+inline AttenuationRGB operator*(Dimensionless factor, AttenuationRGB c) { return c * factor; }
 
-// Scalar division for ColorRGB
-inline ColorRGB operator/(ColorRGB c, float s) {
+// Scalar division for AttenuationRGB
+inline AttenuationRGB operator/(AttenuationRGB c, float s) {
     return {c.r / s, c.g / s, c.b / s};
 }
 
-// Element-wise product (Hadamard) for ColorRGB
-// [dimensionless] * [dimensionless] = [dimensionless]
-// mp-units correctly simplifies one*one -> one, so direct multiplication works
-inline ColorRGB operator*(ColorRGB a, ColorRGB b) {
-    return {a.r * b.r, a.g * b.g, a.b * b.b};
+// Element-wise product (Hadamard) for AttenuationRGB
+// [attenuation] * [attenuation] = [attenuation^2] -> cast back to [attenuation]
+inline AttenuationRGB operator*(AttenuationRGB a, AttenuationRGB b) {
+    // mp-units: attenuation * attenuation may need explicit result type
+    return {
+        Attenuation{(a.r * b.r).numerical_value_in(one) * attenuation[one]},
+        Attenuation{(a.g * b.g).numerical_value_in(one) * attenuation[one]},
+        Attenuation{(a.b * b.b).numerical_value_in(one) * attenuation[one]}
+    };
 }
 
-// Luminance (ITU-R BT.709 coefficients) - returns Reflectance (unit-typed)
-inline Reflectance luminance(ColorRGB c) {
+// Luminance (ITU-R BT.709 coefficients) - returns Attenuation (unit-typed)
+inline Attenuation luminance(AttenuationRGB c) {
     return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
 }
 
 // Check if any component is NaN or Inf (extracts numerical values)
-inline bool color_is_valid(ColorRGB c) {
+inline bool attenuation_is_valid(AttenuationRGB c) {
     float r = c.r.numerical_value_in(one);
     float g = c.g.numerical_value_in(one);
     float b = c.b.numerical_value_in(one);
@@ -949,7 +1005,7 @@ inline bool color_is_valid(ColorRGB c) {
 }
 
 // Get max component value as float
-inline float color_max_component(ColorRGB c) {
+inline float attenuation_max_component(AttenuationRGB c) {
     return std::max({
         c.r.numerical_value_in(one),
         c.g.numerical_value_in(one),
@@ -958,7 +1014,7 @@ inline float color_max_component(ColorRGB c) {
 }
 
 // Extract RGB components as float tuple for output to external systems
-inline std::tuple<float, float, float> color_to_floats(ColorRGB c) {
+inline std::tuple<float, float, float> attenuation_to_floats(AttenuationRGB c) {
     return {
         c.r.numerical_value_in(one),
         c.g.numerical_value_in(one),
@@ -966,25 +1022,164 @@ inline std::tuple<float, float, float> color_to_floats(ColorRGB c) {
     };
 }
 
-// Clamp ColorRGB to [0, max] range
-inline ColorRGB color_clamp(ColorRGB c, float max_val = 1.0f) {
-    auto min_refl = reflectance(0.0f);
-    auto max_refl = reflectance(max_val);
+// Clamp AttenuationRGB to [0, max] range (valid for attenuation coefficients)
+inline AttenuationRGB attenuation_clamp(AttenuationRGB c, float max_val = 1.0f) {
+    auto min_coeff = make_attenuation(0.0f);
+    auto max_coeff = make_attenuation(max_val);
     return {
-        std::clamp(c.r, min_refl, max_refl),
-        std::clamp(c.g, min_refl, max_refl),
-        std::clamp(c.b, min_refl, max_refl)
+        std::clamp(c.r, min_coeff, max_coeff),
+        std::clamp(c.g, min_coeff, max_coeff),
+        std::clamp(c.b, min_coeff, max_coeff)
     };
 }
 
-// Clamp ColorRGB to minimum 0 (no upper bound)
-inline ColorRGB color_clamp_min_zero(ColorRGB c) {
-    auto zero = reflectance(0.0f);
+// Clamp AttenuationRGB to minimum 0 (no upper bound)
+inline AttenuationRGB attenuation_clamp_min_zero(AttenuationRGB c) {
+    auto zero = make_attenuation(0.0f);
     return {
         std::max(c.r, zero),
         std::max(c.g, zero),
         std::max(c.b, zero)
     };
+}
+
+// ============================================================================
+// Part H.4: ThroughputRGB Operators and Helpers
+// ============================================================================
+// ThroughputRGB is for path weights with range [0,∞).
+// Clamp operations should NOT be used on this type (would bias the estimator).
+
+// Factory function to create ThroughputRGB from float values
+inline ThroughputRGB make_throughput_rgb(float r, float g, float b) {
+    return {make_throughput(r), make_throughput(g), make_throughput(b)};
+}
+
+// Helper to create zero ThroughputRGB
+inline ThroughputRGB zero_throughput_rgb() {
+    return {make_throughput(0.0f), make_throughput(0.0f), make_throughput(0.0f)};
+}
+
+// Helper to create unit ThroughputRGB (initial throughput for path tracing)
+inline ThroughputRGB unit_throughput_rgb() {
+    return {make_throughput(1.0f), make_throughput(1.0f), make_throughput(1.0f)};
+}
+
+// Scalar multiplication for ThroughputRGB
+inline ThroughputRGB operator*(ThroughputRGB t, float s) {
+    return {t.r * s, t.g * s, t.b * s};
+}
+inline ThroughputRGB operator*(float s, ThroughputRGB t) { return t * s; }
+
+// ThroughputRGB * Dimensionless -> ThroughputRGB (e.g., Russian Roulette scaling)
+// Physical: [throughput] × [dimensionless] -> [throughput]
+inline ThroughputRGB operator*(ThroughputRGB t, Dimensionless factor) {
+    return {
+        Throughput{(t.r * factor).numerical_value_in(one) * throughput[one]},
+        Throughput{(t.g * factor).numerical_value_in(one) * throughput[one]},
+        Throughput{(t.b * factor).numerical_value_in(one) * throughput[one]}
+    };
+}
+inline ThroughputRGB operator*(Dimensionless factor, ThroughputRGB t) { return t * factor; }
+
+// Element-wise product of ThroughputRGB (accumulating path weights)
+// [throughput] * [throughput] -> cast back to [throughput]
+inline ThroughputRGB operator*(ThroughputRGB a, ThroughputRGB b) {
+    return {
+        Throughput{(a.r * b.r).numerical_value_in(one) * throughput[one]},
+        Throughput{(a.g * b.g).numerical_value_in(one) * throughput[one]},
+        Throughput{(a.b * b.b).numerical_value_in(one) * throughput[one]}
+    };
+}
+
+// Luminance for ThroughputRGB - returns Throughput (unit-typed)
+inline Throughput luminance(ThroughputRGB t) {
+    float lum = 0.2126f * t.r.numerical_value_in(one) +
+                0.7152f * t.g.numerical_value_in(one) +
+                0.0722f * t.b.numerical_value_in(one);
+    return make_throughput(lum);
+}
+
+// Check if any component is NaN or Inf
+inline bool throughput_is_valid(ThroughputRGB t) {
+    float r = t.r.numerical_value_in(one);
+    float g = t.g.numerical_value_in(one);
+    float b = t.b.numerical_value_in(one);
+    return !std::isnan(r) && !std::isnan(g) && !std::isnan(b) &&
+           !std::isinf(r) && !std::isinf(g) && !std::isinf(b);
+}
+
+// Get max component value as float (for Russian Roulette probability)
+inline float throughput_max_component(ThroughputRGB t) {
+    return std::max({
+        t.r.numerical_value_in(one),
+        t.g.numerical_value_in(one),
+        t.b.numerical_value_in(one)
+    });
+}
+
+// Extract RGB components as float tuple
+inline std::tuple<float, float, float> throughput_to_floats(ThroughputRGB t) {
+    return {
+        t.r.numerical_value_in(one),
+        t.g.numerical_value_in(one),
+        t.b.numerical_value_in(one)
+    };
+}
+
+// ============================================================================
+// Part H.5: Type Conversion Between AttenuationRGB and ThroughputRGB
+// ============================================================================
+// Explicit conversion functions to cross the type boundary.
+// These make the intent clear and prevent accidental mixing.
+
+// AttenuationRGB -> ThroughputRGB (e.g., initial throughput from albedo)
+// Use when starting a path with a material color as the initial weight
+// Requires explicit conversion since attenuation and throughput are different quantity_specs
+inline ThroughputRGB to_throughput(AttenuationRGB a) {
+    return {
+        make_throughput(a.r.numerical_value_in(one)),
+        make_throughput(a.g.numerical_value_in(one)),
+        make_throughput(a.b.numerical_value_in(one))
+    };
+}
+
+// ============================================================================
+// Part H.6: Legacy Compatibility Aliases (for gradual migration)
+// ============================================================================
+// These aliases allow existing code to compile during migration.
+// TODO: Remove after full migration to AttenuationRGB/ThroughputRGB
+
+inline AttenuationRGB make_color_rgb(float r, float g, float b) {
+    return make_attenuation_rgb(r, g, b);
+}
+
+inline AttenuationRGB zero_color_rgb() {
+    return zero_attenuation_rgb();
+}
+
+inline bool color_is_valid(AttenuationRGB c) {
+    return attenuation_is_valid(c);
+}
+
+inline float color_max_component(AttenuationRGB c) {
+    return attenuation_max_component(c);
+}
+
+inline std::tuple<float, float, float> color_to_floats(AttenuationRGB c) {
+    return attenuation_to_floats(c);
+}
+
+// Overload for ThroughputRGB to allow generic color extraction
+inline std::tuple<float, float, float> color_to_floats(ThroughputRGB t) {
+    return throughput_to_floats(t);
+}
+
+inline AttenuationRGB color_clamp(AttenuationRGB c, float max_val = 1.0f) {
+    return attenuation_clamp(c, max_val);
+}
+
+inline AttenuationRGB color_clamp_min_zero(AttenuationRGB c) {
+    return attenuation_clamp_min_zero(c);
 }
 
 // ============================================================================
@@ -1057,46 +1252,74 @@ inline bool is_emissive(RadianceRGB emission) {
 // Part I.2: Cross-Type RGB Operators (Unit-Typed Arithmetic)
 // ============================================================================
 // These operators enable unit-typed calculations without stripping units mid-computation.
-// Note: Same-type +, +=, - are handled by the RGB<T> template member functions.
+// Note: Same-type +, +=, - are handled by the RGB<T, Tag> template member functions.
 
-// --- BSDFRGB Operators ---
+// --- BSDFRGB Operators with AttenuationRGB ---
 
-// BSDFRGB * ColorRGB -> BSDFRGB (modulate by albedo/kd)
-// Physical: [1/sr] × [dimensionless] -> [1/sr]
-inline BSDFRGB operator*(BSDFRGB bsdf, ColorRGB color) {
-    // [1/sr] * [one] = [1/sr]
-    return {bsdf.r * color.r, bsdf.g * color.g, bsdf.b * color.b};
-}
-inline BSDFRGB operator*(ColorRGB color, BSDFRGB bsdf) { return bsdf * color; }
-
-// BSDFRGB / PdfW -> ColorRGB (importance sampling weight)
-// Physical: [1/sr] / [1/sr] -> [dimensionless]
-inline ColorRGB operator/(BSDFRGB f, PdfW pdf) {
-    if (pdf < MIN_PDF) return zero_color_rgb();
-    // [1/sr] / [1/sr] = [dimensionless] = Reflectance
-    return ColorRGB{f.r / pdf, f.g / pdf, f.b / pdf};
-}
-
-// Lambertian diffuse BSDF from albedo: albedo / π → [1/sr]
-// [dimensionless] * [1/sr] = [1/sr]
-inline BSDFRGB diffuse_bsdf_from_albedo(ColorRGB albedo) {
-    constexpr float INV_PI = 0.31830988618f;
+// BSDFRGB * AttenuationRGB -> BSDFRGB (modulate by albedo/kd)
+// Physical: [1/sr] × [attenuation] -> [1/sr]
+inline BSDFRGB operator*(BSDFRGB bsdf, AttenuationRGB atten) {
+    // [1/sr] * [attenuation] -> extract and reattach to [1/sr]
     return {
-        albedo.r * INV_PI * per_sr,
-        albedo.g * INV_PI * per_sr,
-        albedo.b * INV_PI * per_sr
+        bsdf.r * atten.r.numerical_value_in(one),
+        bsdf.g * atten.g.numerical_value_in(one),
+        bsdf.b * atten.b.numerical_value_in(one)
+    };
+}
+inline BSDFRGB operator*(AttenuationRGB atten, BSDFRGB bsdf) { return bsdf * atten; }
+
+// BSDFRGB / PdfW -> ThroughputRGB (importance sampling weight)
+// Physical: [1/sr] / [1/sr] -> [throughput]
+// Note: Returns ThroughputRGB because this is used to compute path weights
+inline ThroughputRGB operator/(BSDFRGB f, PdfW pdf) {
+    if (pdf < MIN_PDF) return zero_throughput_rgb();
+    // [1/sr] / [1/sr] = dimensionless -> throughput
+    return ThroughputRGB{
+        make_throughput((f.r / pdf).numerical_value_in(one)),
+        make_throughput((f.g / pdf).numerical_value_in(one)),
+        make_throughput((f.b / pdf).numerical_value_in(one))
     };
 }
 
-// --- RadianceRGB / ColorRGB / Dimensionless Cross-Type Operators ---
-
-// ColorRGB * RadianceRGB -> RadianceRGB (throughput × emission)
-// Physical: [dimensionless] × [W/(sr·m²)] -> [W/(sr·m²)]
-inline RadianceRGB operator*(ColorRGB throughput, RadianceRGB rad) {
-    // [one] * [W/(sr·m²)] = [W/(sr·m²)]
-    return {rad.r * throughput.r, rad.g * throughput.g, rad.b * throughput.b};
+// Lambertian diffuse BSDF from albedo: albedo / π → [1/sr]
+// [attenuation] * [1/sr] = [1/sr]
+inline BSDFRGB diffuse_bsdf_from_albedo(AttenuationRGB albedo) {
+    constexpr float INV_PI = 0.31830988618f;
+    return {
+        albedo.r.numerical_value_in(one) * INV_PI * per_sr,
+        albedo.g.numerical_value_in(one) * INV_PI * per_sr,
+        albedo.b.numerical_value_in(one) * INV_PI * per_sr
+    };
 }
-inline RadianceRGB operator*(RadianceRGB rad, ColorRGB throughput) { return throughput * rad; }
+
+// --- ThroughputRGB * RadianceRGB Operators ---
+
+// ThroughputRGB * RadianceRGB -> RadianceRGB (throughput × emission)
+// Physical: [throughput] × [W/(sr·m²)] -> [W/(sr·m²)]
+// This is the main operator used in path tracing: result += throughput * emission
+inline RadianceRGB operator*(ThroughputRGB throughput, RadianceRGB rad) {
+    // [throughput] * [W/(sr·m²)] -> extract throughput value and scale radiance
+    return {
+        rad.r * throughput.r.numerical_value_in(one),
+        rad.g * throughput.g.numerical_value_in(one),
+        rad.b * throughput.b.numerical_value_in(one)
+    };
+}
+inline RadianceRGB operator*(RadianceRGB rad, ThroughputRGB throughput) { return throughput * rad; }
+
+// --- AttenuationRGB * RadianceRGB Operators (for legacy compatibility) ---
+
+// AttenuationRGB * RadianceRGB -> RadianceRGB
+// Physical: [attenuation] × [W/(sr·m²)] -> [W/(sr·m²)]
+// Note: Kept for legacy code, prefer using ThroughputRGB for path weights
+inline RadianceRGB operator*(AttenuationRGB atten, RadianceRGB rad) {
+    return {
+        rad.r * atten.r.numerical_value_in(one),
+        rad.g * atten.g.numerical_value_in(one),
+        rad.b * atten.b.numerical_value_in(one)
+    };
+}
+inline RadianceRGB operator*(RadianceRGB rad, AttenuationRGB atten) { return atten * rad; }
 
 // RadianceRGB * Dimensionless -> RadianceRGB (attenuation factor)
 // Physical: [W/(sr·m²)] × [dimensionless] -> [W/(sr·m²)]
@@ -1139,11 +1362,15 @@ inline CameraSensitivity sensitivity_from_ev(float ev) {
     return std::pow(2.0f, ev) * camera_sensitivity_unit;
 }
 
-// RadianceRGB × CameraSensitivity → ColorRGB (physically correct conversion)
-// [W/(sr·m²)] × [sr·m²/W] = [dimensionless]
-inline ColorRGB apply_camera_sensitivity(RadianceRGB rad, CameraSensitivity sens) {
-    // [W/(sr·m²)] × [sr·m²/W] = [dimensionless] = Reflectance
-    return ColorRGB{rad.r * sens, rad.g * sens, rad.b * sens};
+// RadianceRGB × CameraSensitivity → AttenuationRGB (physically correct conversion)
+// [W/(sr·m²)] × [sr·m²/W] = [attenuation]
+inline AttenuationRGB apply_camera_sensitivity(RadianceRGB rad, CameraSensitivity sens) {
+    // [W/(sr·m²)] × [sr·m²/W] = dimensionless -> attenuation
+    return AttenuationRGB{
+        make_attenuation((rad.r * sens).numerical_value_in(one)),
+        make_attenuation((rad.g * sens).numerical_value_in(one)),
+        make_attenuation((rad.b * sens).numerical_value_in(one))
+    };
 }
 
 // ============================================================================
@@ -1152,10 +1379,10 @@ inline ColorRGB apply_camera_sensitivity(RadianceRGB rad, CameraSensitivity sens
 // These are boundary functions where numerical_value_in extraction is allowed.
 // They convert between typed color representations at the system edges.
 
-// ColorRGB -> RadianceRGB (create radiance from emission color values)
-// Boundary: Used when treating a ColorRGB as emission radiance values
-inline RadianceRGB to_radiance(ColorRGB color) {
-    auto [r, g, b] = color_to_floats(color);
+// AttenuationRGB -> RadianceRGB (create radiance from emission color values)
+// Boundary: Used when treating an AttenuationRGB as emission radiance values
+inline RadianceRGB to_radiance(AttenuationRGB color) {
+    auto [r, g, b] = attenuation_to_floats(color);
     return make_radiance_rgb(r, g, b);
 }
 
@@ -1192,11 +1419,11 @@ inline Dimensionless area_ratio(Area numerator, Area denominator) {
 
 // Compute throughput weight from BSDF sample: f × |cosθ| / pdf
 // This is the main importance sampling weight calculation.
-// Returns dimensionless ColorRGB that can be multiplied with throughput.
-inline ColorRGB bsdf_sample_weight(BSDFRGB f, float abs_cos_theta, PdfW pdf) {
-    if (pdf < MIN_PDF) return zero_color_rgb();
-    // Use typed division: BSDFRGB [1/sr] / PdfW [1/sr] -> ColorRGB [dimensionless]
-    ColorRGB base = f / pdf;
+// Returns ThroughputRGB [0,∞) that can be multiplied with path throughput.
+inline ThroughputRGB bsdf_sample_weight(BSDFRGB f, float abs_cos_theta, PdfW pdf) {
+    if (pdf < MIN_PDF) return zero_throughput_rgb();
+    // Use typed division: BSDFRGB [1/sr] / PdfW [1/sr] -> ThroughputRGB [dimensionless]
+    ThroughputRGB base = f / pdf;
     return base * abs_cos_theta;
 }
 
