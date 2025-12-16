@@ -199,16 +199,16 @@ inline void finalizeMeshBounds(Mesh &m) {
     render::Displacement extent = m.bmax - m.bmin;
     
     if (render::disp_x(extent) < eps) {
-        m.bmin = m.bmin - render::kAxisX * eps;
-        m.bmax = m.bmax + render::kAxisX * eps;
+        m.bmin = m.bmin - render::axis_x() * eps;
+        m.bmax = m.bmax + render::axis_x() * eps;
     }
     if (render::disp_y(extent) < eps) {
-        m.bmin = m.bmin - render::kAxisY * eps;
-        m.bmax = m.bmax + render::kAxisY * eps;
+        m.bmin = m.bmin - render::axis_y() * eps;
+        m.bmax = m.bmax + render::axis_y() * eps;
     }
     if (render::disp_z(extent) < eps) {
-        m.bmin = m.bmin - render::kAxisZ * eps;
-        m.bmax = m.bmax + render::kAxisZ * eps;
+        m.bmin = m.bmin - render::axis_z() * eps;
+        m.bmax = m.bmax + render::axis_z() * eps;
     }
     
     for(auto &t : m.triangles) {

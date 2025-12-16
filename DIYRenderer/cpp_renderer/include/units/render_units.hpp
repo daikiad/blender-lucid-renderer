@@ -34,11 +34,13 @@
 #include <mp-units/systems/isq.h>
 #include <mp-units/systems/si.h>
 #include <algorithm>  // std::min, std::max
+#include <cassert>
 #include <cmath>
 #include <concepts>
 #include <iterator>  // for std::indirectly_readable_traits
 #include <numbers>
 #include <optional>
+#include <tuple>
 #include <type_traits>
 #include <utility>    // std::pair
 
@@ -259,14 +261,18 @@ template <>
 inline constexpr bool mp_units::is_vector<render::Vec2f> = true;
 
 // 2. Provide wrapped_type_t via std::indirectly_readable_traits
-//    This is REQUIRED by mp-units Scalable concept for non-scalar types.
-//    wrapped_type_t<Vec3f> = float tells mp-units the underlying scalar type.
+//    WARNING: Specializing std::indirectly_readable_traits is generally discouraged,
+//    but mp-units v2.4 REQUIRES this for the Scalable concept on custom vector types.
+//    mp-units uses wrapped_type_t<T> (which resolves via this trait) to determine
+//    the underlying scalar type for quantity operations.
+//    See: mp-units/core/customization_points.h - wrapped_type_t implementation
+//    If mp-units provides an alternative customization point in the future, migrate to it.
 template <>
 struct std::indirectly_readable_traits<render::Vec3f> {
     using value_type = float;
 };
 
-// 2b. Same for Vec2f
+// 2b. Same for Vec2f (see comment above for Vec3f)
 template <>
 struct std::indirectly_readable_traits<render::Vec2f> {
     using value_type = float;
@@ -477,7 +483,10 @@ inline constexpr float kDirectionEpsilon = 1e-6f;
 // Threshold for considering determinant/area as zero [m²]
 // Used in Möller-Trumbore and other geometric intersection tests
 // Value: (1e-6)² = 1e-12, squared from kDirectionEpsilon for dimensional consistency
-inline const Area kAreaEpsilon = kDirectionEpsilon * kDirectionEpsilon * mp_units::square(si::metre);
+// Note: Using function to avoid static initialization order issues with mp-units types
+inline Area area_epsilon() {
+    return kDirectionEpsilon * kDirectionEpsilon * mp_units::square(si::metre);
+}
 
 // Geometric epsilon for dimensionless comparisons (Direction · Direction, etc.)
 inline constexpr float kGeometryEpsilon = 1e-6f;
@@ -515,9 +524,10 @@ inline constexpr float kGeometryEpsilon = 1e-6f;
 }
 
 // Axis direction constants (useful for padding, offsets, etc.)
-inline const Direction kAxisX = direction_from_unit_vector(Vec3f{1.0f, 0.0f, 0.0f});
-inline const Direction kAxisY = direction_from_unit_vector(Vec3f{0.0f, 1.0f, 0.0f});
-inline const Direction kAxisZ = direction_from_unit_vector(Vec3f{0.0f, 0.0f, 1.0f});
+// Note: Using functions instead of inline const to avoid static initialization order issues
+inline Direction axis_x() { return direction_from_unit_vector(Vec3f{1.0f, 0.0f, 0.0f}); }
+inline Direction axis_y() { return direction_from_unit_vector(Vec3f{0.0f, 1.0f, 0.0f}); }
+inline Direction axis_z() { return direction_from_unit_vector(Vec3f{0.0f, 0.0f, 1.0f}); }
 
 // Direction cross product implementation (deferred due to forward declaration)
 inline std::optional<Direction> Direction::cross(Direction other) const {
@@ -845,7 +855,7 @@ using PdfA = quantity<per_m2, float>;
 inline constexpr auto MIN_PDF = 1e-6f * per_sr;
 inline constexpr auto MIN_PDF_A = 1e-6f * per_m2;
 
-// Note: kGeometryEpsilon is defined earlier in the file near kAreaEpsilon
+// Note: kGeometryEpsilon is defined earlier in the file near area_epsilon()
 
 // ============================================================================
 // Part H: RGB3f - Plain Float RGB for Dimensionless Coefficients
@@ -1218,7 +1228,9 @@ inline constexpr auto MIN_LENGTH = 1e-6f * mp_units::si::metre;
 // Inverse square falloff factor: 1/d² -> Dimensionless
 // Common pattern for point/spot light attenuation
 // Returns: 1 m² / d² (dimensionless quantity)
+// Returns 0 if dist is too small (avoids division by zero)
 inline Dimensionless inverse_square_factor(Length dist) {
+    if (dist < MIN_LENGTH) return 0.0f * one;
     Area dist_sq = dist * dist;
     return 1.0f * mp_units::square(mp_units::si::metre) / dist_sq;
 }
@@ -1238,6 +1250,8 @@ inline Dimensionless area_ratio(Area numerator, Area denominator) {
 // This is the main importance sampling weight calculation.
 // Returns RGB3f [0,∞) that can be multiplied with path throughput.
 inline RGB3f bsdf_sample_weight(BSDFRGB f, float abs_cos_theta, PdfW pdf) {
+    // Debug: catch invalid PDFs early (indicates sampling bug)
+    assert((pdf >= 0.0f * per_sr) && "bsdf_sample_weight: negative PDF");
     if (pdf < MIN_PDF) return zero_rgb3f();
     // Use typed division: BSDFRGB [1/sr] / PdfW [1/sr] -> RGB3f [dimensionless]
     RGB3f base = f / pdf;
@@ -1316,5 +1330,18 @@ static_assert(std::is_same_v<decltype(std::declval<PdfA>() + std::declval<PdfA>(
 // (Uncomment to verify - this will cause a compilation error)
 // static_assert(std::is_same_v<decltype(std::declval<PdfW>() + std::declval<PdfA>()), void>,
 //               "This should fail to compile");
+
+// 8. Boundary function return types (unit conversion verification)
+static_assert(std::is_same_v<decltype(disp_dot_oriented(std::declval<Displacement>(), std::declval<OrientedArea>())), Volume>,
+              "disp_dot_oriented must return Volume [m³]");
+
+static_assert(std::is_same_v<decltype(dir_dot_oriented(std::declval<Direction>(), std::declval<OrientedArea>())), Area>,
+              "dir_dot_oriented must return Area [m²]");
+
+static_assert(std::is_same_v<decltype(inverse_square_factor(std::declval<Length>())), Dimensionless>,
+              "inverse_square_factor must return Dimensionless");
+
+static_assert(std::is_same_v<decltype(compute_pdf_w_from_area(std::declval<Length>(), std::declval<Area>(), 1.0f)), PdfW>,
+              "compute_pdf_w_from_area must return PdfW [1/sr]");
 
 }  // namespace render

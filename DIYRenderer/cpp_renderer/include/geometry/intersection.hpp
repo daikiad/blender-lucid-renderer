@@ -351,7 +351,7 @@ inline std::optional<render::Length> intersectTriangle(const Ray& ray,
     
     // Check if ray is parallel to triangle (det ≈ 0)
     // Use typed Area epsilon for comparison
-    if (det > -render::kAreaEpsilon && det < render::kAreaEpsilon) {
+    if (det > -render::area_epsilon() && det < render::area_epsilon()) {
         return std::nullopt;
     }
     
