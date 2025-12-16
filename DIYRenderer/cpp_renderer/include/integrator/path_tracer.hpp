@@ -467,3 +467,438 @@ inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& scene
     
     return result;  // Return RadianceRGB, let caller apply camera sensitivity
 }
+
+// ========== Diagnostic Path Tracer Variants ==========
+// These variants record path data for variance analysis
+
+#include "diagnostics/diagnostic_integrator.hpp"
+
+/**
+ * Simple path tracer with diagnostic recording
+ * Records each vertex for path analysis
+ */
+inline render::RadianceRGB traceSimpleWithDiagnostics(
+    const Scene& scene, 
+    const Ray& ray, 
+    int maxDepth,
+    render::diagnostics::PathDiagnosticRecorder& recorder) 
+{
+    using namespace render::diagnostics;
+    
+    render::RadianceRGB result = render::zero_radiance_rgb();
+    render::ThroughputRGB throughput = render::unit_throughput_rgb();
+    Ray currentRay = ray;
+    render::Length tMin = render::metres(0.0f);
+    
+    for (int depth = 0; depth < maxDepth; ++depth) {
+        Hit hit = intersectScene(scene, currentRay, tMin);
+        LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
+        
+        // Check if we hit a native light closer than any mesh
+        if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
+            recorder.record_light_hit(lightHit.lightIndex);
+            result += throughput * lightHit.emission;
+            break;
+        }
+        
+        if (!hit.hit) {
+            recorder.record_environment_hit();
+            result += throughput * render::to_radiance(getEnvironmentColor(currentRay, scene.environment));
+            break;
+        }
+        
+        MaterialParams mat = getMaterialParams(hit);
+        render::RadianceRGB emission = getEmission(hit);
+        
+        // Record vertex
+        BsdfType bsdfType = classify_bsdf(mat);
+        bool isDelta = is_delta_bsdf(mat);
+        
+        if (render::is_emissive(emission)) {
+            recorder.record_emissive_hit(hit.meshIdx, 0);
+        } else {
+            recorder.record_vertex(hit.meshIdx, 0, 
+                                   bsdfType, isDelta, false);
+        }
+        
+        // Add emission
+        result += throughput * emission;
+        
+        // Setup normals
+        render::Direction n = hit.normal.as_direction();
+        render::Direction wo = -currentRay.direction;
+        bool frontFace = render::dot(wo.vec(), n.vec()) > 0;
+        
+        render::Direction shadingNormal = n;
+        if (mat.transmission < 0.5f && !frontFace) {
+            shadingNormal = -n;
+        }
+        
+        // Sample BSDF
+        render::Direction sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
+        BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
+        
+        if (bsdfSample.pdf < render::MIN_PDF && !bsdfSample.useWeight) {
+            break;
+        }
+        
+        // Update throughput
+        if (bsdfSample.useWeight) {
+            throughput = throughput * bsdfSample.weight;
+        } else {
+            float absNdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
+            if (absNdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
+                render::ThroughputRGB weight = render::bsdf_sample_weight(bsdfSample.f, absNdotL, bsdfSample.pdf);
+                throughput = throughput * weight;
+            } else {
+                break;
+            }
+        }
+        
+        // Russian Roulette
+        if (depth >= 3) {
+            float maxThroughput = render::throughput_max_component(throughput);
+            float rrProb = std::min(maxThroughput, 0.95f);
+            if (randf() > rrProb) break;
+            throughput = throughput * (1.0f / rrProb);
+        }
+        
+        // Check for NaN/Inf
+        if (!render::throughput_is_valid(throughput)) {
+            break;
+        }
+        
+        // Setup next ray
+        currentRay = Ray(hit.point, bsdfSample.wi);
+        tMin = geometry::RAY_T_MIN_TYPED;
+    }
+    
+    return result;
+}
+
+/**
+ * NEE path tracer with diagnostic recording
+ */
+inline render::RadianceRGB traceNEEWithDiagnostics(
+    const Scene& scene, 
+    const SceneLights& sceneLights, 
+    const Ray& ray, 
+    int maxDepth,
+    render::diagnostics::PathDiagnosticRecorder& recorder) 
+{
+    using namespace render::diagnostics;
+    
+    render::RadianceRGB result = render::zero_radiance_rgb();
+    render::ThroughputRGB throughput = render::unit_throughput_rgb();
+    Ray currentRay = ray;
+    render::Length tMin = render::metres(0.0f);
+    
+    for (int depth = 0; depth < maxDepth; ++depth) {
+        Hit hit = intersectScene(scene, currentRay, tMin);
+        LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
+        
+        if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
+            recorder.record_light_hit(lightHit.lightIndex);
+            result += throughput * lightHit.emission;
+            break;
+        }
+        
+        if (!hit.hit) {
+            recorder.record_environment_hit();
+            result += throughput * render::to_radiance(getEnvironmentColor(currentRay, scene.environment));
+            break;
+        }
+        
+        MaterialParams mat = getMaterialParams(hit);
+        render::RadianceRGB emission = getEmission(hit);
+        
+        // Record vertex
+        BsdfType bsdfType = classify_bsdf(mat);
+        bool isDelta = is_delta_bsdf(mat);
+        bool hasEmission = render::is_emissive(emission);
+        
+        // Setup normals
+        render::Direction n = hit.normal.as_direction();
+        render::Direction wo = -currentRay.direction;
+        bool frontFace = render::dot(wo.vec(), n.vec()) > 0;
+        
+        render::Direction shadingNormal = n;
+        if (mat.transmission < 0.5f && !frontFace) {
+            shadingNormal = -n;
+        }
+        
+        // Add emission only on first hit
+        if (hasEmission && depth == 0) {
+            recorder.record_emissive_hit(hit.meshIdx, 0);
+            result += throughput * emission;
+        } else if (hasEmission) {
+            recorder.record_emissive_hit(hit.meshIdx, 0);
+        } else {
+            // Track whether NEE was used for this vertex
+            bool usedNEE = false;
+            
+            // Next Event Estimation
+            bool isTransmissive = mat.transmission > 0.5f;
+            if (sceneLights.hasLights() && !hasEmission && !isTransmissive) {
+                float lightSelectProb;
+                int lightIdx = sceneLights.selectLight(randf(), lightSelectProb);
+                
+                if (lightIdx >= 0 && lightSelectProb > 1e-6f) {
+                    const Light& light = sceneLights.lights[lightIdx];
+                    LightSample ls = sampleLight(light, hit.point, randf(), randf());
+                    
+                    if (ls.pdf > render::MIN_PDF) {
+                        float NdotL = render::dot(shadingNormal.vec(), ls.direction.vec());
+                        
+                        if (NdotL > 1e-6f) {
+                            Ray shadowRay(hit.point, ls.direction);
+                            Hit shadowHit = intersectScene(scene, shadowRay, geometry::RAY_T_MIN_TYPED, ls.distance);
+                            
+                            bool inShadow = shadowHit.hit;
+                            
+                            if (!inShadow) {
+                                render::BSDFRGB f = evalBSDF(mat, wo, ls.direction, shadingNormal);
+                                render::PdfW pdfLight = ls.pdf * lightSelectProb;
+                                
+                                render::ThroughputRGB bsdf_weight = render::bsdf_sample_weight(f, NdotL, pdfLight);
+                                render::RadianceRGB contrib = bsdf_weight * ls.emission;
+                                result += throughput * contrib;
+                                usedNEE = true;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            recorder.record_vertex(hit.meshIdx, 0, 
+                                   bsdfType, isDelta, usedNEE);
+        }
+        
+        // BSDF Sampling for next bounce
+        render::Direction sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
+        BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
+        
+        if (bsdfSample.pdf < render::MIN_PDF && !bsdfSample.useWeight) {
+            break;
+        }
+        
+        // Update throughput
+        if (bsdfSample.useWeight) {
+            throughput = throughput * bsdfSample.weight;
+        } else {
+            float NdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
+            if (NdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
+                render::ThroughputRGB weight = render::bsdf_sample_weight(bsdfSample.f, NdotL, bsdfSample.pdf);
+                throughput = throughput * weight;
+            } else {
+                break;
+            }
+        }
+        
+        // Russian Roulette
+        if (depth >= 3) {
+            float maxThroughput = render::throughput_max_component(throughput);
+            float rrProb = std::min(maxThroughput, 0.95f);
+            if (randf() > rrProb) break;
+            throughput = throughput * (1.0f / rrProb);
+        }
+        
+        // Check for NaN/Inf
+        if (!render::throughput_is_valid(throughput)) {
+            break;
+        }
+        
+        // Setup next ray
+        currentRay = Ray(hit.point, bsdfSample.wi);
+        tMin = geometry::RAY_T_MIN_TYPED;
+    }
+    
+    return result;
+}
+
+/**
+ * MIS path tracer with diagnostic recording
+ */
+inline render::RadianceRGB traceMISWithDiagnostics(
+    const Scene& scene, 
+    const SceneLights& sceneLights, 
+    const Ray& ray, 
+    int maxDepth,
+    render::diagnostics::PathDiagnosticRecorder& recorder) 
+{
+    using namespace render::diagnostics;
+    
+    render::RadianceRGB result = render::zero_radiance_rgb();
+    render::ThroughputRGB throughput = render::unit_throughput_rgb();
+    Ray currentRay = ray;
+    render::PdfW lastBsdfPdf = render::zero_pdf_w();
+    render::Length tMin = render::metres(0.0f);
+
+    auto findLightIndex = [&](int meshIdx, int triIdx) -> int {
+        for (size_t i = 0; i < sceneLights.lights.size(); ++i) {
+            const Light& l = sceneLights.lights[i];
+            if (l.meshIndex == meshIdx && l.triangleIndex == triIdx) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    };
+    
+    for (int depth = 0; depth < maxDepth; ++depth) {
+        Hit hit = intersectScene(scene, currentRay, tMin);
+        LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
+        
+        if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
+            recorder.record_light_hit(lightHit.lightIndex);
+            
+            render::PdfW lightPdf = render::zero_pdf_w();
+            if (sceneLights.hasLights() && lightHit.lightIndex >= 0) {
+                int sceneLightIdx = sceneLights.findNativeLightIndex(lightHit.lightIndex);
+                if (sceneLightIdx >= 0) {
+                    float selectProb = sceneLights.getPdfForLight(sceneLightIdx);
+                    if (selectProb > 0.0f) {
+                        const Light& l = sceneLights.lights[sceneLightIdx];
+                        lightPdf = pdfLightSample(l, currentRay.origin, lightHit.point, lightHit.normal) * selectProb;
+                    }
+                }
+            }
+            render::PdfW bsdfPdf = lastBsdfPdf;
+            render::Dimensionless misWeight = (bsdfPdf > render::MIN_PDF && lightPdf > render::MIN_PDF)
+                                ? render::mis_power_heuristic(bsdfPdf, lightPdf)
+                                : render::Dimensionless{1.0f};
+            result += throughput * lightHit.emission * misWeight;
+            break;
+        }
+        
+        if (!hit.hit) {
+            recorder.record_environment_hit();
+            result += throughput * render::to_radiance(getEnvironmentColor(currentRay, scene.environment));
+            break;
+        }
+        
+        MaterialParams mat = getMaterialParams(hit);
+        render::RadianceRGB emission = getEmission(hit);
+        
+        // Record vertex
+        BsdfType bsdfType = classify_bsdf(mat);
+        bool isDelta = is_delta_bsdf(mat);
+        bool hasEmission = render::is_emissive(emission);
+        
+        // Setup normals
+        render::Direction n = hit.normal.as_direction();
+        render::Direction wo = -currentRay.direction;
+        bool frontFace = render::dot(wo.vec(), n.vec()) > 0;
+        
+        render::Direction shadingNormal = n;
+        if (mat.transmission < 0.5f && !frontFace) {
+            shadingNormal = -n;
+        }
+        
+        // Add emission with MIS weight
+        if (hasEmission) {
+            recorder.record_emissive_hit(hit.meshIdx, 0);
+            
+            render::Dimensionless misWeight{1.0f};
+            if (sceneLights.hasLights() && lastBsdfPdf > render::MIN_PDF) {
+                int lightIdx = findLightIndex(hit.meshIdx, hit.triIdx);
+                if (lightIdx >= 0) {
+                    float selectProb = sceneLights.getPdfForLight(lightIdx);
+                    if (selectProb > 0.0f) {
+                        const Light& l = sceneLights.lights[lightIdx];
+                        render::PdfW lightPdf = pdfLightSample(l, currentRay.origin, hit.point, hit.normal) * selectProb;
+                        if (lightPdf > render::MIN_PDF) {
+                            misWeight = render::mis_power_heuristic(lastBsdfPdf, lightPdf);
+                        }
+                    }
+                }
+            }
+            result += throughput * emission * misWeight;
+        } else {
+            // Track whether NEE was used
+            bool usedNEE = false;
+            
+            // Next Event Estimation with MIS
+            bool isTransmissive = mat.transmission > 0.5f;
+            if (sceneLights.hasLights() && !hasEmission && !isTransmissive) {
+                float lightSelectProb;
+                int lightIdx = sceneLights.selectLight(randf(), lightSelectProb);
+                
+                if (lightIdx >= 0 && lightSelectProb > 1e-6f) {
+                    const Light& light = sceneLights.lights[lightIdx];
+                    LightSample ls = sampleLight(light, hit.point, randf(), randf());
+                    
+                    if (ls.pdf > render::MIN_PDF) {
+                        float NdotL = render::dot(shadingNormal.vec(), ls.direction.vec());
+                        
+                        if (NdotL > 1e-6f) {
+                            Ray shadowRay(hit.point, ls.direction);
+                            Hit shadowHit = intersectScene(scene, shadowRay, geometry::RAY_T_MIN_TYPED, ls.distance);
+                            
+                            bool inShadow = shadowHit.hit;
+                            
+                            if (!inShadow) {
+                                render::BSDFRGB f = evalBSDF(mat, wo, ls.direction, shadingNormal);
+                                
+                                render::PdfW pdfLight_typed = ls.pdf * lightSelectProb;
+                                render::PdfW pdfBsdf_typed = pdfBSDF(mat, wo, ls.direction, shadingNormal);
+                                
+                                render::Dimensionless misWeight = render::mis_power_heuristic(pdfLight_typed, pdfBsdf_typed);
+                                
+                                render::ThroughputRGB bsdf_weight = render::bsdf_sample_weight(f, NdotL, pdfLight_typed);
+                                render::RadianceRGB contrib = (bsdf_weight * misWeight) * ls.emission;
+                                result += throughput * contrib;
+                                usedNEE = true;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            recorder.record_vertex(hit.meshIdx, 0, 
+                                   bsdfType, isDelta, usedNEE);
+        }
+        
+        // BSDF Sampling for next bounce
+        render::Direction sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
+        BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
+        
+        if (bsdfSample.pdf < render::MIN_PDF && !bsdfSample.useWeight) {
+            break;
+        }
+        
+        // Update throughput
+        if (bsdfSample.useWeight) {
+            throughput = throughput * bsdfSample.weight;
+        } else {
+            float NdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
+            if (NdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
+                render::ThroughputRGB weight = render::bsdf_sample_weight(bsdfSample.f, NdotL, bsdfSample.pdf);
+                throughput = throughput * weight;
+            } else {
+                break;
+            }
+        }
+        
+        // Store PDF for next bounce MIS
+        lastBsdfPdf = bsdfSample.useWeight ? render::zero_pdf_w() : bsdfSample.pdf;
+        
+        // Russian Roulette
+        if (depth >= 3) {
+            float maxThroughput = render::throughput_max_component(throughput);
+            float rrProb = std::min(maxThroughput, 0.95f);
+            if (randf() > rrProb) break;
+            throughput = throughput * (1.0f / rrProb);
+        }
+        
+        // Check for NaN/Inf
+        if (!render::throughput_is_valid(throughput)) {
+            break;
+        }
+        
+        // Setup next ray
+        currentRay = Ray(hit.point, bsdfSample.wi);
+        tMin = geometry::RAY_T_MIN_TYPED;
+    }
+    
+    return result;
+}

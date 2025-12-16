@@ -63,7 +63,14 @@ import bpy
 
 # 各モジュールからクラスをインポート
 from .preferences import DIYRendererPreferences, DIYRendererSettings, _get_prefs
-from .panels import DIY_RENDER_PT_sampling, DIY_RENDER_PT_light_paths, DIY_RENDER_PT_debug, DIY_RENDER_PT_performance
+from .panels import (
+    DIY_RENDER_PT_sampling, 
+    DIY_RENDER_PT_light_paths, 
+    DIY_RENDER_PT_debug, 
+    DIY_RENDER_PT_performance,
+    DIY_RENDER_PT_diagnostics,
+    DIY_RENDER_PT_diagnostics_results,
+)
 from .engine import DIYRenderEngine
 
 
@@ -137,6 +144,8 @@ def register():
     bpy.utils.register_class(DIY_RENDER_PT_light_paths)  # ライトパスパネル
     bpy.utils.register_class(DIY_RENDER_PT_debug)     # デバッグパネル
     bpy.utils.register_class(DIY_RENDER_PT_performance)  # パフォーマンスパネル
+    bpy.utils.register_class(DIY_RENDER_PT_diagnostics)  # 診断パネル
+    bpy.utils.register_class(DIY_RENDER_PT_diagnostics_results)  # 診断結果パネル
     bpy.utils.register_class(DIYRenderEngine)         # レンダーエンジン本体
     
     # ===== シーンプロパティ追加 =====
@@ -247,6 +256,8 @@ def unregister():
     # ===== クラス解除 =====
     # 登録の逆順で解除（依存関係を壊さないため）
     bpy.utils.unregister_class(DIYRenderEngine)
+    bpy.utils.unregister_class(DIY_RENDER_PT_diagnostics_results)  # 子パネルは先に解除
+    bpy.utils.unregister_class(DIY_RENDER_PT_diagnostics)
     bpy.utils.unregister_class(DIY_RENDER_PT_performance)
     bpy.utils.unregister_class(DIY_RENDER_PT_debug)
     bpy.utils.unregister_class(DIY_RENDER_PT_light_paths)

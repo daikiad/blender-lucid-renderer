@@ -30,6 +30,9 @@
 
 #include "renderer.hpp"
 #include "pbr.hpp"
+#include "diagnostics/diagnostic_film.hpp"
+#include "diagnostics/diagnostic_export.hpp"
+#include "diagnostics/diagnostic_integrator.hpp"
 #include <nlohmann/json.hpp>
 
 #ifdef _OPENMP
@@ -187,6 +190,11 @@ public:
             return pixels;
         }
         
+        // 診断フィルムを初期化（診断が有効な場合）
+        if (diagnostics_enabled_) {
+            diagnostic_film_ = std::make_unique<render::diagnostics::DiagnosticFilm>(tile_w, tile_h, diagnostic_config_);
+        }
+        
         // アスペクト比を更新
         camera_.aspect = static_cast<float>(full_w) / static_cast<float>(full_h);
         
@@ -272,13 +280,38 @@ public:
                                 sample_ray = Ray(sample_ray.origin, jittered_dir);
                             }
                             
-                            // アルゴリズムに応じてパストレーシング
-                            if (algorithm_ == "simple") {
-                                radiance = radiance + traceSimple(scene_, sample_ray, max_depth);
-                            } else if (algorithm_ == "mis") {
-                                radiance = radiance + traceMIS(scene_, scene_lights, sample_ray, max_depth);
+                            // アルゴリズムに応じてパストレーシング（診断機能付きまたは通常）
+                            if (diagnostics_enabled_ && diagnostic_film_) {
+                                render::diagnostics::PathDiagnosticRecorder recorder;
+                                recorder.begin_path();
+                                
+                                render::RadianceRGB sample_radiance;
+                                if (algorithm_ == "simple") {
+                                    sample_radiance = traceSimpleWithDiagnostics(scene_, sample_ray, max_depth, recorder);
+                                } else if (algorithm_ == "mis") {
+                                    sample_radiance = traceMISWithDiagnostics(scene_, scene_lights, sample_ray, max_depth, recorder);
+                                } else {
+                                    sample_radiance = traceNEEWithDiagnostics(scene_, scene_lights, sample_ray, max_depth, recorder);
+                                }
+                                
+                                radiance = radiance + sample_radiance;
+                                
+                                // Record path to film
+                                render::RGB3f contrib(
+                                    sample_radiance.r.numerical_value_in(render::radiance_unit),
+                                    sample_radiance.g.numerical_value_in(render::radiance_unit),
+                                    sample_radiance.b.numerical_value_in(render::radiance_unit)
+                                );
+                                render::diagnostics::PathTrace trace = recorder.end_path(contrib);
+                                diagnostic_film_->record_path(px, py, trace);
                             } else {
-                                radiance = radiance + traceNEE(scene_, scene_lights, sample_ray, max_depth);
+                                if (algorithm_ == "simple") {
+                                    radiance = radiance + traceSimple(scene_, sample_ray, max_depth);
+                                } else if (algorithm_ == "mis") {
+                                    radiance = radiance + traceMIS(scene_, scene_lights, sample_ray, max_depth);
+                                } else {
+                                    radiance = radiance + traceNEE(scene_, scene_lights, sample_ray, max_depth);
+                                }
                             }
                         }
                         
@@ -402,6 +435,105 @@ public:
         return scene_loaded_ ? static_cast<int>(scene_.meshes.size()) : 0;
     }
 
+    // =========================================================================
+    // 診断機能 (Path Variance Analyzer)
+    // =========================================================================
+
+    /**
+     * 診断機能を有効化
+     * @param config 記録設定
+     */
+    void enable_diagnostics(const render::diagnostics::PathRecordingConfig& config) {
+        diagnostic_config_ = config;
+        diagnostics_enabled_ = true;
+        
+        // DiagnosticFilm は render_tile 内で初期化する
+        // (サイズが分かってから)
+        diagnostic_film_.reset();
+    }
+    
+    /**
+     * 診断機能を無効化
+     */
+    void disable_diagnostics() {
+        diagnostics_enabled_ = false;
+        diagnostic_film_.reset();
+    }
+    
+    /**
+     * 診断が有効かどうか
+     */
+    bool is_diagnostics_enabled() const {
+        return diagnostics_enabled_;
+    }
+    
+    /**
+     * 診断データをクリア
+     */
+    void clear_diagnostics() {
+        if (diagnostic_film_) {
+            diagnostic_film_->clear();
+        }
+    }
+    
+    /**
+     * 診断統計を取得
+     */
+    render::diagnostics::GlobalDiagnosticStats get_diagnostic_stats() const {
+        if (!diagnostic_film_) {
+            return render::diagnostics::GlobalDiagnosticStats{};
+        }
+        render::diagnostics::DiagnosticExporter exporter(*diagnostic_film_);
+        return exporter.get_global_stats();
+    }
+    
+    /**
+     * ピクセルごとの分散マップを取得
+     * @return width * height の float 配列（輝度分散）
+     */
+    std::vector<float> get_diagnostic_variance_map() const {
+        if (!diagnostic_film_) {
+            return {};
+        }
+        
+        size_t w = diagnostic_film_->width();
+        size_t h = diagnostic_film_->height();
+        std::vector<float> variance_map(w * h, 0.0f);
+        
+        for (size_t y = 0; y < h; ++y) {
+            for (size_t x = 0; x < w; ++x) {
+                const auto* pixel_data = diagnostic_film_->pixel_data(x, y);
+                if (pixel_data) {
+                    variance_map[y * w + x] = pixel_data->total_variance();
+                }
+            }
+        }
+        
+        return variance_map;
+    }
+    
+    /**
+     * 診断データをJSON形式でエクスポート
+     */
+    std::string export_diagnostic_json() const {
+        if (!diagnostic_film_) {
+            return "{}";
+        }
+        render::diagnostics::DiagnosticExporter exporter(*diagnostic_film_);
+        return exporter.export_metadata_json();
+    }
+    
+    /**
+     * 上位分散パスグループを取得
+     */
+    std::vector<render::diagnostics::ExportedGroupInfo> get_top_variance_groups(size_t count) const {
+        if (!diagnostic_film_) {
+            return {};
+        }
+        render::diagnostics::DiagnosticExporter exporter(*diagnostic_film_);
+        return exporter.get_top_variance_groups(count);
+    }
+
 private:
     std::atomic<bool> cancel_requested_;
     Scene scene_;
@@ -409,6 +541,11 @@ private:
     bool scene_loaded_;
     bool camera_set_;
     std::string algorithm_;
+    
+    // 診断機能用メンバー
+    bool diagnostics_enabled_ = false;
+    render::diagnostics::PathRecordingConfig diagnostic_config_;
+    std::unique_ptr<render::diagnostics::DiagnosticFilm> diagnostic_film_;
     
     // JSON からシーンを読み込むヘルパー（server.cpp と共通化）
     Scene loadSceneFromJsonString(const std::string& json_str) {

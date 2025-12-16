@@ -218,3 +218,26 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
         ],
         default='cpu'
     )
+    
+    # ==========================================================================
+    # Path Variance Analyzer (Diagnostics)
+    # ==========================================================================
+    
+    # 診断機能の有効化
+    enable_diagnostics: bpy.props.BoolProperty(
+        name="Enable Diagnostics",
+        description="Enable path variance analysis during rendering",
+        default=False
+    )
+    
+    # 診断プリセット（メモリ使用量と精度のトレードオフ）
+    diagnostics_preset: bpy.props.EnumProperty(
+        name="Preset",
+        description="Diagnostics detail level (affects memory usage)",
+        items=[
+            ('MINIMAL', "Minimal", "Low memory (~200MB at 1080p), basic analysis"),
+            ('STANDARD', "Standard", "Balanced memory (~800MB at 1080p), recommended"),
+            ('DETAILED', "Detailed", "High memory (~3.2GB at 1080p), full analysis"),
+        ],
+        default='STANDARD'
+    )

@@ -198,6 +198,137 @@ target_compile_options(test_path_tracer PRIVATE -O3 -march=native)
 gtest_discover_tests(test_path_tracer)
 
 # =============================================================================
+# Diagnostics Tests (Path Variance Analyzer)
+# =============================================================================
+
+# --- test_path_types: Path type and classification tests ---
+add_executable(test_path_types test/diagnostics/test_path_types.cpp)
+target_include_directories(test_path_types PRIVATE include)
+target_link_libraries(test_path_types PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
+target_compile_options(test_path_types PRIVATE -O2)
+gtest_discover_tests(test_path_types)
+
+# --- test_path_stats: Path statistics and grouping tests ---
+add_executable(test_path_stats test/diagnostics/test_path_stats.cpp)
+target_include_directories(test_path_stats PRIVATE include)
+target_link_libraries(test_path_stats PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
+target_compile_options(test_path_stats PRIVATE -O2)
+gtest_discover_tests(test_path_stats)
+
+# --- test_path_stats_config: Configuration and memory estimation tests ---
+add_executable(test_path_stats_config test/diagnostics/test_path_stats_config.cpp)
+target_include_directories(test_path_stats_config PRIVATE include)
+target_link_libraries(test_path_stats_config PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
+target_compile_options(test_path_stats_config PRIVATE -O2)
+gtest_discover_tests(test_path_stats_config)
+
+# --- test_pixel_path_data: Per-pixel Top-N group management tests ---
+add_executable(test_pixel_path_data test/diagnostics/test_pixel_path_data.cpp)
+target_include_directories(test_pixel_path_data PRIVATE include)
+target_link_libraries(test_pixel_path_data PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
+target_compile_options(test_pixel_path_data PRIVATE -O2)
+gtest_discover_tests(test_pixel_path_data)
+
+# --- test_diagnostic_film: Full image diagnostic data tests ---
+add_executable(test_diagnostic_film test/diagnostics/test_diagnostic_film.cpp)
+target_include_directories(test_diagnostic_film PRIVATE include)
+target_link_libraries(test_diagnostic_film PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(test_diagnostic_film PRIVATE OpenMP::OpenMP_CXX)
+endif()
+target_compile_options(test_diagnostic_film PRIVATE -O2)
+gtest_discover_tests(test_diagnostic_film)
+
+# --- test_diagnostic_integrator: Path tracer integration tests ---
+add_executable(test_diagnostic_integrator test/diagnostics/test_diagnostic_integrator.cpp)
+target_include_directories(test_diagnostic_integrator PRIVATE include)
+target_link_libraries(test_diagnostic_integrator PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
+target_compile_options(test_diagnostic_integrator PRIVATE -O2)
+gtest_discover_tests(test_diagnostic_integrator)
+
+# --- test_diagnostic_export: Python binding export tests ---
+add_executable(test_diagnostic_export test/diagnostics/test_diagnostic_export.cpp)
+target_include_directories(test_diagnostic_export PRIVATE include)
+target_link_libraries(test_diagnostic_export PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
+target_compile_options(test_diagnostic_export PRIVATE -O2)
+gtest_discover_tests(test_diagnostic_export)
+
+# --- test_diagnostic_pybind: Pybind11 binding interface tests ---
+add_executable(test_diagnostic_pybind test/diagnostics/test_diagnostic_pybind.cpp)
+target_include_directories(test_diagnostic_pybind PRIVATE include)
+target_link_libraries(test_diagnostic_pybind PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
+target_compile_options(test_diagnostic_pybind PRIVATE -O2)
+gtest_discover_tests(test_diagnostic_pybind)
+
+# --- test_pyrenderer_diagnostics: PyRenderer diagnostic integration tests ---
+add_executable(test_pyrenderer_diagnostics 
+    test/test_pyrenderer_diagnostics.cpp
+    src/node_evaluator.cpp
+)
+target_include_directories(test_pyrenderer_diagnostics PRIVATE include)
+target_link_libraries(test_pyrenderer_diagnostics PRIVATE 
+    mp-units::mp-units 
+    nlohmann_json::nlohmann_json
+    GTest::gtest 
+    GTest::gtest_main
+)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(test_pyrenderer_diagnostics PRIVATE OpenMP::OpenMP_CXX)
+endif()
+target_compile_options(test_pyrenderer_diagnostics PRIVATE -O2)
+gtest_discover_tests(test_pyrenderer_diagnostics)
+
+# --- test_path_tracer_diagnostics: Path tracer + diagnostics integration ---
+add_executable(test_path_tracer_diagnostics 
+    test/diagnostics/test_path_tracer_diagnostics.cpp
+    src/node_evaluator.cpp
+)
+target_include_directories(test_path_tracer_diagnostics PRIVATE include test)
+target_link_libraries(test_path_tracer_diagnostics PRIVATE 
+    mp-units::mp-units 
+    nlohmann_json::nlohmann_json
+    GTest::gtest 
+    GTest::gtest_main
+)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(test_path_tracer_diagnostics PRIVATE OpenMP::OpenMP_CXX)
+endif()
+target_compile_options(test_path_tracer_diagnostics PRIVATE -O2)
+gtest_discover_tests(test_path_tracer_diagnostics)
+
+# =============================================================================
 # Coverage Target
 # =============================================================================
 if(COVERAGE)

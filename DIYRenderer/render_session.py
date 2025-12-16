@@ -94,6 +94,9 @@ class RenderSession:
         # ジョブ管理
         self._job_id: int = 0
         
+        # 診断機能
+        self._diagnostics_enabled: bool = False
+        
         # 初期化
         if PYBIND_AVAILABLE:
             self._renderer = diyrenderer.Renderer()
@@ -287,6 +290,127 @@ class RenderSession:
             return
         
         self._renderer.set_algorithm(algorithm)
+    
+    # =========================================================================
+    # 診断機能
+    # =========================================================================
+    
+    def enable_diagnostics(self, preset: str = "standard") -> bool:
+        """診断機能を有効化
+        
+        Args:
+            preset: 'minimal', 'standard', または 'detailed'
+            
+        Returns:
+            bool: 成功した場合 True
+        """
+        if not self.is_available:
+            return False
+        
+        try:
+            if preset == "minimal":
+                config = diyrenderer.PathRecordingConfig.minimal()
+            elif preset == "detailed":
+                config = diyrenderer.PathRecordingConfig.detailed()
+            else:
+                config = diyrenderer.PathRecordingConfig.standard()
+            
+            self._renderer.enable_diagnostics(config)
+            self._diagnostics_enabled = True
+            print(f"[RenderSession #{self._session_id}] Diagnostics enabled ({preset})")
+            return True
+        except Exception as e:
+            print(f"[RenderSession #{self._session_id}] Failed to enable diagnostics: {e}")
+            return False
+    
+    def disable_diagnostics(self) -> None:
+        """診断機能を無効化"""
+        if not self.is_available:
+            return
+        
+        try:
+            self._renderer.disable_diagnostics()
+            self._diagnostics_enabled = False
+            print(f"[RenderSession #{self._session_id}] Diagnostics disabled")
+        except Exception as e:
+            print(f"[RenderSession #{self._session_id}] Failed to disable diagnostics: {e}")
+    
+    def is_diagnostics_enabled(self) -> bool:
+        """診断機能が有効か"""
+        return self._diagnostics_enabled and self.is_available
+    
+    def get_diagnostic_stats(self):
+        """診断統計を取得
+        
+        Returns:
+            GlobalDiagnosticStats or None
+        """
+        if not self.is_available or not self._diagnostics_enabled:
+            return None
+        
+        try:
+            return self._renderer.get_diagnostic_stats()
+        except Exception as e:
+            print(f"[RenderSession #{self._session_id}] Failed to get diagnostic stats: {e}")
+            return None
+    
+    def get_diagnostic_variance_map(self):
+        """分散マップを取得
+        
+        Returns:
+            numpy array or None
+        """
+        if not self.is_available or not self._diagnostics_enabled:
+            return None
+        
+        try:
+            return self._renderer.get_diagnostic_variance_map()
+        except Exception as e:
+            print(f"[RenderSession #{self._session_id}] Failed to get variance map: {e}")
+            return None
+    
+    def get_top_variance_groups(self, count: int = 10):
+        """上位分散グループを取得
+        
+        Args:
+            count: 取得するグループ数
+            
+        Returns:
+            List of ExportedGroupInfo or None
+        """
+        if not self.is_available or not self._diagnostics_enabled:
+            return None
+        
+        try:
+            return self._renderer.get_top_variance_groups(count)
+        except Exception as e:
+            print(f"[RenderSession #{self._session_id}] Failed to get top variance groups: {e}")
+            return None
+    
+    def export_diagnostic_json(self) -> str:
+        """診断データをJSON形式でエクスポート
+        
+        Returns:
+            JSON文字列
+        """
+        if not self.is_available or not self._diagnostics_enabled:
+            return "{}"
+        
+        try:
+            return self._renderer.export_diagnostic_json()
+        except Exception as e:
+            print(f"[RenderSession #{self._session_id}] Failed to export diagnostic JSON: {e}")
+            return "{}"
+    
+    def clear_diagnostics(self) -> None:
+        """診断データをクリア"""
+        if not self.is_available:
+            return
+        
+        try:
+            self._renderer.clear_diagnostics()
+        except Exception as e:
+            print(f"[RenderSession #{self._session_id}] Failed to clear diagnostics: {e}")
     
     # =========================================================================
     # レンダリング（同期）

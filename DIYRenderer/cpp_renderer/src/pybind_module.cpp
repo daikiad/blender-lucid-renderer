@@ -24,8 +24,12 @@
 #include <pybind11/numpy.h>
 
 #include "pybind_renderer.hpp"
+#include "diagnostics/diagnostic_export.hpp"
+#include "diagnostics/diagnostic_integrator.hpp"
+#include "diagnostics/path_stats_config.hpp"
 
 namespace py = pybind11;
+using namespace render::diagnostics;
 
 PYBIND11_MODULE(diyrenderer, m) {
     m.doc() = "DIY Path Tracer - Python bindings for the C++ renderer";
@@ -136,6 +140,41 @@ PYBIND11_MODULE(diyrenderer, m) {
              "Get number of meshes in the loaded scene")
         
         // =====================================================================
+        // 診断機能 (Path Variance Analyzer)
+        // =====================================================================
+        .def("enable_diagnostics", &PyRenderer::enable_diagnostics,
+             py::arg("config"),
+             "Enable diagnostic path recording with given configuration")
+        
+        .def("disable_diagnostics", &PyRenderer::disable_diagnostics,
+             "Disable diagnostic recording")
+        
+        .def("is_diagnostics_enabled", &PyRenderer::is_diagnostics_enabled,
+             "Check if diagnostics recording is enabled")
+        
+        .def("clear_diagnostics", &PyRenderer::clear_diagnostics,
+             "Clear all recorded diagnostic data")
+        
+        .def("get_diagnostic_stats", &PyRenderer::get_diagnostic_stats,
+             "Get global diagnostic statistics")
+        
+        .def("get_diagnostic_variance_map", [](const PyRenderer& self) {
+            auto variance_map = self.get_diagnostic_variance_map();
+            // Return as NumPy array
+            return py::array_t<float>(
+                {(size_t)variance_map.size()},
+                variance_map.data()
+            );
+        }, "Get per-pixel variance as 1D NumPy array (width * height)")
+        
+        .def("export_diagnostic_json", &PyRenderer::export_diagnostic_json,
+             "Export diagnostic data as JSON string")
+        
+        .def("get_top_variance_groups", &PyRenderer::get_top_variance_groups,
+             py::arg("count") = 10,
+             "Get top N path groups by variance")
+        
+        // =====================================================================
         // Python 的な機能
         // =====================================================================
         .def("__repr__", [](const PyRenderer& r) {
@@ -153,4 +192,186 @@ PYBIND11_MODULE(diyrenderer, m) {
     #else
     m.attr("openmp_enabled") = false;
     #endif
+    
+    // =========================================================================
+    // Path Variance Analyzer (Diagnostic System)
+    // =========================================================================
+    
+    // PathRecordingConfig - Configuration for path statistics recording
+    py::class_<PathRecordingConfig>(m, "PathRecordingConfig")
+        .def(py::init<>(), "Create default recording configuration")
+        .def_readwrite("subsample_factor", &PathRecordingConfig::subsample_factor,
+            "Spatial subsampling (1 = every pixel, 2 = every 2nd pixel)")
+        .def_readwrite("max_groups_per_pixel", &PathRecordingConfig::max_groups_per_pixel,
+            "Maximum unique path types per pixel")
+        .def_readwrite("max_outliers_per_pixel", &PathRecordingConfig::max_outliers_per_pixel,
+            "Maximum outlier samples to store per pixel")
+        .def_readwrite("max_depth", &PathRecordingConfig::max_depth,
+            "Maximum path depth to track")
+        .def_readwrite("variance_threshold", &PathRecordingConfig::variance_threshold,
+            "Minimum variance to track a group")
+        .def_readwrite("outlier_threshold", &PathRecordingConfig::outlier_threshold,
+            "Threshold for outlier detection (stddev multiplier)")
+        .def_static("minimal", &PathRecordingConfig::minimal,
+            "Create minimal preset (~200MB at 1080p)")
+        .def_static("standard", &PathRecordingConfig::standard,
+            "Create standard preset (~800MB at 1080p)")
+        .def_static("detailed", &PathRecordingConfig::detailed,
+            "Create detailed preset (~3.2GB at 1080p)")
+        .def("estimate_memory_bytes", &PathRecordingConfig::estimate_memory_bytes,
+            py::arg("width"), py::arg("height"),
+            "Estimate memory usage in bytes for given resolution")
+        .def("__repr__", [](const PathRecordingConfig& c) {
+            return "<PathRecordingConfig subsample=" + std::to_string(c.subsample_factor) +
+                   " max_groups=" + std::to_string(c.max_groups_per_pixel) + ">";
+        });
+    
+    // ExportedGroupInfo - Path group statistics for Python
+    py::class_<ExportedGroupInfo>(m, "ExportedGroupInfo")
+        .def(py::init<>())
+        .def_readonly("pixel_x", &ExportedGroupInfo::pixel_x)
+        .def_readonly("pixel_y", &ExportedGroupInfo::pixel_y)
+        .def_readonly("signature", &ExportedGroupInfo::signature)
+        .def_readonly("sample_count", &ExportedGroupInfo::sample_count)
+        .def_readonly("mean_luminance", &ExportedGroupInfo::mean_luminance)
+        .def_readonly("variance_luminance", &ExportedGroupInfo::variance_luminance)
+        .def_readonly("mean_rgb", &ExportedGroupInfo::mean_rgb)
+        .def_readonly("variance_rgb", &ExportedGroupInfo::variance_rgb)
+        .def_readonly("depth", &ExportedGroupInfo::depth)
+        .def_readonly("coarse_type", &ExportedGroupInfo::coarse_type)
+        .def_readonly("coarse_type_name", &ExportedGroupInfo::coarse_type_name)
+        .def("__repr__", [](const ExportedGroupInfo& g) {
+            return "<ExportedGroupInfo signature='" + g.signature + 
+                   "' mean=" + std::to_string(g.mean_luminance) +
+                   " var=" + std::to_string(g.variance_luminance) + ">";
+        });
+    
+    // DiagnosticSuggestion - Improvement suggestions
+    py::class_<DiagnosticSuggestion>(m, "DiagnosticSuggestion")
+        .def(py::init<>())
+        .def_readonly("category", &DiagnosticSuggestion::category)
+        .def_readonly("severity", &DiagnosticSuggestion::severity)
+        .def_readonly("message", &DiagnosticSuggestion::message)
+        .def_readonly("action", &DiagnosticSuggestion::action)
+        .def("__repr__", [](const DiagnosticSuggestion& s) {
+            return "<DiagnosticSuggestion [" + s.severity + "] " + s.message + ">";
+        });
+    
+    // GlobalDiagnosticStats - Summary statistics
+    py::class_<GlobalDiagnosticStats>(m, "GlobalDiagnosticStats")
+        .def(py::init<>())
+        .def_readonly("total_samples", &GlobalDiagnosticStats::total_samples)
+        .def_readonly("active_pixels", &GlobalDiagnosticStats::active_pixels)
+        .def_readonly("total_groups", &GlobalDiagnosticStats::total_groups)
+        .def_readonly("total_overflow", &GlobalDiagnosticStats::total_overflow)
+        .def_readonly("total_variance", &GlobalDiagnosticStats::total_variance);
+    
+    // ExportedCoarseStats - Coarse type statistics
+    py::class_<ExportedCoarseStats>(m, "ExportedCoarseStats")
+        .def(py::init<>())
+        .def_readonly("type_id", &ExportedCoarseStats::type_id)
+        .def_readonly("name", &ExportedCoarseStats::name)
+        .def_readonly("sample_count", &ExportedCoarseStats::sample_count)
+        .def_readonly("mean_luminance", &ExportedCoarseStats::mean_luminance)
+        .def_readonly("variance_luminance", &ExportedCoarseStats::variance_luminance);
+    
+    // DiagnosticFilm - Film for path statistics recording
+    py::class_<DiagnosticFilm>(m, "DiagnosticFilm")
+        .def(py::init<size_t, size_t, const PathRecordingConfig&>(),
+            py::arg("width"), py::arg("height"), py::arg("config"),
+            "Create diagnostic film for given dimensions")
+        .def("width", &DiagnosticFilm::width)
+        .def("height", &DiagnosticFilm::height)
+        .def("sampled_width", &DiagnosticFilm::sampled_width)
+        .def("sampled_height", &DiagnosticFilm::sampled_height)
+        .def("total_paths_recorded", &DiagnosticFilm::total_paths_recorded)
+        .def("global_stats", &DiagnosticFilm::global_stats)
+        .def("metadata_json", &DiagnosticFilm::metadata_json)
+        .def("record_path", &DiagnosticFilm::record_path,
+            py::arg("x"), py::arg("y"), py::arg("trace"),
+            "Record a path trace at pixel (x, y)")
+        .def("clear", &DiagnosticFilm::clear);
+    
+    // DiagnosticPathTracer - Path tracer with diagnostic support
+    py::class_<DiagnosticPathTracer>(m, "DiagnosticPathTracer")
+        .def(py::init<size_t, size_t, const PathRecordingConfig&>(),
+            py::arg("width"), py::arg("height"), py::arg("config"),
+            "Create diagnostic path tracer")
+        .def("is_enabled", &DiagnosticPathTracer::is_enabled)
+        .def("set_enabled", &DiagnosticPathTracer::set_enabled)
+        .def("film", static_cast<DiagnosticFilm& (DiagnosticPathTracer::*)()>(&DiagnosticPathTracer::film),
+            py::return_value_policy::reference_internal);
+    
+    // DiagnosticExporter - Export interface for analysis results
+    py::class_<DiagnosticExporter>(m, "DiagnosticExporter")
+        .def(py::init<const DiagnosticFilm&>(),
+            py::arg("film"),
+            "Create exporter for a diagnostic film")
+        .def("get_global_stats", &DiagnosticExporter::get_global_stats)
+        .def("get_top_variance_groups", &DiagnosticExporter::get_top_variance_groups,
+            py::arg("n") = 10,
+            "Get top N groups by variance")
+        .def("get_top_mean_groups", &DiagnosticExporter::get_top_mean_groups,
+            py::arg("n") = 10,
+            "Get top N groups by mean contribution")
+        .def("get_coarse_stats", &DiagnosticExporter::get_coarse_stats)
+        .def("generate_suggestions", &DiagnosticExporter::generate_suggestions)
+        .def("export_metadata_json", &DiagnosticExporter::export_metadata_json)
+        .def("export_binary", [](const DiagnosticExporter& exp) {
+            auto data = exp.export_binary();
+            return py::bytes(reinterpret_cast<const char*>(data.data()), data.size());
+        }, "Export diagnostic data as binary blob");
+    
+    // BsdfType enum for Python
+    py::enum_<BsdfType>(m, "BsdfType")
+        .value("Diffuse", BsdfType::Diffuse)
+        .value("Glossy", BsdfType::Glossy)
+        .value("Mirror", BsdfType::Mirror)
+        .value("Glass", BsdfType::Glass)
+        .value("Emission", BsdfType::Emission)
+        .value("Environment", BsdfType::Environment)
+        .export_values();
+    
+    // PathTrace - Raw path data structure
+    py::class_<PathTrace>(m, "PathTrace")
+        .def(py::init<>(), "Create empty path trace")
+        .def_readonly("depth", &PathTrace::depth)
+        .def("get_contribution", [](const PathTrace& p) {
+            return std::array<float, 3>{p.contribution.r, p.contribution.g, p.contribution.b};
+        });
+    
+    // PathDiagnosticRecorder - Per-thread helper for recording paths
+    py::class_<PathDiagnosticRecorder>(m, "PathDiagnosticRecorder")
+        .def(py::init<>(), "Create a new path recorder")
+        .def("begin_path", &PathDiagnosticRecorder::begin_path,
+            "Start recording a new path")
+        .def("record_vertex", &PathDiagnosticRecorder::record_vertex,
+            py::arg("object_id"), py::arg("material_id"),
+            py::arg("bsdf_type"), py::arg("is_delta"), py::arg("is_light_sampled"),
+            "Record a surface interaction vertex")
+        .def("record_environment_hit", &PathDiagnosticRecorder::record_environment_hit,
+            "Record environment map hit")
+        .def("record_light_hit", &PathDiagnosticRecorder::record_light_hit,
+            py::arg("light_id"),
+            "Record light hit")
+        .def("record_emissive_hit", &PathDiagnosticRecorder::record_emissive_hit,
+            py::arg("object_id"), py::arg("material_id"),
+            "Record emissive mesh hit")
+        .def("current_depth", &PathDiagnosticRecorder::current_depth,
+            "Get current path depth")
+        .def("end_path", 
+            [](PathDiagnosticRecorder& recorder, float r, float g, float b) -> PathTrace {
+                return recorder.end_path(render::RGB3f{r, g, b});
+            }, 
+            py::arg("r"), py::arg("g"), py::arg("b"),
+            "Finalize path and return PathTrace")
+        .def("end_path_lum", 
+            [](PathDiagnosticRecorder& recorder, float luminance) -> PathTrace {
+                return recorder.end_path(render::RGB3f{luminance, luminance, luminance});
+            }, 
+            py::arg("luminance"),
+            "Finalize path with grayscale luminance");
+    
+    // Add record_path method to DiagnosticFilm that accepts PathTrace
+    // (The class binding is above, we just need the method)
 }

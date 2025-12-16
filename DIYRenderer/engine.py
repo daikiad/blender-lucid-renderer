@@ -358,6 +358,18 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         # アルゴリズムを設定
         session.set_algorithm(diy.sampling_algorithm)
         
+        # 診断機能を設定（ユーザー設定に基づく）
+        if diy.enable_diagnostics:
+            preset_map = {
+                'MINIMAL': 'minimal',
+                'STANDARD': 'standard',
+                'DETAILED': 'detailed',
+            }
+            preset = preset_map.get(diy.diagnostics_preset, 'standard')
+            session.enable_diagnostics(preset)
+        else:
+            session.disable_diagnostics()
+        
         # プログレッシブレンダリング
         sample_iterations = self._compute_sample_iterations(target_samples)
         print(f"[DIYRenderEngine] Sample iterations: {sample_iterations}")
@@ -410,8 +422,91 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         if accumulated_pixels:
             self._update_render_result(accumulated_pixels, width, height, total_samples)
         
+        # 診断データをグローバルに格納（UIパネルからアクセス可能にする）
+        if diy.enable_diagnostics and session.is_diagnostics_enabled():
+            self._store_diagnostic_results(session, width, height)
+        
         elapsed = time.time() - render_start_time
         print(f"[DIYRenderEngine] F12 render complete: {total_samples} samples in {elapsed:.2f}s")
+    
+    def _store_diagnostic_results(self, session: RenderSession, width: int, height: int) -> None:
+        """診断結果をグローバルマネージャーに格納
+        
+        Args:
+            session: レンダリングセッション
+            width: レンダリング幅
+            height: レンダリング高さ
+        """
+        from .diagnostics import (
+            GlobalStats, PathGroupInfo, DiagnosticReport, DiagnosticSuggestion,
+            set_global_diagnostics
+        )
+        
+        try:
+            # 統計を取得
+            cpp_stats = session.get_diagnostic_stats()
+            if cpp_stats is None:
+                print("[DIYRenderEngine] No diagnostic stats available")
+                return
+            
+            # グローバル統計を変換
+            global_stats = GlobalStats(
+                total_samples=cpp_stats.total_samples,
+                active_pixels=cpp_stats.active_pixels,
+                total_groups=cpp_stats.total_groups,
+                total_overflow=cpp_stats.total_overflow,
+                total_variance=cpp_stats.total_variance,
+            )
+            
+            # 上位分散グループを取得
+            cpp_groups = session.get_top_variance_groups(10)
+            top_variance_groups = []
+            if cpp_groups:
+                for g in cpp_groups:
+                    top_variance_groups.append(PathGroupInfo(
+                        pixel_x=g.pixel_x,
+                        pixel_y=g.pixel_y,
+                        signature=g.signature,
+                        sample_count=g.sample_count,
+                        mean_luminance=g.mean_luminance,
+                        variance_luminance=g.variance_luminance,
+                        depth=g.depth,
+                        coarse_type_name=g.coarse_type_name,
+                    ))
+            
+            # JSON メタデータを取得
+            metadata_json = session.export_diagnostic_json()
+            
+            # レポートを作成
+            report = DiagnosticReport(
+                width=width,
+                height=height,
+                global_stats=global_stats,
+                top_variance_groups=top_variance_groups,
+                top_mean_groups=[],  # 簡略化
+                suggestions=[],       # TODO: C++ suggestions を接続
+                metadata_json=metadata_json,
+            )
+            
+            # 簡易マネージャーラッパーを作成してグローバルに格納
+            class _DiagnosticResultsWrapper:
+                def __init__(self, report):
+                    self._report = report
+                    self.is_available = True
+                
+                def get_report(self, top_n=10):
+                    return self._report
+            
+            wrapper = _DiagnosticResultsWrapper(report)
+            set_global_diagnostics(wrapper)
+            
+            print(f"[DIYRenderEngine] Diagnostic results stored: {global_stats.total_samples} samples, "
+                  f"{global_stats.active_pixels} active pixels, {len(top_variance_groups)} variance groups")
+            
+        except Exception as e:
+            print(f"[DIYRenderEngine] Failed to store diagnostic results: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _compute_sample_iterations(self, target_samples: int) -> list:
         """サンプル分割を計算"""

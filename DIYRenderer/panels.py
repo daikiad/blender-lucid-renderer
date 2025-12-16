@@ -192,3 +192,138 @@ class DIY_RENDER_PT_performance(bpy.types.Panel):
         
         col = layout.column(heading="Backend")
         col.prop(diy, "backend", text="Device")
+
+
+class DIY_RENDER_PT_diagnostics(bpy.types.Panel):
+    """
+    診断パネル - Path Variance Analyzer
+    
+    レンダリングのノイズ原因を分析するための診断ツールです。
+    パスの種類ごとに分散を計算し、どの種類のパスが最もノイズに
+    寄与しているかを特定します。
+    
+    設定項目:
+    - Enable Diagnostics: 診断データの収集を有効化
+    - Preset: メモリ使用量プリセット（Minimal/Standard/Detailed）
+    
+    使い方:
+    1. 診断を有効化してレンダリング
+    2. レンダリング完了後、レポートを確認
+    3. 提案されたアクションを実行
+    """
+    bl_label = "Path Diagnostics"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "render"
+    bl_options = {'DEFAULT_CLOSED'}
+    COMPAT_ENGINES = {'DIY_RENDER_MINIMAL'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.engine in cls.COMPAT_ENGINES
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        
+        diy = context.scene.diy_renderer
+        
+        # 診断の有効化
+        layout.prop(diy, "enable_diagnostics")
+        
+        if diy.enable_diagnostics:
+            # プリセット選択
+            layout.prop(diy, "diagnostics_preset")
+            
+            # メモリ使用量の推定表示
+            scene = context.scene
+            render = scene.render
+            width = int(render.resolution_x * render.resolution_percentage / 100)
+            height = int(render.resolution_y * render.resolution_percentage / 100)
+            
+            # メモリ推定（概算）
+            memory_factors = {
+                'MINIMAL': 0.1,    # ~200MB at 1080p
+                'STANDARD': 0.4,   # ~800MB at 1080p
+                'DETAILED': 1.6,   # ~3.2GB at 1080p
+            }
+            factor = memory_factors.get(diy.diagnostics_preset, 0.4)
+            est_memory_mb = (width * height * factor / (1920 * 1080)) * 800
+            
+            # 情報表示
+            box = layout.box()
+            box.label(text=f"Resolution: {width}×{height}")
+            box.label(text=f"Est. Memory: ~{est_memory_mb:.0f} MB")
+
+
+class DIY_RENDER_PT_diagnostics_results(bpy.types.Panel):
+    """
+    診断結果の表示パネル
+    
+    レンダリング後の診断結果を表示します。
+    """
+    bl_label = "Analysis Results"
+    bl_parent_id = "DIY_RENDER_PT_diagnostics"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "render"
+    bl_options = {'DEFAULT_CLOSED'}
+    COMPAT_ENGINES = {'DIY_RENDER_MINIMAL'}
+
+    @classmethod
+    def poll(cls, context):
+        diy = context.scene.diy_renderer
+        return (context.engine in cls.COMPAT_ENGINES and 
+                diy.enable_diagnostics)
+
+    def draw(self, context):
+        layout = self.layout
+        
+        # グローバル診断マネージャーから結果を取得（利用可能な場合）
+        try:
+            from .diagnostics import get_global_diagnostics
+            manager = get_global_diagnostics()
+            
+            if manager is None or not manager.is_available:
+                layout.label(text="No diagnostics data available")
+                layout.label(text="Run a render to collect data")
+                return
+            
+            report = manager.get_report(top_n=5)
+            if report is None:
+                layout.label(text="No report available")
+                return
+            
+            # グローバル統計
+            stats = report.global_stats
+            box = layout.box()
+            box.label(text="Global Statistics", icon='INFO')
+            col = box.column(align=True)
+            col.label(text=f"Total Samples: {stats.total_samples:,}")
+            col.label(text=f"Active Pixels: {stats.active_pixels:,}")
+            col.label(text=f"Path Groups: {stats.total_groups:,}")
+            
+            # 分散の高いパスグループ
+            if report.top_variance_groups:
+                box = layout.box()
+                box.label(text="High Variance Paths", icon='ERROR')
+                for group in report.top_variance_groups[:3]:
+                    row = box.row()
+                    row.label(text=f"{group.coarse_type_name}")
+                    row.label(text=f"CV={group.coefficient_of_variation:.2f}")
+            
+            # 改善提案
+            if report.suggestions:
+                box = layout.box()
+                box.label(text="Suggestions", icon='LIGHT')
+                for suggestion in report.suggestions[:3]:
+                    col = box.column(align=True)
+                    col.label(text=suggestion.message)
+                    col.label(text=f"  → {suggestion.action}")
+                    
+        except ImportError:
+            layout.label(text="Diagnostics module not available")
+        except Exception as e:
+            layout.label(text=f"Error: {str(e)[:30]}")
+
