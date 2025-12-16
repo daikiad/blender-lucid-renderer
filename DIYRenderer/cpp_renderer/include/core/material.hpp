@@ -38,7 +38,7 @@ struct SocketValue {
     Type type;
     float f;                      // For FLOAT - single scalar value
     render::Vec3f v3;             // For VEC3 - 3D vector (normals, positions)
-    render::ColorRGB v4;          // For VEC4 - RGB component (colors with alpha)
+    render::RGB3f v4;             // For VEC4 - RGB component (colors with alpha)
     float v4_w;                   // For VEC4 - Alpha component
     std::string s;                // For STRING - texture paths, etc.
     bool b;                       // For BOOL - boolean switches
@@ -62,7 +62,7 @@ struct SocketValue {
     static SocketValue makeVec4(float x, float y, float z, float w) { 
         SocketValue sv; 
         sv.type = VEC4; 
-        sv.v4 = render::ColorRGB(x, y, z); 
+        sv.v4 = render::RGB3f(x, y, z); 
         sv.v4_w = w; 
         return sv; 
     }
@@ -133,7 +133,7 @@ struct NodeTree {
  * Material - Physical material properties for PBR rendering (unit-safe)
  */
 struct Material {
-    render::ColorRGB albedo;      // Base color (dimensionless [0,1])
+    render::RGB3f albedo;         // Base color (dimensionless [0,1])
     float metallic;               // Metallic factor (dimensionless, 0-1)
     float roughness;              // Surface roughness (dimensionless, 0-1)
     render::RadianceRGB emission; // Emission [W/(sr·m²)]
@@ -152,12 +152,12 @@ struct Material {
         , ior(1.45f)
         , useNodes(false) {}
     
-    Material(const render::ColorRGB& a, float m, float r) 
+    Material(const render::RGB3f& a, float m, float r) 
         : albedo(a), metallic(m), roughness(r)
         , emission()
         , transmission(0.0f), ior(1.45f), useNodes(false) {}
     
-    Material(const render::ColorRGB& a, float m, float r, const render::RadianceRGB& e) 
+    Material(const render::RGB3f& a, float m, float r, const render::RadianceRGB& e) 
         : albedo(a), metallic(m), roughness(r)
         , emission(e)
         , transmission(0.0f), ior(1.45f), useNodes(false) {}

@@ -175,9 +175,9 @@ TEST_F(PathTracerTest, DirectLightHit) {
     Ray ray(render::make_position(0.0f, 0.5f, 0.0f),
             render::direction_from_unit_vector(render::Vec3f(0.0f, 0.0f, -1.0f)));
     
-    render::ColorRGB resultSimple = render::apply_camera_sensitivity(traceSimple(scene, ray, kMaxDepth), render::kDefaultCameraSensitivity);
-    render::ColorRGB resultNEE = render::apply_camera_sensitivity(traceNEE(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
-    render::ColorRGB resultMIS = render::apply_camera_sensitivity(traceMIS(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+    render::RGB3f resultSimple = render::apply_camera_sensitivity(traceSimple(scene, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+    render::RGB3f resultNEE = render::apply_camera_sensitivity(traceNEE(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+    render::RGB3f resultMIS = render::apply_camera_sensitivity(traceMIS(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
     
     // All should see the emissive surface
     EXPECT_GT(resultSimple.r, 1.0f);
@@ -298,12 +298,12 @@ TEST_F(PathTracerTest, OutputIsNonNegative) {
         Ray ray(render::make_position(0.0f, 1.0f, 0.5f),
                 render::direction_from_unit_vector(dir));
         
-        render::ColorRGB result = render::apply_camera_sensitivity(traceMIS(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+        render::RGB3f result = render::apply_camera_sensitivity(traceMIS(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
         
         // Use is_valid for NaN/Inf checking
         EXPECT_TRUE(render::is_valid(result)) << "Invalid color at sample " << i;
         
-        auto [rr, rg, rb] = render::color_to_floats(result);
+        auto [rr, rg, rb] = render::to_floats(result);
         EXPECT_GE(rr, 0.0f) << "Negative red at sample " << i;
         EXPECT_GE(rg, 0.0f) << "Negative green at sample " << i;
         EXPECT_GE(rb, 0.0f) << "Negative blue at sample " << i;
@@ -351,7 +351,7 @@ TEST_F(PathTracerTest, WhiteFurnaceTest) {
             render::direction_from_unit_vector(render::Vec3f(0.0f, 0.0f, -1.0f)));
     
     // Need many samples for white furnace convergence
-    render::ColorRGB result = renderPixelMIS(scene, lights, ray, 256);
+    render::RGB3f result = renderPixelMIS(scene, lights, ray, 256);
     
     // Should converge to albedo (0.5) within tolerance
     // Note: with only 8 bounces, won't fully converge, so use loose tolerance

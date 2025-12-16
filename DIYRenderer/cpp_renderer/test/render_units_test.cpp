@@ -357,45 +357,45 @@ TEST(PDFTest, TypesDistinct) {
 // RGB Tests
 // ============================================================================
 
-TEST(ColorRGBTest, Basic) {
-    ColorRGB c1 = make_color_rgb(0.5f, 0.6f, 0.7f);
-    ColorRGB c2 = make_color_rgb(0.1f, 0.2f, 0.3f);
+TEST(RGB3fTest, Basic) {
+    RGB3f c1 = RGB3f(0.5f, 0.6f, 0.7f);
+    RGB3f c2 = RGB3f(0.1f, 0.2f, 0.3f);
 
     auto sum = c1 + c2;
-    auto [sr, sg, sb] = color_to_floats(sum);
+    auto [sr, sg, sb] = to_floats(sum);
     EXPECT_NEAR(sr, 0.6f, kEps);
     EXPECT_NEAR(sg, 0.8f, kEps);
     EXPECT_NEAR(sb, 1.0f, kEps);
 }
 
-TEST(ColorRGBTest, Scalar) {
-    ColorRGB c = make_color_rgb(0.2f, 0.4f, 0.6f);
+TEST(RGB3fTest, Scalar) {
+    RGB3f c = RGB3f(0.2f, 0.4f, 0.6f);
 
     auto c2 = c * 2.0f;
-    auto [c2r, c2g, c2b] = color_to_floats(c2);
+    auto [c2r, c2g, c2b] = to_floats(c2);
     EXPECT_NEAR(c2r, 0.4f, kEps);
 
     auto c3 = 3.0f * c;
-    auto [c3r, c3g, c3b] = color_to_floats(c3);
+    auto [c3r, c3g, c3b] = to_floats(c3);
     EXPECT_NEAR(c3r, 0.6f, kEps);
 }
 
-TEST(ColorRGBTest, Hadamard) {
-    ColorRGB a = make_color_rgb(0.5f, 0.5f, 0.5f);
-    ColorRGB b = make_color_rgb(0.2f, 0.4f, 0.6f);
+TEST(RGB3fTest, Hadamard) {
+    RGB3f a = RGB3f(0.5f, 0.5f, 0.5f);
+    RGB3f b = RGB3f(0.2f, 0.4f, 0.6f);
 
-    auto c = a * b;  // operator* is element-wise for ColorRGB
-    auto [cr, cg, cb] = color_to_floats(c);
+    auto c = a * b;  // operator* is element-wise for RGB3f
+    auto [cr, cg, cb] = to_floats(c);
     EXPECT_NEAR(cr, 0.1f, kEps);
     EXPECT_NEAR(cg, 0.2f, kEps);
     EXPECT_NEAR(cb, 0.3f, kEps);
 }
 
-TEST(ColorRGBTest, Luminance) {
-    ColorRGB white = make_color_rgb(1.0f, 1.0f, 1.0f);
+TEST(RGB3fTest, Luminance) {
+    RGB3f white = RGB3f(1.0f, 1.0f, 1.0f);
     EXPECT_NEAR(luminance(white), 1.0f, kEps);
 
-    ColorRGB red = make_color_rgb(1.0f, 0.0f, 0.0f);
+    RGB3f red = RGB3f(1.0f, 0.0f, 0.0f);
     EXPECT_NEAR(luminance(red), 0.2126f, kEps);
 }
 
@@ -414,9 +414,9 @@ TEST(RadianceRGBTest, Hadamard) {
     using namespace mp_units::si::unit_symbols;
 
     RadianceRGB rad{100.0f * W / (sr * m2), 200.0f * W / (sr * m2), 300.0f * W / (sr * m2)};
-    ColorRGB albedo = make_color_rgb(0.5f, 0.5f, 0.5f);
+    RGB3f albedo = RGB3f(0.5f, 0.5f, 0.5f);
 
-    auto result = albedo * rad;  // operator* for ColorRGB * RadianceRGB
+    auto result = albedo * rad;  // operator* for RGB3f * RadianceRGB
     EXPECT_NEAR(result.r.numerical_value_in(W / (sr * m2)), 50.0f, kEps);
     EXPECT_NEAR(result.g.numerical_value_in(W / (sr * m2)), 100.0f, kEps);
     EXPECT_NEAR(result.b.numerical_value_in(W / (sr * m2)), 150.0f, kEps);

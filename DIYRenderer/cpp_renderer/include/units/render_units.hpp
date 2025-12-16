@@ -959,7 +959,6 @@ inline std::tuple<float, float, float> to_floats(RGB3f c) {
 
 using AttenuationRGB = RGB3f;
 using ThroughputRGB = RGB3f;
-using ColorRGB = RGB3f;
 
 // ============================================================================
 // Part H.3: Factory and Helper Functions (Compatibility)
@@ -967,6 +966,8 @@ using ColorRGB = RGB3f;
 
 inline constexpr RGB3f make_attenuation_rgb(float r, float g, float b) { return {r, g, b}; }
 inline constexpr RGB3f make_throughput_rgb(float r, float g, float b) { return {r, g, b}; }
+
+// Legacy alias for make_color_rgb (widely used in codebase)
 inline constexpr RGB3f make_color_rgb(float r, float g, float b) { return {r, g, b}; }
 
 inline constexpr RGB3f zero_attenuation_rgb() { return zero_rgb3f(); }
@@ -976,6 +977,8 @@ inline constexpr RGB3f unit_throughput_rgb() { return unit_rgb3f(); }
 inline bool throughput_is_valid(RGB3f c) { return is_valid(c); }
 inline float throughput_max_component(RGB3f c) { return max_component(c); }
 inline RGB3f attenuation_clamp_min_zero(RGB3f c) { return clamp_min_zero(c); }
+
+// Legacy alias for color_to_floats (widely used in codebase)
 inline std::tuple<float, float, float> color_to_floats(RGB3f c) { return to_floats(c); }
 
 // ============================================================================

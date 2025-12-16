@@ -31,8 +31,8 @@
 #include <cmath>
 
 // Forward declarations for node evaluators
-render::ColorRGB getAlbedoFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
-render::ColorRGB getEmissionFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
+render::RGB3f getAlbedoFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
+render::RGB3f getEmissionFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
 float getTransmissionFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
 float getIORFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
 float getMetallicFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
