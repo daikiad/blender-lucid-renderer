@@ -393,10 +393,10 @@ TEST(ColorRGBTest, Hadamard) {
 
 TEST(ColorRGBTest, Luminance) {
     ColorRGB white = make_color_rgb(1.0f, 1.0f, 1.0f);
-    EXPECT_NEAR(luminance(white).numerical_value_in(one), 1.0f, kEps);
+    EXPECT_NEAR(luminance(white), 1.0f, kEps);
 
     ColorRGB red = make_color_rgb(1.0f, 0.0f, 0.0f);
-    EXPECT_NEAR(luminance(red).numerical_value_in(one), 0.2126f, kEps);
+    EXPECT_NEAR(luminance(red), 0.2126f, kEps);
 }
 
 // ============================================================================

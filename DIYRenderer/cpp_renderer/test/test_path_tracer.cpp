@@ -300,8 +300,8 @@ TEST_F(PathTracerTest, OutputIsNonNegative) {
         
         render::ColorRGB result = render::apply_camera_sensitivity(traceMIS(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
         
-        // Use color_is_valid for NaN/Inf checking
-        EXPECT_TRUE(render::color_is_valid(result)) << "Invalid color at sample " << i;
+        // Use is_valid for NaN/Inf checking
+        EXPECT_TRUE(render::is_valid(result)) << "Invalid color at sample " << i;
         
         auto [rr, rg, rb] = render::color_to_floats(result);
         EXPECT_GE(rr, 0.0f) << "Negative red at sample " << i;

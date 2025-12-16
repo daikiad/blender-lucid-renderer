@@ -100,18 +100,13 @@ inline render::BSDFRGB evalSpecular(const MaterialParams& mat, const render::Dir
     float lambdaV = ggx_safe_sqrt(a2 + (1.0f - a2) * NdotV * NdotV);
     float G2_over_denom = 0.5f / (NdotV * lambdaL + NdotL * lambdaV + GGX_EPSILON);
     
-    // Compute F0 using AttenuationRGB
-    render::AttenuationRGB f0 = mat.albedo * mat.metallic + render::make_attenuation_rgb(0.04f, 0.04f, 0.04f) * (1.0f - mat.metallic);
-    render::AttenuationRGB F = fresnelSchlickColor(VdotH, f0);
+    // Compute F0 using RGB3f (plain floats)
+    render::RGB3f f0 = mat.albedo * mat.metallic + render::RGB3f{0.04f, 0.04f, 0.04f} * (1.0f - mat.metallic);
+    render::RGB3f F = fresnelSchlickColor(VdotH, f0);
     
     float spec = D * G2_over_denom;
-    // Keep units through BSDF construction: [1/sr] * [dimensionless] -> [1/sr]
-    const render::BSDF spec_bsdf = spec * render::per_sr;
-    return render::BSDFRGB{
-        spec_bsdf * F.r,
-        spec_bsdf * F.g,
-        spec_bsdf * F.b,
-    };
+    // BSDFRGB * RGB3f -> BSDFRGB (modulated by Fresnel)
+    return render::BSDFRGB{spec, spec, spec} * F;
 }
 
 /**
@@ -130,16 +125,16 @@ inline render::BSDFRGB evalBSDF(const MaterialParams& mat, const render::Directi
     auto h = render::make_direction_or_default(h_vec);
     float VdotH = std::max(render::dot(wo.vec(), h.vec()), 0.0f);
     
-    // Use AttenuationRGB for Fresnel calculation
-    render::AttenuationRGB f0 = render::make_attenuation_rgb(0.04f, 0.04f, 0.04f);
-    render::AttenuationRGB F = fresnelSchlickColor(VdotH, f0);
+    // Use RGB3f for Fresnel calculation (plain floats)
+    render::RGB3f f0{0.04f, 0.04f, 0.04f};
+    render::RGB3f F = fresnelSchlickColor(VdotH, f0);
     
     render::BSDFRGB diffuse = evalDiffuse(mat, NdotL, NdotV);
-    render::AttenuationRGB kd = render::make_attenuation_rgb(
-        (1.0f - F.r.numerical_value_in(render::one)) * (1.0f - mat.metallic),
-        (1.0f - F.g.numerical_value_in(render::one)) * (1.0f - mat.metallic),
-        (1.0f - F.b.numerical_value_in(render::one)) * (1.0f - mat.metallic));
-    diffuse = diffuse * kd;  // BSDFRGB * AttenuationRGB -> BSDFRGB
+    render::RGB3f kd{
+        (1.0f - F.r) * (1.0f - mat.metallic),
+        (1.0f - F.g) * (1.0f - mat.metallic),
+        (1.0f - F.b) * (1.0f - mat.metallic)};
+    diffuse = diffuse * kd;  // BSDFRGB * RGB3f -> BSDFRGB
     
     return diffuse + specular;  // BSDFRGB + BSDFRGB -> BSDFRGB
 }

@@ -35,12 +35,12 @@ inline float fresnelSchlick(float cosTheta, float f0) {
 
 /**
  * Fresnel for conductor (metal) - Schlick with F0 = albedo
- * Returns per-channel Fresnel reflectance (AttenuationRGB [0,1])
+ * Returns per-channel Fresnel reflectance (RGB3f [0,1])
  */
-inline render::AttenuationRGB fresnelSchlickColor(float cosTheta, const render::AttenuationRGB& f0) {
+inline render::RGB3f fresnelSchlickColor(float cosTheta, const render::RGB3f& f0) {
     float f = std::pow(1.0f - cosTheta, 5.0f);
-    // f0.r etc are Reflectance (quantity<one>), so arithmetic works naturally
-    return render::AttenuationRGB{
+    // f0 is now plain float RGB, so arithmetic is straightforward
+    return render::RGB3f{
         f0.r + (1.0f - f0.r) * f,
         f0.g + (1.0f - f0.g) * f,
         f0.b + (1.0f - f0.b) * f

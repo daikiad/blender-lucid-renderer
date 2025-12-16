@@ -362,7 +362,7 @@ public:
                 auto world_dir = render::make_direction_or_default(world_dir_vec, camera_.forward);
                 Ray ray(camera_.pos, world_dir);
                 
-                render::AttenuationRGB color(0, 0, 0);
+                render::AttenuationRGB color = render::zero_attenuation_rgb();
                 if (mode == "normal") {
                     color = traceNormal(scene_, ray);
                     // -1..1 を 0..1 にマッピング
