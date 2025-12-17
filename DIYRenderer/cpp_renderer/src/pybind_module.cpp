@@ -174,6 +174,10 @@ PYBIND11_MODULE(diyrenderer, m) {
              py::arg("count") = 10,
              "Get top N path groups by variance")
         
+        .def("get_pixel_diagnostic", &PyRenderer::get_pixel_diagnostic,
+             py::arg("x"), py::arg("y"),
+             "Get diagnostic data for a specific pixel")
+        
         // =====================================================================
         // Python 的な機能
         // =====================================================================
@@ -244,6 +248,23 @@ PYBIND11_MODULE(diyrenderer, m) {
             return "<ExportedGroupInfo signature='" + g.signature + 
                    "' mean=" + std::to_string(g.mean_luminance) +
                    " var=" + std::to_string(g.variance_luminance) + ">";
+        });
+    
+    // PixelDiagnosticInfo - Per-pixel diagnostic data
+    py::class_<PyRenderer::PixelDiagnosticInfo>(m, "PixelDiagnosticInfo")
+        .def(py::init<>())
+        .def_readonly("valid", &PyRenderer::PixelDiagnosticInfo::valid)
+        .def_readonly("sample_count", &PyRenderer::PixelDiagnosticInfo::sample_count)
+        .def_readonly("variance", &PyRenderer::PixelDiagnosticInfo::variance)
+        .def_readonly("group_count", &PyRenderer::PixelDiagnosticInfo::group_count)
+        .def_readonly("outlier_count", &PyRenderer::PixelDiagnosticInfo::outlier_count)
+        .def_readonly("mean_rgb", &PyRenderer::PixelDiagnosticInfo::mean_rgb)
+        .def_readonly("top_groups", &PyRenderer::PixelDiagnosticInfo::top_groups)
+        .def("__repr__", [](const PyRenderer::PixelDiagnosticInfo& p) {
+            if (!p.valid) return std::string("<PixelDiagnosticInfo invalid>");
+            return "<PixelDiagnosticInfo samples=" + std::to_string(p.sample_count) +
+                   " variance=" + std::to_string(p.variance) +
+                   " groups=" + std::to_string(p.group_count) + ">";
         });
     
     // DiagnosticSuggestion - Improvement suggestions

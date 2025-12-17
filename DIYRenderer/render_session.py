@@ -369,6 +369,25 @@ class RenderSession:
             print(f"[RenderSession #{self._session_id}] Failed to get variance map: {e}")
             return None
     
+    def get_pixel_diagnostic(self, x: int, y: int):
+        """ピクセル単位の診断データを取得
+        
+        Args:
+            x: ピクセルX座標
+            y: ピクセルY座標
+            
+        Returns:
+            PixelDiagnosticInfo or None
+        """
+        if not self.is_available or not self._diagnostics_enabled:
+            return None
+        
+        try:
+            return self._renderer.get_pixel_diagnostic(x, y)
+        except Exception as e:
+            print(f"[RenderSession #{self._session_id}] Failed to get pixel diagnostic: {e}")
+            return None
+    
     def get_top_variance_groups(self, count: int = 10):
         """上位分散グループを取得
         

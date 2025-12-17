@@ -1,0 +1,572 @@
+"""
+hover_diagnostics.py - Mouse Hover Diagnostic Display for Image Editor
+=======================================================================
+
+Image Editor上でマウスオーバー時にピクセルの診断情報を表示する機能を提供します。
+Modal Operator とカスタム描画ハンドラを使用して実装されています。
+
+使い方:
+1. F12レンダリングを診断機能有効で実行
+2. Image Editor で DIY > Pixel Inspector を開く
+3. "Start Inspection" ボタンをクリック
+4. マウスをレンダリング結果上で動かすとピクセル情報が表示される
+5. ESCキーまたは右クリックで終了
+"""
+
+import bpy
+import blf
+import gpu
+from gpu_extras.batch import batch_for_shader
+from typing import Optional, Tuple, Dict, Any
+
+
+# =============================================================================
+# ピクセル診断データの取得
+# =============================================================================
+
+def get_pixel_diagnostic(pixel_x: int, pixel_y: int) -> Optional[Dict[str, Any]]:
+    """
+    指定ピクセルの診断データを取得します。
+    
+    Args:
+        pixel_x: ピクセルX座標
+        pixel_y: ピクセルY座標
+    
+    Returns:
+        診断データの辞書、またはデータがない場合 None
+    """
+    try:
+        from .diagnostics import get_global_diagnostics
+        manager = get_global_diagnostics()
+        
+        if manager is None:
+            print(f"[HoverDiagnostics] manager is None")
+            return None
+        if not manager.is_available:
+            print(f"[HoverDiagnostics] manager not available")
+            return None
+        
+        # get_pixel_diagnostic メソッドがあるかチェック
+        if not hasattr(manager, 'get_pixel_diagnostic'):
+            print(f"[HoverDiagnostics] manager has no get_pixel_diagnostic method")
+            return None
+        
+        # 新しいAPIを使用: manager.get_pixel_diagnostic(x, y)
+        result = manager.get_pixel_diagnostic(pixel_x, pixel_y)
+        
+        if result is None:
+            print(f"[HoverDiagnostics] get_pixel_diagnostic returned None for ({pixel_x}, {pixel_y})")
+            return None
+        
+        # PixelDiagnosticInfo を辞書に変換
+        if not result.valid:
+            print(f"[HoverDiagnostics] result.valid is False for ({pixel_x}, {pixel_y})")
+            return None
+        
+        return {
+            'sample_count': result.sample_count,
+            'variance': result.variance,
+            'group_count': result.group_count,
+            'outlier_count': result.outlier_count,
+            'mean_rgb': list(result.mean_rgb),
+            'top_groups': result.top_groups,
+        }
+            
+    except Exception as e:
+        print(f"[HoverDiagnostics] Error getting pixel data: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def get_variance_at_pixel(pixel_x: int, pixel_y: int, width: int, height: int) -> Optional[float]:
+    """
+    variance_map から指定ピクセルの分散値を取得します。
+    
+    Args:
+        pixel_x: ピクセルX座標
+        pixel_y: ピクセルY座標
+        width: 画像幅
+        height: 画像高さ
+    
+    Returns:
+        分散値、またはデータがない場合 None
+    """
+    try:
+        from .diagnostics import get_global_diagnostics
+        manager = get_global_diagnostics()
+        
+        if manager is None or not manager.is_available:
+            return None
+        
+        # レポートから取得（グローバル統計のみ）
+        report = manager.get_report(top_n=1)
+        if report is None:
+            return None
+        
+        # 座標チェック
+        if pixel_x < 0 or pixel_x >= width or pixel_y < 0 or pixel_y >= height:
+            return None
+        
+        return report.global_stats.total_variance / max(report.global_stats.active_pixels, 1)
+        
+    except Exception as e:
+        return None
+
+
+# =============================================================================
+# 描画ユーティリティ
+# =============================================================================
+
+def draw_text_box(x: float, y: float, lines: list, font_size: int = 18):
+    """
+    テキストボックスを描画します。
+    
+    Args:
+        x: 左上X座標
+        y: 左上Y座標  
+        lines: 表示するテキスト行のリスト
+        font_size: フォントサイズ
+    """
+    font_id = 0
+    blf.size(font_id, font_size)
+    
+    # 行の高さとボックスサイズを計算
+    line_height = font_size + 4
+    padding = 8
+    
+    # 最大幅を計算
+    max_width = 0
+    for line in lines:
+        dims = blf.dimensions(font_id, line)
+        max_width = max(max_width, dims[0])
+    
+    box_width = max_width + padding * 2
+    box_height = len(lines) * line_height + padding * 2
+    
+    # 背景ボックスを描画
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    vertices = [
+        (x, y),
+        (x + box_width, y),
+        (x + box_width, y - box_height),
+        (x, y - box_height),
+    ]
+    indices = [(0, 1, 2), (0, 2, 3)]
+    
+    gpu.state.blend_set('ALPHA')
+    batch = batch_for_shader(shader, 'TRIS', {"pos": vertices}, indices=indices)
+    shader.bind()
+    shader.uniform_float("color", (0.1, 0.1, 0.1, 0.85))
+    batch.draw(shader)
+    
+    # 枠線を描画
+    border_vertices = [
+        (x, y),
+        (x + box_width, y),
+        (x + box_width, y - box_height),
+        (x, y - box_height),
+        (x, y),  # Close the loop
+    ]
+    border_batch = batch_for_shader(shader, 'LINE_STRIP', {"pos": border_vertices})
+    shader.uniform_float("color", (0.4, 0.6, 1.0, 0.9))
+    border_batch.draw(shader)  # Fixed: was border_batch.draw(border_batch)
+    
+    gpu.state.blend_set('NONE')
+    
+    # テキストを描画
+    blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
+    text_y = y - padding - font_size
+    for line in lines:
+        blf.position(font_id, x + padding, text_y, 0)
+        blf.draw(font_id, line)
+        text_y -= line_height
+
+
+# =============================================================================
+# Modal Operator
+# =============================================================================
+
+# グローバル状態（draw_callback は self を使えないため）
+_inspector_state = {
+    'is_active': False,
+    'handle': None,
+    'mouse_x': 0,
+    'mouse_y': 0,
+    'pixel_x': -1,
+    'pixel_y': -1,
+    'image_width': 0,
+    'image_height': 0,
+    'pixel_info': None,
+    'variance': None,
+}
+
+
+def _draw_inspector_callback(context_dummy):
+    """オーバーレイ描画コールバック（グローバル関数）"""
+    state = _inspector_state
+    
+    if not state['is_active']:
+        return
+    
+    # デバッグ: 常にピクセル座標が負でも簡易表示
+    mouse_x = state['mouse_x']
+    mouse_y = state['mouse_y']
+    pixel_x = state['pixel_x']
+    pixel_y = state['pixel_y']
+    
+    # 表示するテキスト行を構築
+    if pixel_x < 0 or pixel_y < 0:
+        lines = [
+            f"Mouse: ({mouse_x}, {mouse_y})",
+        ]
+        # デバッグ情報を表示
+        debug_info = state.get('debug_info', '')
+        if debug_info:
+            lines.append(debug_info)
+        lines.append("(Outside image bounds)")
+    else:
+        lines = [
+            f"Pixel: ({pixel_x}, {pixel_y})",
+        ]
+        
+        # 診断情報を追加
+        pixel_info = state['pixel_info']
+        if pixel_info:
+            lines.append(f"Samples: {pixel_info.get('sample_count', 'N/A')}")
+            lines.append(f"Variance: {pixel_info.get('variance', 0):.6f}")
+            lines.append(f"Groups: {pixel_info.get('group_count', 0)}")
+            
+            mean_rgb = pixel_info.get('mean_rgb', [0, 0, 0])
+            if mean_rgb:
+                lines.append(f"Mean RGB: ({mean_rgb[0]:.3f}, {mean_rgb[1]:.3f}, {mean_rgb[2]:.3f})")
+            
+            # トップグループ情報
+            top_groups = pixel_info.get('top_groups', [])
+            if top_groups:
+                lines.append("")
+                lines.append("Top Path Groups:")
+                for i, g in enumerate(top_groups[:3]):
+                    sig = getattr(g, 'signature', 'N/A')
+                    var = getattr(g, 'variance_luminance', 0)
+                    cnt = getattr(g, 'sample_count', 0)
+                    lines.append(f"  {i+1}. {sig}: var={var:.4f} n={cnt}")
+        elif state['variance'] is not None:
+            lines.append(f"Avg Variance: {state['variance']:.6f}")
+        else:
+            lines.append("(No pixel diagnostic data)")
+        
+        # グローバル統計情報を表示
+        try:
+            from .diagnostics import get_global_diagnostics
+            manager = get_global_diagnostics()
+            if manager and manager.is_available:
+                report = manager.get_report(top_n=1)
+                if report:
+                    lines.append("")
+                    lines.append(f"Total Samples: {report.global_stats.total_samples:,}")
+        except:
+            pass
+    
+    # マウス位置の少し右上に描画
+    draw_x = mouse_x + 20
+    draw_y = mouse_y + 100
+    
+    draw_text_box(draw_x, draw_y, lines)
+
+
+class DIY_OT_pixel_inspector(bpy.types.Operator):
+    """
+    ピクセル診断インスペクター
+    
+    Image Editor上でマウスオーバー時にピクセルの診断情報を
+    オーバーレイ表示します。
+    """
+    bl_idname = "diy_render.pixel_inspector"
+    bl_label = "Pixel Inspector"
+    bl_description = "Inspect pixel diagnostic data on mouse hover"
+    bl_options = {'REGISTER'}
+    
+    @classmethod
+    def poll(cls, context):
+        """Image Editor でのみ有効"""
+        return context.area and context.area.type == 'IMAGE_EDITOR'
+    
+    @classmethod
+    def is_active(cls):
+        """インスペクターがアクティブかどうか"""
+        return _inspector_state['is_active']
+    
+    def invoke(self, context, event):
+        """オペレーター起動"""
+        global _inspector_state
+        
+        if context.area.type != 'IMAGE_EDITOR':
+            self.report({'WARNING'}, "Image Editor で実行してください")
+            return {'CANCELLED'}
+        
+        # 既にアクティブなら停止
+        if _inspector_state['is_active']:
+            self._cleanup(context)
+            self.report({'INFO'}, "ピクセルインスペクター終了")
+            return {'CANCELLED'}
+        
+        # 診断データの確認
+        try:
+            from .diagnostics import get_global_diagnostics
+            manager = get_global_diagnostics()
+            if manager is None or not manager.is_available:
+                self.report({'WARNING'}, "診断データがありません。診断を有効にしてレンダリングしてください")
+                return {'CANCELLED'}
+        except ImportError:
+            self.report({'ERROR'}, "診断モジュールが利用できません")
+            return {'CANCELLED'}
+        
+        # 画像サイズを取得
+        space = context.space_data
+        if space.image:
+            _inspector_state['image_width'], _inspector_state['image_height'] = space.image.size
+        else:
+            self.report({'WARNING'}, "画像が選択されていません")
+            return {'CANCELLED'}
+        
+        # 状態をリセット
+        _inspector_state['pixel_x'] = -1
+        _inspector_state['pixel_y'] = -1
+        _inspector_state['pixel_info'] = None
+        _inspector_state['variance'] = None
+        
+        # 描画ハンドラを登録（グローバル関数を使用）
+        _inspector_state['handle'] = bpy.types.SpaceImageEditor.draw_handler_add(
+            _draw_inspector_callback, (None,), 'WINDOW', 'POST_PIXEL'
+        )
+        _inspector_state['is_active'] = True
+        
+        # モーダルハンドラを登録
+        context.window_manager.modal_handler_add(self)
+        context.area.tag_redraw()
+        
+        self.report({'INFO'}, "ピクセルインスペクター開始 (ESC で終了)")
+        return {'RUNNING_MODAL'}
+    
+    def modal(self, context, event):
+        """モーダルイベント処理"""
+        global _inspector_state
+        
+        # Image Editor 以外では処理しない
+        if not context.area or context.area.type != 'IMAGE_EDITOR':
+            return {'PASS_THROUGH'}
+        
+        # エリアの再描画をトリガー
+        context.area.tag_redraw()
+        
+        # 終了条件
+        if event.type in {'ESC', 'RIGHTMOUSE'}:
+            self._cleanup(context)
+            self.report({'INFO'}, "ピクセルインスペクター終了")
+            return {'CANCELLED'}
+        
+        # マウス移動（全イベントで座標更新）
+        _inspector_state['mouse_x'] = event.mouse_region_x
+        _inspector_state['mouse_y'] = event.mouse_region_y
+        self._update_pixel_info(context)
+        
+        # 他のイベントはパススルー（通常操作を許可）
+        return {'PASS_THROUGH'}
+    
+    def _update_pixel_info(self, context):
+        """マウス位置からピクセル情報を更新"""
+        global _inspector_state
+        
+        region = context.region
+        space = context.space_data
+        
+        if not region or not space or not space.image:
+            _inspector_state['pixel_x'] = -1
+            _inspector_state['pixel_y'] = -1
+            _inspector_state['debug_info'] = "No region/space/image"
+            return
+        
+        # 画像サイズを取得
+        # Render Result の場合は image.size が (0, 0) になるので
+        # レンダー設定から取得する
+        image = space.image
+        width, height = image.size
+        
+        if width == 0 or height == 0:
+            # Render Result の場合、レンダー設定から解像度を取得
+            if image.name == 'Render Result':
+                render = context.scene.render
+                width = int(render.resolution_x * render.resolution_percentage / 100)
+                height = int(render.resolution_y * render.resolution_percentage / 100)
+            else:
+                # 他の画像でサイズが0の場合
+                _inspector_state['pixel_x'] = -1
+                _inspector_state['pixel_y'] = -1
+                _inspector_state['debug_info'] = f"Image '{image.name}' size: 0x0"
+                return
+        
+        mouse_x = _inspector_state['mouse_x']
+        mouse_y = _inspector_state['mouse_y']
+        
+        # リージョン座標をビュー座標に変換
+        try:
+            view_x, view_y = region.view2d.region_to_view(mouse_x, mouse_y)
+        except Exception as e:
+            _inspector_state['pixel_x'] = -1
+            _inspector_state['pixel_y'] = -1
+            _inspector_state['debug_info'] = f"Exception: {e}"
+            return
+        
+        # view座標（正規化UV: 0〜1）をピクセル座標に変換
+        pixel_x = int(view_x * width)
+        pixel_y = int(view_y * height)
+        
+        # デバッグ情報を保存
+        _inspector_state['debug_info'] = f"UV: ({view_x:.3f}, {view_y:.3f}), Size: {width}x{height}"
+        
+        # 範囲チェック
+        if 0 <= pixel_x < width and 0 <= pixel_y < height:
+            _inspector_state['pixel_x'] = pixel_x
+            _inspector_state['pixel_y'] = pixel_y
+            
+            # 診断データを取得
+            pixel_info = get_pixel_diagnostic(pixel_x, pixel_y)
+            _inspector_state['pixel_info'] = pixel_info
+            _inspector_state['variance'] = get_variance_at_pixel(pixel_x, pixel_y, width, height)
+            
+            # デバッグ: 診断データの状態
+            if pixel_info is None:
+                _inspector_state['debug_info'] += " | pixel_diag=None"
+            else:
+                _inspector_state['debug_info'] += f" | pixel_diag OK"
+        else:
+            _inspector_state['pixel_x'] = -1
+            _inspector_state['pixel_y'] = -1
+            _inspector_state['pixel_info'] = None
+            _inspector_state['variance'] = None
+    
+    def _cleanup(self, context):
+        """クリーンアップ処理"""
+        global _inspector_state
+        
+        _inspector_state['is_active'] = False
+        
+        if _inspector_state['handle']:
+            bpy.types.SpaceImageEditor.draw_handler_remove(
+                _inspector_state['handle'], 'WINDOW'
+            )
+            _inspector_state['handle'] = None
+        
+        if context.area:
+            context.area.tag_redraw()
+
+
+# =============================================================================
+# Image Editor パネル
+# =============================================================================
+
+class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
+    """
+    Image Editor の診断パネル
+    """
+    bl_label = "DIY Pixel Inspector"
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = 'DIY'
+    
+    @classmethod
+    def poll(cls, context):
+        """DIY Renderer の診断データがある場合のみ表示"""
+        return True  # 常に表示（データがない場合は説明を表示）
+    
+    def draw(self, context):
+        layout = self.layout
+        
+        # 診断データの確認
+        has_data = False
+        try:
+            from .diagnostics import get_global_diagnostics
+            manager = get_global_diagnostics()
+            has_data = manager is not None and manager.is_available
+        except:
+            pass
+        
+        # インスペクターボタン
+        if _inspector_state['is_active']:
+            layout.operator("diy_render.pixel_inspector", 
+                          text="Stop Inspection", 
+                          icon='CANCEL')
+        else:
+            col = layout.column()
+            col.enabled = has_data
+            col.operator("diy_render.pixel_inspector", 
+                        text="Start Inspection", 
+                        icon='EYEDROPPER')
+        
+        # ステータス表示
+        box = layout.box()
+        if has_data:
+            box.label(text="Diagnostic data available", icon='CHECKMARK')
+            
+            # 簡易統計表示
+            try:
+                report = manager.get_report(top_n=1)
+                if report:
+                    col = box.column(align=True)
+                    col.scale_y = 0.8
+                    col.label(text=f"Samples: {report.global_stats.total_samples:,}")
+                    col.label(text=f"Pixels: {report.global_stats.active_pixels:,}")
+            except:
+                pass
+        else:
+            box.label(text="No diagnostic data", icon='INFO')
+            col = box.column(align=True)
+            col.scale_y = 0.8
+            col.label(text="1. Enable diagnostics in")
+            col.label(text="   Render > Path Diagnostics")
+            col.label(text="2. Run F12 render")
+        
+        # 使い方
+        if _inspector_state['is_active']:
+            box = layout.box()
+            box.label(text="Controls:", icon='HELP')
+            col = box.column(align=True)
+            col.scale_y = 0.8
+            col.label(text="Move mouse to inspect")
+            col.label(text="ESC or Right-click to exit")
+
+
+# =============================================================================
+# 登録
+# =============================================================================
+
+classes = (
+    DIY_OT_pixel_inspector,
+    DIY_PT_image_editor_diagnostics,
+)
+
+
+def register():
+    """クラスを登録"""
+    for cls in classes:
+        bpy.utils.register_class(cls)
+
+
+def unregister():
+    """クラスを解除"""
+    global _inspector_state
+    
+    # アクティブなインスペクターをクリーンアップ
+    if _inspector_state['handle']:
+        try:
+            bpy.types.SpaceImageEditor.draw_handler_remove(
+                _inspector_state['handle'], 'WINDOW'
+            )
+        except:
+            pass
+        _inspector_state['handle'] = None
+        _inspector_state['is_active'] = False
+    
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)

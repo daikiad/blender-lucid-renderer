@@ -533,6 +533,67 @@ public:
         render::diagnostics::DiagnosticExporter exporter(*diagnostic_film_);
         return exporter.get_top_variance_groups(count);
     }
+    
+    /**
+     * ピクセル単位の診断データを取得
+     * @param x ピクセルX座標
+     * @param y ピクセルY座標
+     * @return ピクセル診断情報 (variance, sample_count, top_groups)
+     */
+    struct PixelDiagnosticInfo {
+        bool valid = false;
+        size_t sample_count = 0;
+        float variance = 0.0f;
+        size_t group_count = 0;
+        size_t outlier_count = 0;
+        std::array<float, 3> mean_rgb = {0.0f, 0.0f, 0.0f};
+        std::vector<render::diagnostics::ExportedGroupInfo> top_groups;
+    };
+    
+    PixelDiagnosticInfo get_pixel_diagnostic(size_t x, size_t y) const {
+        PixelDiagnosticInfo info;
+        
+        if (!diagnostic_film_) {
+            return info;
+        }
+        
+        const auto* pixel_data = diagnostic_film_->pixel_data(x, y);
+        if (!pixel_data) {
+            return info;
+        }
+        
+        info.valid = true;
+        info.sample_count = pixel_data->total_samples();
+        info.variance = pixel_data->total_variance();
+        info.group_count = pixel_data->group_count();
+        info.outlier_count = pixel_data->outlier_count();
+        
+        auto mean = pixel_data->total_mean();
+        info.mean_rgb = {mean.r, mean.g, mean.b};
+        
+        // トップグループの情報を変換
+        for (size_t i = 0; i < pixel_data->group_count() && i < 5; ++i) {
+            const auto* group = pixel_data->top_group(i);
+            if (!group) continue;
+            
+            render::diagnostics::ExportedGroupInfo ginfo;
+            ginfo.pixel_x = x;
+            ginfo.pixel_y = y;
+            ginfo.signature = group->signature();
+            ginfo.sample_count = group->stats.count;
+            ginfo.mean_luminance = group->mean_contribution();
+            ginfo.variance_luminance = group->total_variance();
+            ginfo.mean_rgb = {group->stats.mean.r, group->stats.mean.g, group->stats.mean.b};
+            ginfo.variance_rgb = {group->stats.variance.r, group->stats.variance.g, group->stats.variance.b};
+            ginfo.depth = group->depth;
+            ginfo.coarse_type = group->coarse_type;
+            ginfo.coarse_type_name = render::diagnostics::coarse_type_name(group->coarse_type);
+            
+            info.top_groups.push_back(ginfo);
+        }
+        
+        return info;
+    }
 
 private:
     std::atomic<bool> cancel_requested_;

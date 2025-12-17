@@ -35,6 +35,29 @@ from .scene_export import export_scene_to_file
 
 
 # =============================================================================
+# グローバルセッション保持（診断用）
+# =============================================================================
+
+# 診断データアクセス用にセッションを保持
+_diagnostic_session: Optional[RenderSession] = None
+
+def set_diagnostic_session(session: Optional[RenderSession]):
+    """診断用セッションを設定"""
+    global _diagnostic_session
+    # 古いセッションがあればシャットダウン
+    if _diagnostic_session is not None and _diagnostic_session != session:
+        try:
+            _diagnostic_session.shutdown()
+        except:
+            pass
+    _diagnostic_session = session
+
+def get_diagnostic_session() -> Optional[RenderSession]:
+    """診断用セッションを取得"""
+    return _diagnostic_session
+
+
+# =============================================================================
 # カメラパラメータ計算
 # =============================================================================
 
@@ -158,8 +181,12 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         # Blender が StructRNA を既に削除している場合があるので try-except で保護
         try:
             if self._session is not None:
-                print(f"[DIYRenderEngine] Destroying session: {self._session}")
-                self._session.shutdown()
+                # 診断用グローバルセッションとして保持されている場合はシャットダウンしない
+                if self._session is get_diagnostic_session():
+                    print(f"[DIYRenderEngine] Session kept for diagnostics: {self._session}")
+                else:
+                    print(f"[DIYRenderEngine] Destroying session: {self._session}")
+                    self._session.shutdown()
                 self._session = None
         except (ReferenceError, AttributeError):
             # Blender が既にオブジェクトを削除している場合は無視
@@ -488,6 +515,10 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 metadata_json=metadata_json,
             )
             
+            # セッションをグローバルに保持（診断用）
+            # これにより、エンジンがデストラクトされても診断データにアクセスできる
+            set_diagnostic_session(session)
+            
             # 簡易マネージャーラッパーを作成してグローバルに格納
             class _DiagnosticResultsWrapper:
                 def __init__(self, report):
@@ -496,6 +527,21 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 
                 def get_report(self, top_n=10):
                     return self._report
+                
+                def get_pixel_diagnostic(self, x: int, y: int):
+                    """ピクセル単位の診断データを取得（グローバルセッションを使用）"""
+                    session = get_diagnostic_session()
+                    if session is None:
+                        print(f"[_DiagnosticResultsWrapper] diagnostic session is None")
+                        return None
+                    if not session.is_diagnostics_enabled():
+                        print(f"[_DiagnosticResultsWrapper] diagnostics not enabled")
+                        return None
+                    return session.get_pixel_diagnostic(x, y)
+                
+                def get_film(self):
+                    """互換性のためのダミーメソッド"""
+                    return None
             
             wrapper = _DiagnosticResultsWrapper(report)
             set_global_diagnostics(wrapper)
