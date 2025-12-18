@@ -271,10 +271,12 @@ PYBIND11_MODULE(diyrenderer, m) {
         .def_readonly("depth", &ExportedGroupInfo::depth)
         .def_readonly("coarse_type", &ExportedGroupInfo::coarse_type)
         .def_readonly("coarse_type_name", &ExportedGroupInfo::coarse_type_name)
+        .def_readonly("strategy_name", &ExportedGroupInfo::strategy_name)  // Plan E
         .def("__repr__", [](const ExportedGroupInfo& g) {
             return "<ExportedGroupInfo signature='" + g.signature + 
                    "' heckbert='" + g.signature_heckbert + "'" +
                    " path='" + g.object_path + "'" +
+                   " strategy='" + g.strategy_name + "'" +
                    " mean=" + std::to_string(g.mean_luminance) +
                    " var=" + std::to_string(g.variance_luminance) + ">";
         });

@@ -95,6 +95,49 @@ enum class LightSourceType : uint8_t {
     Emissive    = 6,  // Emissive mesh (LDD, but use object name)
 };
 
+// ============================================================================
+// SamplingStrategy - How the path was sampled (Plan E)
+// ============================================================================
+
+/**
+ * Sampling strategy used to find the light source
+ * 
+ * This distinguishes HOW a path was constructed, which affects MIS weights.
+ * A "completed path" is one that successfully reached a light source.
+ */
+enum class SamplingStrategy : uint8_t {
+    BSDF     = 0,  // BSDF sampling hit light (no MIS)
+    NEE      = 1,  // Pure NEE without MIS
+    MIS_BSDF = 2,  // MIS: BSDF sampling component (weighted)
+    MIS_NEE  = 3,  // MIS: NEE sampling component (weighted)
+};
+
+/**
+ * Get human-readable name for sampling strategy
+ */
+constexpr const char* sampling_strategy_name(SamplingStrategy strategy) {
+    switch (strategy) {
+        case SamplingStrategy::BSDF:     return "BSDF";
+        case SamplingStrategy::NEE:      return "NEE";
+        case SamplingStrategy::MIS_BSDF: return "MIS_BSDF";
+        case SamplingStrategy::MIS_NEE:  return "MIS_NEE";
+    }
+    return "Unknown";
+}
+
+/**
+ * Get short name for display
+ */
+constexpr const char* sampling_strategy_short(SamplingStrategy strategy) {
+    switch (strategy) {
+        case SamplingStrategy::BSDF:     return "B";
+        case SamplingStrategy::NEE:      return "N";
+        case SamplingStrategy::MIS_BSDF: return "MB";
+        case SamplingStrategy::MIS_NEE:  return "MN";
+    }
+    return "?";
+}
+
 /**
  * Get 3-character Heckbert notation for light source
  * First char: L (light)
@@ -208,6 +251,7 @@ struct PathTrace {
     size_t     depth;                     // Number of vertices (0 = empty)
     RGB3f      contribution;              // Final radiance contribution
     LightSourceType light_type;           // Light source type for Heckbert notation
+    SamplingStrategy strategy;            // How this path was sampled (Plan E)
     
     // Default constructor
     PathTrace()
@@ -215,6 +259,7 @@ struct PathTrace {
         , depth(0)
         , contribution{}
         , light_type(LightSourceType::Unknown)
+        , strategy(SamplingStrategy::BSDF)
     {}
     
     /**
@@ -224,6 +269,7 @@ struct PathTrace {
         depth = 0;
         contribution = RGB3f{};
         light_type = LightSourceType::Unknown;
+        strategy = SamplingStrategy::BSDF;
     }
     
     /**

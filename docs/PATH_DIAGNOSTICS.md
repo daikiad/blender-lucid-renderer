@@ -5,7 +5,7 @@
 Path Diagnosticsは、レンダリング中の光路（パス）を記録・分析し、ピクセルごとの寄与を可視化する機能です。
 Hover Diagnostics（マウスオーバー診断）により、Image Editor上でピクセルの詳細情報を表示できます。
 
-## アーキテクチャ
+## アーキテクチャ（Plan E: Completed Path Model）
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -14,7 +14,7 @@ Hover Diagnostics（マウスオーバー診断）により、Image Editor上で
 │  │  hover_diagnostics.py                                         │ │
 │  │  - マウス座標取得                                              │ │
 │  │  - Y座標反転 (Blender座標 → レンダラー座標)                    │ │
-│  │  - 診断データ表示                                              │ │
+│  │  - 診断データ表示（strategy_name含む）                        │ │
 │  └─────────────────┴──────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────┘
                                     │
@@ -26,32 +26,53 @@ Hover Diagnostics（マウスオーバー診断）により、Image Editor上で
 │  │  - get_pixel_diagnostic(): ピクセル診断データ取得              ││
 │  │  - object_path_string(): パス文字列生成                        ││
 │  │  - light_source_name(): 光源タイプ名                           ││
+│  │  ★ get_completed_paths() で全パスを取得（Plan E）             ││
 │  └─────────────────────────────────────────────────────────────────┘│
 │                                    │                                │
 │  ┌─────────────────────────────────────────────────────────────────┐│
 │  │  DiagnosticFilm (diagnostic_film.hpp)                           ││
 │  │  - ピクセルごとのPathGroupを管理                               ││
 │  │  - subsample_factor でメモリ削減                               ││
+│  │  - strategy フィールドで SamplingStrategy を記録               ││
 │  └─────────────────────────────────────────────────────────────────┘│
 │                                    │                                │
 │  ┌─────────────────────────────────────────────────────────────────┐│
 │  │  PathDiagnosticRecorder (diagnostic_integrator.hpp)             ││
-│  │  - パストレーシング中に頂点を記録                              ││
-│  │  - record_vertex(): 通常頂点                                   ││
-│  │  - record_environment_hit(): 環境光ヒット                      ││
-│  │  - record_light_hit(): Native Lightヒット                      ││
-│  │  - record_emissive_hit(): Emissiveメッシュヒット               ││
-│  │  - record_nee_contribution(): NEE寄与（別パスとして記録）      ││
+│  │  ★ Plan E: Completed Path API                                  ││
+│  │  - record_completed_path(strategy, light_id, type, contrib)    ││
+│  │  - get_completed_paths(): 全completed pathを取得               ││
+│  │  ※ 旧API (end_path, get_nee_paths) は後方互換のため残存       ││
 │  └─────────────────────────────────────────────────────────────────┘│
 │                                    │                                │
 │  ┌─────────────────────────────────────────────────────────────────┐│
 │  │  Path Tracer (path_tracer.hpp)                                  ││
-│  │  - traceSimpleWithDiagnostics()                                 ││
-│  │  - traceNEEWithDiagnostics()                                    ││
-│  │  - traceMISWithDiagnostics()                                    ││
+│  │  - traceSimpleWithDiagnostics() → BSDF strategy                ││
+│  │  - traceNEEWithDiagnostics() → NEE strategy (direct: BSDF)     ││
+│  │  - traceMISWithDiagnostics() → MIS_NEE / MIS_BSDF strategies   ││
 │  └─────────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+## SamplingStrategy（Plan E）
+
+```cpp
+enum class SamplingStrategy : uint8_t {
+    BSDF     = 0,  // BSDFサンプリングでライトに到達（Simple, direct view）
+    NEE      = 1,  // 純粋NEE（MIS重みなし）
+    MIS_BSDF = 2,  // MIS: BSDFサンプリング成分（MIS重み付き）
+    MIS_NEE  = 3,  // MIS: NEEサンプリング成分（MIS重み付き）
+};
+```
+
+### Strategyの使い分け
+
+| アルゴリズム | 光源到達方法 | Strategy |
+|-------------|-------------|----------|
+| Simple | BSDFヒット | BSDF |
+| NEE | 直接ビュー (depth=0) | BSDF |
+| NEE | NEEサンプリング | NEE |
+| MIS | BSDFヒット | MIS_BSDF |
+| MIS | NEEサンプリング | MIS_NEE |
 
 ## 光源タイプ (LightSourceType)
 

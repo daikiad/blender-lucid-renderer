@@ -147,6 +147,9 @@ def _regroup_paths(top_groups, total_mean_rgb=None):
         mean = getattr(g, 'mean_luminance', 0)
         cnt = getattr(g, 'sample_count', 0)
         
+        # Strategy name (Plan E: sampling strategy)
+        strategy = getattr(g, 'strategy_name', '')
+        
         # RGB mean から輝度を計算
         mean_rgb = getattr(g, 'mean_rgb', [0, 0, 0])
         if mean_rgb:
@@ -157,33 +160,44 @@ def _regroup_paths(top_groups, total_mean_rgb=None):
         # ピクセル全体の平均からの偏差（絶対値）
         deviation = abs(group_lum - total_lum) if total_mean_rgb else 0.0
         
-        if sig_heckbert not in heckbert_groups:
-            heckbert_groups[sig_heckbert] = {
-                'key': sig_heckbert,
+        # Heckbert + Strategy でグルーピング（MIS_BSDF と MIS_NEE を分離表示）
+        if strategy:
+            heckbert_key = f"{sig_heckbert} [{strategy}]"
+        else:
+            heckbert_key = sig_heckbert
+            
+        if heckbert_key not in heckbert_groups:
+            heckbert_groups[heckbert_key] = {
+                'key': heckbert_key,
                 'variance': 0.0,
                 'mean': 0.0,
                 'deviation': 0.0,
                 'count': 0
             }
-        heckbert_groups[sig_heckbert]['variance'] += var * cnt  # weighted sum
-        heckbert_groups[sig_heckbert]['mean'] += mean * cnt
-        heckbert_groups[sig_heckbert]['deviation'] += deviation * cnt
-        heckbert_groups[sig_heckbert]['count'] += cnt
+        heckbert_groups[heckbert_key]['variance'] += var * cnt  # weighted sum
+        heckbert_groups[heckbert_key]['mean'] += mean * cnt
+        heckbert_groups[heckbert_key]['deviation'] += deviation * cnt
+        heckbert_groups[heckbert_key]['count'] += cnt
         
-        # Object Path でグルーピング
+        # Object Path + Strategy でグルーピング
         object_path = getattr(g, 'object_path', '') or 'Unknown Path'
-        if object_path not in object_groups:
-            object_groups[object_path] = {
-                'key': object_path,
+        if strategy:
+            object_key = f"{object_path} [{strategy}]"
+        else:
+            object_key = object_path
+            
+        if object_key not in object_groups:
+            object_groups[object_key] = {
+                'key': object_key,
                 'variance': 0.0,
                 'mean': 0.0,
                 'deviation': 0.0,
                 'count': 0
             }
-        object_groups[object_path]['variance'] += var * cnt
-        object_groups[object_path]['mean'] += mean * cnt
-        object_groups[object_path]['deviation'] += deviation * cnt
-        object_groups[object_path]['count'] += cnt
+        object_groups[object_key]['variance'] += var * cnt
+        object_groups[object_key]['mean'] += mean * cnt
+        object_groups[object_key]['deviation'] += deviation * cnt
+        object_groups[object_key]['count'] += cnt
     
     # 加重平均に変換
     for g in heckbert_groups.values():

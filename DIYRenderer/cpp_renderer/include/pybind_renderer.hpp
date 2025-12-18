@@ -296,26 +296,10 @@ public:
                                 
                                 radiance = radiance + sample_radiance;
                                 
-                                // Record main path to film (only if it reached a light source)
-                                // Paths that terminated without hitting light (Russian Roulette, max depth)
-                                // should not be recorded since their contribution is 0.
-                                // NEE paths are recorded separately.
-                                render::RGB3f contrib(
-                                    sample_radiance.r.numerical_value_in(render::radiance_unit),
-                                    sample_radiance.g.numerical_value_in(render::radiance_unit),
-                                    sample_radiance.b.numerical_value_in(render::radiance_unit)
-                                );
-                                render::diagnostics::PathTrace trace = recorder.end_path(contrib);
-                                
-                                // Only record if path reached a light source
-                                // (light_type != Unknown means it hit environment, emissive, or native light)
-                                if (trace.light_type != render::diagnostics::LightSourceType::Unknown) {
-                                    diagnostic_film_->record_path(px, py, trace);
-                                }
-                                
-                                // Record NEE paths (direct light sampling contributions)
-                                for (const auto& nee_path : recorder.get_nee_paths()) {
-                                    diagnostic_film_->record_path(px, py, nee_path);
+                                // Plan E: Record all completed paths (paths that reached light sources)
+                                // Each path has its own MIS-weighted contribution, so no double counting
+                                for (const auto& path : recorder.get_completed_paths()) {
+                                    diagnostic_film_->record_path(px, py, path);
                                 }
                             } else {
                                 if (algorithm_ == "simple") {
@@ -629,6 +613,10 @@ public:
             ginfo.depth = group->depth;
             ginfo.coarse_type = group->coarse_type;
             ginfo.coarse_type_name = render::diagnostics::coarse_type_name(group->coarse_type);
+            
+            // Plan E: Export sampling strategy
+            ginfo.strategy = group->strategy;
+            ginfo.strategy_name = render::diagnostics::sampling_strategy_name(group->strategy);
             
             // オブジェクト名パスを生成（light_typeを含む）
             ginfo.object_path = object_path_string(ginfo.object_ids, group->light_type);

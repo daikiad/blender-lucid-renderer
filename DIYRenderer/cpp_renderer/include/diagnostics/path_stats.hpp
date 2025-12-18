@@ -136,7 +136,8 @@ struct PathGroup {
     uint8_t     depth;                   // Path depth
     uint8_t     coarse_type;             // Coarse classification
     LightSourceType light_type;          // Light source type for Heckbert
-    uint8_t     _pad[5];                 // Padding for alignment
+    SamplingStrategy strategy;           // Plan E: How the path was sampled
+    uint8_t     _pad[4];                 // Padding for alignment
     PathVertex  vertices[MAX_GROUP_DEPTH];  // Path structure
     
     PathGroup()
@@ -145,6 +146,7 @@ struct PathGroup {
         , depth(0)
         , coarse_type(0)
         , light_type(LightSourceType::Unknown)
+        , strategy(SamplingStrategy::BSDF)
         , _pad{}
         , vertices{}
     {}
@@ -157,6 +159,7 @@ struct PathGroup {
         depth = static_cast<uint8_t>(std::min(trace.depth, MAX_GROUP_DEPTH));
         coarse_type = trace.coarse_type();
         light_type = trace.light_type;
+        strategy = trace.strategy;  // Plan E: Copy strategy
         
         for (size_t i = 0; i < depth; ++i) {
             vertices[i] = trace.vertices[i];

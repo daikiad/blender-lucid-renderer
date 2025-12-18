@@ -77,10 +77,16 @@ template <typename MaterialT>
  *   PathTrace trace = recorder.end_path(contribution);
  *   // Get NEE paths:
  *   const auto& nee_paths = recorder.get_nee_paths();
+ *
+ *   // Plan E - Completed Path API:
+ *   recorder.begin_path();
+ *   recorder.record_vertex(...);
+ *   recorder.record_completed_path(strategy, light_id, light_type, contribution);
+ *   const auto& paths = recorder.get_completed_paths();
  */
 class PathDiagnosticRecorder {
 public:
-    PathDiagnosticRecorder() : current_path_{}, nee_paths_{} {}
+    PathDiagnosticRecorder() : current_path_{}, nee_paths_{}, completed_paths_{} {}
     
     /**
      * Start recording a new path
@@ -88,6 +94,7 @@ public:
     void begin_path() {
         current_path_.clear();
         nee_paths_.clear();
+        completed_paths_.clear();
     }
     
     /**
@@ -211,9 +218,59 @@ public:
         return nee_paths_;
     }
     
+    // ========================================================================
+    // Plan E: Completed Path API
+    // ========================================================================
+    
+    /**
+     * Record a completed path that reached a light source
+     * 
+     * This is the new API for Plan E. Instead of maintaining a "main path"
+     * and separate NEE paths, we record each completed path individually
+     * with its sampling strategy and MIS-weighted contribution.
+     * 
+     * @param strategy How the light was found (BSDF, NEE, MIS_BSDF, MIS_NEE)
+     * @param light_id Light index (-1 for environment)
+     * @param light_source_type Type of light source
+     * @param contribution MIS-weighted contribution of this path
+     */
+    void record_completed_path(SamplingStrategy strategy,
+                               int32_t light_id,
+                               LightSourceType light_source_type,
+                               const RGB3f& contribution) {
+        PathTrace path = current_path_;  // Copy current vertices
+        
+        // Add light vertex
+        if (path.depth < MAX_PATH_DEPTH) {
+            if (light_source_type == LightSourceType::Environment) {
+                // Environment: use -1 as object_id marker
+                PathVertex v{-1, -1, BsdfType::Emission, 0};
+                path.vertices[path.depth++] = v;
+            } else {
+                // Light: use negative ID encoding (-(light_id + 2))
+                PathVertex v{-(light_id + 2), -1, BsdfType::Emission, 0};
+                path.vertices[path.depth++] = v;
+            }
+        }
+        
+        path.light_type = light_source_type;
+        path.strategy = strategy;
+        path.contribution = contribution;
+        
+        completed_paths_.push_back(path);
+    }
+    
+    /**
+     * Get all completed paths recorded for this pixel
+     */
+    [[nodiscard]] const std::vector<PathTrace>& get_completed_paths() const {
+        return completed_paths_;
+    }
+    
 private:
     PathTrace current_path_;
     std::vector<PathTrace> nee_paths_;
+    std::vector<PathTrace> completed_paths_;  // Plan E: completed paths
 };
 
 // ============================================================================

@@ -196,6 +196,166 @@ TEST(BsdfClassificationTest, GlassMaterial) {
 }
 
 // ============================================================================
+// SamplingStrategy Tests (Plan E - Completed Path Model)
+// ============================================================================
+
+TEST(SamplingStrategyTest, EnumValues) {
+    // Verify stable enum values for serialization
+    EXPECT_EQ(static_cast<int>(SamplingStrategy::BSDF), 0);
+    EXPECT_EQ(static_cast<int>(SamplingStrategy::NEE), 1);
+    EXPECT_EQ(static_cast<int>(SamplingStrategy::MIS_BSDF), 2);
+    EXPECT_EQ(static_cast<int>(SamplingStrategy::MIS_NEE), 3);
+}
+
+TEST(SamplingStrategyTest, Names) {
+    EXPECT_STREQ(sampling_strategy_name(SamplingStrategy::BSDF), "BSDF");
+    EXPECT_STREQ(sampling_strategy_name(SamplingStrategy::NEE), "NEE");
+    EXPECT_STREQ(sampling_strategy_name(SamplingStrategy::MIS_BSDF), "MIS_BSDF");
+    EXPECT_STREQ(sampling_strategy_name(SamplingStrategy::MIS_NEE), "MIS_NEE");
+}
+
+// ============================================================================
+// PathDiagnosticRecorder - Completed Path API Tests (Plan E)
+// ============================================================================
+
+TEST(PathDiagnosticRecorderTest, RecordCompletedPath_BSDF) {
+    PathDiagnosticRecorder recorder;
+    recorder.begin_path();
+    
+    // Simulate: camera -> diffuse surface -> light (BSDF hit)
+    recorder.record_vertex(0, 1, BsdfType::Diffuse, false, false);
+    
+    RGB3f contrib{1.0f, 0.5f, 0.25f};
+    recorder.record_completed_path(SamplingStrategy::BSDF, 5, LightSourceType::Area, contrib);
+    
+    const auto& paths = recorder.get_completed_paths();
+    ASSERT_EQ(paths.size(), 1);
+    EXPECT_EQ(paths[0].strategy, SamplingStrategy::BSDF);
+    EXPECT_EQ(paths[0].light_type, LightSourceType::Area);
+    EXPECT_FLOAT_EQ(paths[0].contribution.r, 1.0f);
+    EXPECT_EQ(paths[0].depth, 2);  // diffuse + light
+}
+
+TEST(PathDiagnosticRecorderTest, RecordCompletedPath_NEE) {
+    PathDiagnosticRecorder recorder;
+    recorder.begin_path();
+    
+    // Simulate: camera -> diffuse surface -> NEE to point light
+    recorder.record_vertex(0, 1, BsdfType::Diffuse, false, false);
+    
+    RGB3f contrib{2.0f, 2.0f, 2.0f};
+    recorder.record_completed_path(SamplingStrategy::NEE, 3, LightSourceType::Point, contrib);
+    
+    const auto& paths = recorder.get_completed_paths();
+    ASSERT_EQ(paths.size(), 1);
+    EXPECT_EQ(paths[0].strategy, SamplingStrategy::NEE);
+    EXPECT_EQ(paths[0].light_type, LightSourceType::Point);
+    EXPECT_FLOAT_EQ(paths[0].contribution.r, 2.0f);
+}
+
+TEST(PathDiagnosticRecorderTest, RecordCompletedPath_MIS) {
+    PathDiagnosticRecorder recorder;
+    recorder.begin_path();
+    
+    // MIS combines both strategies with different weights
+    recorder.record_vertex(0, 1, BsdfType::Diffuse, false, false);
+    
+    // NEE part of MIS
+    RGB3f nee_contrib{1.0f, 1.0f, 1.0f};
+    recorder.record_completed_path(SamplingStrategy::MIS_NEE, 3, LightSourceType::Area, nee_contrib);
+    
+    // BSDF part of MIS (hit same or different light)
+    RGB3f bsdf_contrib{0.5f, 0.5f, 0.5f};
+    recorder.record_completed_path(SamplingStrategy::MIS_BSDF, 3, LightSourceType::Area, bsdf_contrib);
+    
+    const auto& paths = recorder.get_completed_paths();
+    ASSERT_EQ(paths.size(), 2);
+    EXPECT_EQ(paths[0].strategy, SamplingStrategy::MIS_NEE);
+    EXPECT_EQ(paths[1].strategy, SamplingStrategy::MIS_BSDF);
+}
+
+TEST(PathDiagnosticRecorderTest, RecordCompletedPath_MultiBounce) {
+    PathDiagnosticRecorder recorder;
+    recorder.begin_path();
+    
+    // Simulate: camera -> diffuse -> glossy -> light
+    recorder.record_vertex(0, 1, BsdfType::Diffuse, false, false);
+    recorder.record_vertex(1, 2, BsdfType::Glossy, false, false);
+    
+    RGB3f contrib{0.3f, 0.3f, 0.3f};
+    recorder.record_completed_path(SamplingStrategy::BSDF, 5, LightSourceType::Environment, contrib);
+    
+    const auto& paths = recorder.get_completed_paths();
+    ASSERT_EQ(paths.size(), 1);
+    EXPECT_EQ(paths[0].depth, 3);  // diffuse + glossy + environment
+    EXPECT_EQ(paths[0].vertices[0].bsdf_type, BsdfType::Diffuse);
+    EXPECT_EQ(paths[0].vertices[1].bsdf_type, BsdfType::Glossy);
+    EXPECT_EQ(paths[0].vertices[2].bsdf_type, BsdfType::Emission);  // Light vertex
+}
+
+TEST(PathDiagnosticRecorderTest, RecordCompletedPath_Environment) {
+    PathDiagnosticRecorder recorder;
+    recorder.begin_path();
+    
+    // Direct environment hit (no surface intersection)
+    RGB3f contrib{0.5f, 0.7f, 1.0f};
+    recorder.record_completed_path(SamplingStrategy::BSDF, -1, LightSourceType::Environment, contrib);
+    
+    const auto& paths = recorder.get_completed_paths();
+    ASSERT_EQ(paths.size(), 1);
+    EXPECT_EQ(paths[0].depth, 1);  // Just environment vertex
+    EXPECT_EQ(paths[0].light_type, LightSourceType::Environment);
+    EXPECT_EQ(paths[0].vertices[0].object_id, -1);  // Environment marker
+}
+
+TEST(PathDiagnosticRecorderTest, RecordCompletedPath_MultiplePerPixel) {
+    PathDiagnosticRecorder recorder;
+    recorder.begin_path();
+    
+    // At each bounce, MIS records both NEE and potentially BSDF hit
+    recorder.record_vertex(0, 1, BsdfType::Diffuse, false, false);
+    
+    // Bounce 1: NEE succeeds
+    recorder.record_completed_path(SamplingStrategy::MIS_NEE, 3, LightSourceType::Point, RGB3f{1.0f, 0.0f, 0.0f});
+    
+    // Continue path
+    recorder.record_vertex(1, 2, BsdfType::Diffuse, false, false);
+    
+    // Bounce 2: NEE succeeds again
+    recorder.record_completed_path(SamplingStrategy::MIS_NEE, 4, LightSourceType::Area, RGB3f{0.0f, 1.0f, 0.0f});
+    
+    // Path terminates hitting environment
+    recorder.record_completed_path(SamplingStrategy::MIS_BSDF, -1, LightSourceType::Environment, RGB3f{0.0f, 0.0f, 1.0f});
+    
+    const auto& paths = recorder.get_completed_paths();
+    ASSERT_EQ(paths.size(), 3);
+    
+    // First NEE path: depth 2 (diffuse -> point light)
+    EXPECT_EQ(paths[0].depth, 2);
+    EXPECT_EQ(paths[0].light_type, LightSourceType::Point);
+    
+    // Second NEE path: depth 3 (diffuse -> diffuse -> area light)
+    EXPECT_EQ(paths[1].depth, 3);
+    EXPECT_EQ(paths[1].light_type, LightSourceType::Area);
+    
+    // Final BSDF path: depth 3 (diffuse -> diffuse -> environment)
+    EXPECT_EQ(paths[2].depth, 3);
+    EXPECT_EQ(paths[2].light_type, LightSourceType::Environment);
+}
+
+TEST(PathDiagnosticRecorderTest, BeginPathClearsCompletedPaths) {
+    PathDiagnosticRecorder recorder;
+    recorder.begin_path();
+    recorder.record_completed_path(SamplingStrategy::BSDF, 0, LightSourceType::Area, RGB3f{1.0f, 1.0f, 1.0f});
+    
+    EXPECT_EQ(recorder.get_completed_paths().size(), 1);
+    
+    // Begin new path should clear
+    recorder.begin_path();
+    EXPECT_EQ(recorder.get_completed_paths().size(), 0);
+}
+
+// ============================================================================
 // Integration with Film Export
 // ============================================================================
 

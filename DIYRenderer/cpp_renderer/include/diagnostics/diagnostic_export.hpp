@@ -38,6 +38,10 @@ struct ExportedGroupInfo {
     uint8_t depth;
     uint8_t coarse_type;
     std::string coarse_type_name;
+    
+    // Plan E: Sampling strategy
+    SamplingStrategy strategy = SamplingStrategy::BSDF;  // How the path was sampled
+    std::string strategy_name;                           // "BSDF", "NEE", "MIS_BSDF", "MIS_NEE"
 };
 
 /**
