@@ -496,7 +496,14 @@ inline render::RadianceRGB traceSimpleWithDiagnostics(
         
         // Check if we hit a native light closer than any mesh
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
-            recorder.record_light_hit(lightHit.lightIndex);
+            // Get light type for Heckbert notation
+            LightSourceType lightSourceType = LightSourceType::Unknown;
+            if (lightHit.lightIndex >= 0 && 
+                lightHit.lightIndex < static_cast<int>(scene.nativeLights.size())) {
+                lightSourceType = to_light_source_type(
+                    static_cast<int>(scene.nativeLights[lightHit.lightIndex].type));
+            }
+            recorder.record_light_hit(lightHit.lightIndex, lightSourceType);
             result += throughput * lightHit.emission;
             break;
         }
@@ -598,7 +605,14 @@ inline render::RadianceRGB traceNEEWithDiagnostics(
         LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
         
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
-            recorder.record_light_hit(lightHit.lightIndex);
+            // Get light type for Heckbert notation
+            LightSourceType lightSourceType = LightSourceType::Unknown;
+            if (lightHit.lightIndex >= 0 && 
+                lightHit.lightIndex < static_cast<int>(scene.nativeLights.size())) {
+                lightSourceType = to_light_source_type(
+                    static_cast<int>(scene.nativeLights[lightHit.lightIndex].type));
+            }
+            recorder.record_light_hit(lightHit.lightIndex, lightSourceType);
             result += throughput * lightHit.emission;
             break;
         }
@@ -634,8 +648,9 @@ inline render::RadianceRGB traceNEEWithDiagnostics(
         } else if (hasEmission) {
             recorder.record_emissive_hit(hit.meshIdx, 0);
         } else {
-            // Track whether NEE was used for this vertex
-            bool usedNEE = false;
+            // Record vertex first (before NEE)
+            recorder.record_vertex(hit.meshIdx, 0, 
+                                   bsdfType, isDelta, false);
             
             // Next Event Estimation
             bool isTransmissive = mat.transmission > 0.5f;
@@ -661,17 +676,30 @@ inline render::RadianceRGB traceNEEWithDiagnostics(
                                 render::PdfW pdfLight = ls.pdf * lightSelectProb;
                                 
                                 render::ThroughputRGB bsdf_weight = render::bsdf_sample_weight(f, NdotL, pdfLight);
-                                render::RadianceRGB contrib = bsdf_weight * ls.emission;
-                                result += throughput * contrib;
-                                usedNEE = true;
+                                render::RadianceRGB nee_radiance = bsdf_weight * ls.emission;
+                                result += throughput * nee_radiance;
+                                
+                                // Record NEE contribution as separate path
+                                // lightIdx is index into sceneLights.lights[], 
+                                // we need native light index for diagnostics
+                                int nativeLightIdx = lightIdx - sceneLights.nativeLightStartIndex;
+                                
+                                LightSourceType lightSourceType = to_light_source_type(
+                                    static_cast<int>(light.type));
+                                
+                                // NEE contribution = throughput * BSDF * emission / pdf
+                                render::RadianceRGB total_nee = throughput * nee_radiance;
+                                render::RGB3f nee_contrib(
+                                    total_nee.r.numerical_value_in(render::radiance_unit),
+                                    total_nee.g.numerical_value_in(render::radiance_unit),
+                                    total_nee.b.numerical_value_in(render::radiance_unit)
+                                );
+                                recorder.record_nee_contribution(nativeLightIdx, lightSourceType, nee_contrib);
                             }
                         }
                     }
                 }
             }
-            
-            recorder.record_vertex(hit.meshIdx, 0, 
-                                   bsdfType, isDelta, usedNEE);
         }
         
         // BSDF Sampling for next bounce
@@ -749,7 +777,14 @@ inline render::RadianceRGB traceMISWithDiagnostics(
         LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
         
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
-            recorder.record_light_hit(lightHit.lightIndex);
+            // Get light type for Heckbert notation
+            LightSourceType lightSourceType = LightSourceType::Unknown;
+            if (lightHit.lightIndex >= 0 && 
+                lightHit.lightIndex < static_cast<int>(scene.nativeLights.size())) {
+                lightSourceType = to_light_source_type(
+                    static_cast<int>(scene.nativeLights[lightHit.lightIndex].type));
+            }
+            recorder.record_light_hit(lightHit.lightIndex, lightSourceType);
             
             render::PdfW lightPdf = render::zero_pdf_w();
             if (sceneLights.hasLights() && lightHit.lightIndex >= 0) {
@@ -814,8 +849,9 @@ inline render::RadianceRGB traceMISWithDiagnostics(
             }
             result += throughput * emission * misWeight;
         } else {
-            // Track whether NEE was used
-            bool usedNEE = false;
+            // Record vertex first (before NEE)
+            recorder.record_vertex(hit.meshIdx, 0, 
+                                   bsdfType, isDelta, false);
             
             // Next Event Estimation with MIS
             bool isTransmissive = mat.transmission > 0.5f;
@@ -845,17 +881,27 @@ inline render::RadianceRGB traceMISWithDiagnostics(
                                 render::Dimensionless misWeight = render::mis_power_heuristic(pdfLight_typed, pdfBsdf_typed);
                                 
                                 render::ThroughputRGB bsdf_weight = render::bsdf_sample_weight(f, NdotL, pdfLight_typed);
-                                render::RadianceRGB contrib = (bsdf_weight * misWeight) * ls.emission;
-                                result += throughput * contrib;
-                                usedNEE = true;
+                                render::RadianceRGB nee_radiance = (bsdf_weight * misWeight) * ls.emission;
+                                result += throughput * nee_radiance;
+                                
+                                // Record NEE contribution as separate path
+                                int nativeLightIdx = lightIdx - sceneLights.nativeLightStartIndex;
+                                
+                                LightSourceType lightSourceType = to_light_source_type(
+                                    static_cast<int>(light.type));
+                                
+                                render::RadianceRGB total_nee = throughput * nee_radiance;
+                                render::RGB3f nee_contrib(
+                                    total_nee.r.numerical_value_in(render::radiance_unit),
+                                    total_nee.g.numerical_value_in(render::radiance_unit),
+                                    total_nee.b.numerical_value_in(render::radiance_unit)
+                                );
+                                recorder.record_nee_contribution(nativeLightIdx, lightSourceType, nee_contrib);
                             }
                         }
                     }
                 }
             }
-            
-            recorder.record_vertex(hit.meshIdx, 0, 
-                                   bsdfType, isDelta, usedNEE);
         }
         
         // BSDF Sampling for next bounce

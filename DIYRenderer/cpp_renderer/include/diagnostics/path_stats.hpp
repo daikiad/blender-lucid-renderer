@@ -135,7 +135,8 @@ struct PathGroup {
     PathStatistics stats;                // Aggregated statistics
     uint8_t     depth;                   // Path depth
     uint8_t     coarse_type;             // Coarse classification
-    uint8_t     _pad[6];                 // Padding for alignment
+    LightSourceType light_type;          // Light source type for Heckbert
+    uint8_t     _pad[5];                 // Padding for alignment
     PathVertex  vertices[MAX_GROUP_DEPTH];  // Path structure
     
     PathGroup()
@@ -143,6 +144,7 @@ struct PathGroup {
         , stats{}
         , depth(0)
         , coarse_type(0)
+        , light_type(LightSourceType::Unknown)
         , _pad{}
         , vertices{}
     {}
@@ -154,6 +156,7 @@ struct PathGroup {
         path_hash = trace.hash();
         depth = static_cast<uint8_t>(std::min(trace.depth, MAX_GROUP_DEPTH));
         coarse_type = trace.coarse_type();
+        light_type = trace.light_type;
         
         for (size_t i = 0; i < depth; ++i) {
             vertices[i] = trace.vertices[i];
@@ -187,6 +190,55 @@ struct PathGroup {
             sig += bsdf_type_short(vertices[i].bsdf_type);
         }
         return sig;
+    }
+    
+    /**
+     * Generate Heckbert notation signature
+     * Format: "LXX reflections DSE" where LXX is light type (LDD/LSD/LDE)
+     * and DSE is pinhole camera. Space-separated sections.
+     * Example: "LDD D D S DSE" = Area light → Diffuse → Diffuse → Specular → Pinhole
+     */
+    [[nodiscard]] std::string signature_heckbert() const {
+        std::string sig;
+        
+        // Light source (3 chars)
+        sig += light_source_heckbert(light_type);
+        
+        // Reflections (skip light/environment vertices at the end)
+        size_t reflection_end = depth;
+        while (reflection_end > 0 && 
+               (vertices[reflection_end - 1].bsdf_type == BsdfType::Emission ||
+                vertices[reflection_end - 1].bsdf_type == BsdfType::Environment)) {
+            --reflection_end;
+        }
+        
+        // Add space before reflections if any
+        if (reflection_end > 0) {
+            sig += ' ';
+            for (size_t i = 0; i < reflection_end; ++i) {
+                sig += bsdf_type_heckbert(vertices[i].bsdf_type);
+                if (i + 1 < reflection_end) {
+                    sig += ' ';  // Space between each reflection
+                }
+            }
+        }
+        
+        // Camera (pinhole = DSE)
+        sig += " DSE";
+        
+        return sig;
+    }
+    
+    /**
+     * Get object IDs in path for name lookup
+     */
+    [[nodiscard]] std::vector<int32_t> object_ids() const {
+        std::vector<int32_t> ids;
+        ids.reserve(depth);
+        for (size_t i = 0; i < depth; ++i) {
+            ids.push_back(vertices[i].object_id);
+        }
+        return ids;
     }
     
     /**

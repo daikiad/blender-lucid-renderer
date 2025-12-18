@@ -169,11 +169,31 @@ class RenderSession:
         # シーンをロード
         if self._renderer.load_scene_json(json_str):
             self._scene_hash = scene_hash
+            
+            # JSONからオブジェクト名を抽出して設定（診断表示用）
+            self._set_object_names_from_json(json_str)
+            
             print(f"[RenderSession #{self._session_id}] Scene loaded (hash={scene_hash[:8]}...)")
             return True
         
         print(f"[RenderSession #{self._session_id}] Failed to load scene")
         return False
+    
+    def _set_object_names_from_json(self, json_str: str) -> None:
+        """JSONからオブジェクト名を抽出してレンダラーに設定
+        
+        Args:
+            json_str: シーンの JSON 文字列
+        """
+        try:
+            import json
+            scene_data = json.loads(json_str)
+            meshes = scene_data.get('meshes', [])
+            object_names = [mesh.get('name', f'Object_{i}') for i, mesh in enumerate(meshes)]
+            self._renderer.set_object_names(object_names)
+            print(f"[RenderSession #{self._session_id}] Set {len(object_names)} object names")
+        except Exception as e:
+            print(f"[RenderSession #{self._session_id}] Failed to set object names: {e}")
     
     def load_scene_json(self, json_str: str) -> bool:
         """JSON 文字列からシーンをロード（ハッシュを自動計算）

@@ -26,7 +26,10 @@ namespace render::diagnostics {
 struct ExportedGroupInfo {
     size_t pixel_x;
     size_t pixel_y;
-    std::string signature;       // e.g., "LDG"
+    std::string signature;           // e.g., "LDG" (simple notation)
+    std::string signature_heckbert;  // e.g., "LDD D D S DSE" (Heckbert notation)
+    std::vector<int32_t> object_ids; // Object IDs for name lookup
+    std::string object_path;         // e.g., "Light → Plane → Sphere → Camera"
     uint32_t sample_count;
     float mean_luminance;
     float variance_luminance;

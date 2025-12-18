@@ -115,6 +115,116 @@ def get_variance_at_pixel(pixel_x: int, pixel_y: int, width: int, height: int) -
 
 
 # =============================================================================
+# グループ再集計ユーティリティ
+# =============================================================================
+
+def _regroup_paths(top_groups, total_mean_rgb=None):
+    """
+    パスグループを Heckbert 表記と Object Path でそれぞれ再集計します。
+    
+    Args:
+        top_groups: C++ から取得した top_groups リスト
+        total_mean_rgb: ピクセル全体の平均RGB [r, g, b]（deviation計算用）
+        
+    Returns:
+        (heckbert_groups, object_groups) の辞書タプル
+        各辞書: {key: {'key': str, 'variance': float, 'mean': float, 'deviation': float, 'count': int}}
+    """
+    import math
+    
+    heckbert_groups = {}
+    object_groups = {}
+    
+    # total_meanの輝度を計算
+    total_lum = 0.0
+    if total_mean_rgb:
+        total_lum = 0.2126 * total_mean_rgb[0] + 0.7152 * total_mean_rgb[1] + 0.0722 * total_mean_rgb[2]
+    
+    for g in top_groups:
+        # Heckbert 表記でグルーピング
+        sig_heckbert = getattr(g, 'signature_heckbert', '') or getattr(g, 'signature', 'Unknown')
+        var = getattr(g, 'variance_luminance', 0)
+        mean = getattr(g, 'mean_luminance', 0)
+        cnt = getattr(g, 'sample_count', 0)
+        
+        # RGB mean から輝度を計算
+        mean_rgb = getattr(g, 'mean_rgb', [0, 0, 0])
+        if mean_rgb:
+            group_lum = 0.2126 * mean_rgb[0] + 0.7152 * mean_rgb[1] + 0.0722 * mean_rgb[2]
+        else:
+            group_lum = mean
+        
+        # ピクセル全体の平均からの偏差（絶対値）
+        deviation = abs(group_lum - total_lum) if total_mean_rgb else 0.0
+        
+        if sig_heckbert not in heckbert_groups:
+            heckbert_groups[sig_heckbert] = {
+                'key': sig_heckbert,
+                'variance': 0.0,
+                'mean': 0.0,
+                'deviation': 0.0,
+                'count': 0
+            }
+        heckbert_groups[sig_heckbert]['variance'] += var * cnt  # weighted sum
+        heckbert_groups[sig_heckbert]['mean'] += mean * cnt
+        heckbert_groups[sig_heckbert]['deviation'] += deviation * cnt
+        heckbert_groups[sig_heckbert]['count'] += cnt
+        
+        # Object Path でグルーピング
+        object_path = getattr(g, 'object_path', '') or 'Unknown Path'
+        if object_path not in object_groups:
+            object_groups[object_path] = {
+                'key': object_path,
+                'variance': 0.0,
+                'mean': 0.0,
+                'deviation': 0.0,
+                'count': 0
+            }
+        object_groups[object_path]['variance'] += var * cnt
+        object_groups[object_path]['mean'] += mean * cnt
+        object_groups[object_path]['deviation'] += deviation * cnt
+        object_groups[object_path]['count'] += cnt
+    
+    # 加重平均に変換
+    for g in heckbert_groups.values():
+        if g['count'] > 0:
+            g['variance'] /= g['count']
+            g['mean'] /= g['count']
+            g['deviation'] /= g['count']
+    
+    for g in object_groups.values():
+        if g['count'] > 0:
+            g['variance'] /= g['count']
+            g['mean'] /= g['count']
+            g['deviation'] /= g['count']
+    
+    return heckbert_groups, object_groups
+
+
+def _fmt_val(val: float) -> str:
+    """
+    値の大きさに応じて適切なフォーマットで表示します。
+    
+    - 0.0001 以上: 通常表記 (0.0012)
+    - それ以下: 科学的表記 (1.2e-5)
+    - 非常に小さい場合: <1e-9
+    """
+    if val == 0:
+        return "0"
+    
+    abs_val = abs(val)
+    
+    if abs_val >= 0.01:
+        return f"{val:.4f}"
+    elif abs_val >= 0.0001:
+        return f"{val:.6f}"
+    elif abs_val >= 1e-9:
+        return f"{val:.2e}"
+    else:
+        return "<1e-9"
+
+
+# =============================================================================
 # 描画ユーティリティ
 # =============================================================================
 
@@ -234,25 +344,55 @@ def _draw_inspector_callback(context_dummy):
         pixel_info = state['pixel_info']
         if pixel_info:
             lines.append(f"Samples: {pixel_info.get('sample_count', 'N/A')}")
-            lines.append(f"Variance: {pixel_info.get('variance', 0):.6f}")
+            lines.append(f"Variance: {_fmt_val(pixel_info.get('variance', 0))}")
             lines.append(f"Groups: {pixel_info.get('group_count', 0)}")
             
             mean_rgb = pixel_info.get('mean_rgb', [0, 0, 0])
             if mean_rgb:
-                lines.append(f"Mean RGB: ({mean_rgb[0]:.3f}, {mean_rgb[1]:.3f}, {mean_rgb[2]:.3f})")
+                lines.append(f"RGB: ({_fmt_val(mean_rgb[0])}, {_fmt_val(mean_rgb[1])}, {_fmt_val(mean_rgb[2])})")
             
-            # トップグループ情報
+            # トップグループ情報を表示
             top_groups = pixel_info.get('top_groups', [])
             if top_groups:
+                # グループを再集計（mean_rgbを渡してdeviation計算）
+                heckbert_groups, object_groups = _regroup_paths(top_groups, mean_rgb)
+                
+                # 1. Heckbert × Deviation (meanからの距離＝ノイズ寄与)
                 lines.append("")
-                lines.append("Top Path Groups:")
-                for i, g in enumerate(top_groups[:3]):
-                    sig = getattr(g, 'signature', 'N/A')
-                    var = getattr(g, 'variance_luminance', 0)
-                    cnt = getattr(g, 'sample_count', 0)
-                    lines.append(f"  {i+1}. {sig}: var={var:.4f} n={cnt}")
+                lines.append("━━ Heckbert × Deviation ━━")
+                sorted_heck_dev = sorted(heckbert_groups.values(), 
+                                         key=lambda x: x['deviation'], reverse=True)
+                for i, g in enumerate(sorted_heck_dev[:5]):
+                    lines.append(f"  {g['key']}: d={_fmt_val(g['deviation'])} n={g['count']}")
+                
+                # 2. Heckbert × Mean (明るさ寄与)
+                lines.append("")
+                lines.append("━━ Heckbert × Mean ━━")
+                sorted_heck_mean = sorted(heckbert_groups.values(), 
+                                          key=lambda x: x['mean'], reverse=True)
+                for i, g in enumerate(sorted_heck_mean[:5]):
+                    lines.append(f"  {g['key']}: m={_fmt_val(g['mean'])} n={g['count']}")
+                
+                # 3. Object Path × Deviation
+                lines.append("")
+                lines.append("━━ Object × Deviation ━━")
+                sorted_obj_dev = sorted(object_groups.values(), 
+                                        key=lambda x: x['deviation'], reverse=True)
+                for i, g in enumerate(sorted_obj_dev[:5]):
+                    lines.append(f"  {g['key']}")
+                    lines.append(f"    d={_fmt_val(g['deviation'])} n={g['count']}")
+                
+                # 4. Object Path × Mean
+                lines.append("")
+                lines.append("━━ Object × Mean ━━")
+                sorted_obj_mean = sorted(object_groups.values(), 
+                                         key=lambda x: x['mean'], reverse=True)
+                for i, g in enumerate(sorted_obj_mean[:5]):
+                    lines.append(f"  {g['key']}")
+                    lines.append(f"    m={_fmt_val(g['mean'])} n={g['count']}")
+                    
         elif state['variance'] is not None:
-            lines.append(f"Avg Variance: {state['variance']:.6f}")
+            lines.append(f"Avg Variance: {_fmt_val(state['variance'])}")
         else:
             lines.append("(No pixel diagnostic data)")
         
@@ -268,9 +408,22 @@ def _draw_inspector_callback(context_dummy):
         except:
             pass
     
-    # マウス位置の少し右上に描画
-    draw_x = mouse_x + 20
-    draw_y = mouse_y + 100
+    # Image Editor の左上に固定表示
+    # 現在のリージョンの高さを取得
+    region_height = 600  # デフォルト値
+    try:
+        for area in bpy.context.screen.areas:
+            if area.type == 'IMAGE_EDITOR':
+                for region in area.regions:
+                    if region.type == 'WINDOW':
+                        region_height = region.height
+                        break
+                break
+    except:
+        pass
+    
+    draw_x = 20  # 左端から20px
+    draw_y = region_height - 20  # 上端から20px下
     
     draw_text_box(draw_x, draw_y, lines)
 
@@ -420,7 +573,8 @@ class DIY_OT_pixel_inspector(bpy.types.Operator):
         
         # view座標（正規化UV: 0〜1）をピクセル座標に変換
         pixel_x = int(view_x * width)
-        pixel_y = int(view_y * height)
+        # Y座標を反転（Blenderの画像座標系はY=0が下、レンダラーはY=0が上）
+        pixel_y = height - 1 - int(view_y * height)
         
         # デバッグ情報を保存
         _inspector_state['debug_info'] = f"UV: ({view_x:.3f}, {view_y:.3f}), Size: {width}x{height}"

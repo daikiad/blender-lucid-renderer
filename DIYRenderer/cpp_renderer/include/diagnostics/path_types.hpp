@@ -65,6 +65,69 @@ constexpr char bsdf_type_short(BsdfType type) {
     return '?';
 }
 
+/**
+ * Get Heckbert notation character for BSDF type
+ * D=Diffuse, S=Specular (Glossy/Mirror/Glass)
+ */
+constexpr char bsdf_type_heckbert(BsdfType type) {
+    switch (type) {
+        case BsdfType::Diffuse:     return 'D';
+        case BsdfType::Glossy:      return 'S';  // Specular
+        case BsdfType::Mirror:      return 'S';  // Specular
+        case BsdfType::Glass:       return 'S';  // Specular (transmission)
+        case BsdfType::Emission:    return 'E';  // Light end
+        case BsdfType::Environment: return 'E';  // Light end
+    }
+    return '?';
+}
+
+// ============================================================================
+// LightSourceType - Light source classification for Heckbert notation
+// ============================================================================
+
+enum class LightSourceType : uint8_t {
+    Unknown     = 0,  // Unclassified
+    Point       = 1,  // Point light (LSD)
+    Area        = 2,  // Area light (LDD)  
+    Directional = 3,  // Directional light (LSD)
+    Spot        = 4,  // Spot light (LSD)
+    Environment = 5,  // Environment map (LDE)
+    Emissive    = 6,  // Emissive mesh (LDD, but use object name)
+};
+
+/**
+ * Get 3-character Heckbert notation for light source
+ * First char: L (light)
+ * Second char: positional property (D=diffuse/area, S=specular/point)
+ * Third char: directional property (D=diffuse, S=specular/directional, E=environment)
+ */
+constexpr const char* light_source_heckbert(LightSourceType type) {
+    switch (type) {
+        case LightSourceType::Point:       return "LSD";  // Point light
+        case LightSourceType::Area:        return "LDD";  // Area light
+        case LightSourceType::Directional: return "LSD";  // Directional
+        case LightSourceType::Spot:        return "LSD";  // Spot light
+        case LightSourceType::Environment: return "LDE";  // Environment
+        case LightSourceType::Unknown:     return "L??";  // Unknown
+    }
+    return "L??";
+}
+
+/**
+ * Convert integer light type to LightSourceType
+ * Compatible with LightType enum values (0=EMISSIVE_MESH, 1=POINT, 2=SUN, 3=SPOT, 4=AREA)
+ */
+constexpr LightSourceType to_light_source_type(int light_type_enum) {
+    switch (light_type_enum) {
+        case 0: return LightSourceType::Area;        // EMISSIVE_MESH → Area (diffuse)
+        case 1: return LightSourceType::Point;       // POINT
+        case 2: return LightSourceType::Directional; // SUN
+        case 3: return LightSourceType::Spot;        // SPOT
+        case 4: return LightSourceType::Area;        // AREA
+        default: return LightSourceType::Unknown;
+    }
+}
+
 // ============================================================================
 // PathVertex - Single interaction point (8 bytes)
 // ============================================================================
@@ -144,12 +207,14 @@ struct PathTrace {
     PathVertex vertices[MAX_PATH_DEPTH];  // Vertex array
     size_t     depth;                     // Number of vertices (0 = empty)
     RGB3f      contribution;              // Final radiance contribution
+    LightSourceType light_type;           // Light source type for Heckbert notation
     
     // Default constructor
     PathTrace()
         : vertices{}
         , depth(0)
         , contribution{}
+        , light_type(LightSourceType::Unknown)
     {}
     
     /**
@@ -158,6 +223,7 @@ struct PathTrace {
     void clear() {
         depth = 0;
         contribution = RGB3f{};
+        light_type = LightSourceType::Unknown;
     }
     
     /**

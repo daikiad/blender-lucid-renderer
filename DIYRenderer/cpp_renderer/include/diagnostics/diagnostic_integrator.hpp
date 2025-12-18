@@ -71,18 +71,23 @@ template <typename MaterialT>
  *   recorder.begin_path();
  *   // During tracing:
  *   recorder.record_vertex(obj_id, mat_id, type, is_delta, is_nee);
+ *   // For NEE:
+ *   recorder.record_nee_contribution(light_id, light_type, contribution);
  *   // At path end:
  *   PathTrace trace = recorder.end_path(contribution);
+ *   // Get NEE paths:
+ *   const auto& nee_paths = recorder.get_nee_paths();
  */
 class PathDiagnosticRecorder {
 public:
-    PathDiagnosticRecorder() : current_path_{} {}
+    PathDiagnosticRecorder() : current_path_{}, nee_paths_{} {}
     
     /**
      * Start recording a new path
      */
     void begin_path() {
         current_path_.clear();
+        nee_paths_.clear();
     }
     
     /**
@@ -101,33 +106,46 @@ public:
     
     /**
      * Record environment map hit (no surface)
+     * Sets light type to Environment for Heckbert notation
      */
     void record_environment_hit() {
         if (current_path_.depth >= MAX_PATH_DEPTH) return;
         
         PathVertex v{-1, -1, BsdfType::Environment, 0};
         current_path_.vertices[current_path_.depth++] = v;
+        
+        // Environment is also a light source
+        current_path_.light_type = LightSourceType::Environment;
     }
     
     /**
-     * Record light hit
+     * Record light hit with light source type
+     * @param light_id Light index
+     * @param light_source_type Type for Heckbert notation (Area, Point, etc.)
      */
-    void record_light_hit(int32_t light_id) {
+    void record_light_hit(int32_t light_id, LightSourceType light_source_type = LightSourceType::Unknown) {
         if (current_path_.depth >= MAX_PATH_DEPTH) return;
         
         // Use negative IDs for lights to distinguish from mesh objects
         PathVertex v{-(light_id + 2), -1, BsdfType::Emission, 0};
         current_path_.vertices[current_path_.depth++] = v;
+        
+        // Record light source type for Heckbert notation
+        current_path_.light_type = light_source_type;
     }
     
     /**
      * Record emissive mesh hit
+     * Emissive meshes use the Emissive light type to show object name
      */
     void record_emissive_hit(int32_t object_id, int16_t material_id) {
         if (current_path_.depth >= MAX_PATH_DEPTH) return;
         
         PathVertex v{object_id, material_id, BsdfType::Emission, 0};
         current_path_.vertices[current_path_.depth++] = v;
+        
+        // Use Emissive type to distinguish from Blender native lights
+        current_path_.light_type = LightSourceType::Emissive;
     }
     
     /**
@@ -145,8 +163,57 @@ public:
         return current_path_;
     }
     
+    /**
+     * Create a branched path for NEE (Next Event Estimation)
+     * Returns a copy of current path with light hit appended
+     * Does not modify the current path being traced
+     * 
+     * @param light_id Index into scene.nativeLights
+     * @param light_source_type Type for Heckbert notation
+     * @param contribution NEE contribution at this vertex
+     */
+    [[nodiscard]] PathTrace create_nee_path(int32_t light_id, 
+                                            LightSourceType light_source_type,
+                                            const RGB3f& contribution) {
+        PathTrace nee_path = current_path_;  // Copy current path
+        
+        if (nee_path.depth < MAX_PATH_DEPTH) {
+            // Add light vertex
+            PathVertex v{-(light_id + 2), -1, BsdfType::Emission, 0};
+            nee_path.vertices[nee_path.depth++] = v;
+        }
+        
+        nee_path.light_type = light_source_type;
+        nee_path.contribution = contribution;
+        
+        return nee_path;
+    }
+    
+    /**
+     * Record NEE contribution as a separate path
+     * The NEE path is stored and can be retrieved later
+     * 
+     * @param light_id Index into scene.nativeLights  
+     * @param light_source_type Type for Heckbert notation
+     * @param contribution NEE contribution (throughput * light emission * BSDF weight)
+     */
+    void record_nee_contribution(int32_t light_id,
+                                 LightSourceType light_source_type,
+                                 const RGB3f& contribution) {
+        PathTrace nee_path = create_nee_path(light_id, light_source_type, contribution);
+        nee_paths_.push_back(nee_path);
+    }
+    
+    /**
+     * Get all recorded NEE paths
+     */
+    [[nodiscard]] const std::vector<PathTrace>& get_nee_paths() const {
+        return nee_paths_;
+    }
+    
 private:
     PathTrace current_path_;
+    std::vector<PathTrace> nee_paths_;
 };
 
 // ============================================================================

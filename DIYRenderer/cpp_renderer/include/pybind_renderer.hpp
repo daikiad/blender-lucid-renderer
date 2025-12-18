@@ -296,14 +296,27 @@ public:
                                 
                                 radiance = radiance + sample_radiance;
                                 
-                                // Record path to film
+                                // Record main path to film (only if it reached a light source)
+                                // Paths that terminated without hitting light (Russian Roulette, max depth)
+                                // should not be recorded since their contribution is 0.
+                                // NEE paths are recorded separately.
                                 render::RGB3f contrib(
                                     sample_radiance.r.numerical_value_in(render::radiance_unit),
                                     sample_radiance.g.numerical_value_in(render::radiance_unit),
                                     sample_radiance.b.numerical_value_in(render::radiance_unit)
                                 );
                                 render::diagnostics::PathTrace trace = recorder.end_path(contrib);
-                                diagnostic_film_->record_path(px, py, trace);
+                                
+                                // Only record if path reached a light source
+                                // (light_type != Unknown means it hit environment, emissive, or native light)
+                                if (trace.light_type != render::diagnostics::LightSourceType::Unknown) {
+                                    diagnostic_film_->record_path(px, py, trace);
+                                }
+                                
+                                // Record NEE paths (direct light sampling contributions)
+                                for (const auto& nee_path : recorder.get_nee_paths()) {
+                                    diagnostic_film_->record_path(px, py, nee_path);
+                                }
                             } else {
                                 if (algorithm_ == "simple") {
                                     radiance = radiance + traceSimple(scene_, sample_ray, max_depth);
@@ -550,16 +563,36 @@ public:
         std::vector<render::diagnostics::ExportedGroupInfo> top_groups;
     };
     
-    PixelDiagnosticInfo get_pixel_diagnostic(size_t x, size_t y) const {
+    /**
+     * Pixel diagnostic info with top groups sorted by variance or mean
+     */
+    enum class TopGroupSortBy {
+        Variance,  // Sort by variance (high variance = noisy)
+        Mean       // Sort by mean contribution (high mean = bright)
+    };
+    
+    PixelDiagnosticInfo get_pixel_diagnostic(size_t x, size_t y, 
+                                              TopGroupSortBy sort_by = TopGroupSortBy::Variance) const {
         PixelDiagnosticInfo info;
         
         if (!diagnostic_film_) {
             return info;
         }
         
-        const auto* pixel_data = diagnostic_film_->pixel_data(x, y);
+        // Note: We need non-const access to sort
+        // DiagnosticFilm::pixel_data returns const pointer, but we need to sort
+        // Using const_cast is safe here because we're just sorting the internal array
+        auto* pixel_data = const_cast<render::diagnostics::DiagnosticFilm::PixelData*>(
+            diagnostic_film_->pixel_data(x, y));
         if (!pixel_data) {
             return info;
+        }
+        
+        // Sort groups by requested criteria
+        if (sort_by == TopGroupSortBy::Mean) {
+            pixel_data->sort_by_mean();
+        } else {
+            pixel_data->sort_by_variance();
         }
         
         info.valid = true;
@@ -569,10 +602,12 @@ public:
         info.outlier_count = pixel_data->outlier_count();
         
         auto mean = pixel_data->total_mean();
-        info.mean_rgb = {mean.r, mean.g, mean.b};
+        info.mean_rgb[0] = mean.r;
+        info.mean_rgb[1] = mean.g;
+        info.mean_rgb[2] = mean.b;
         
-        // トップグループの情報を変換
-        for (size_t i = 0; i < pixel_data->group_count() && i < 5; ++i) {
+        // トップグループの情報を変換（全グループを取得、最大16）
+        for (size_t i = 0; i < pixel_data->group_count(); ++i) {
             const auto* group = pixel_data->top_group(i);
             if (!group) continue;
             
@@ -580,14 +615,23 @@ public:
             ginfo.pixel_x = x;
             ginfo.pixel_y = y;
             ginfo.signature = group->signature();
+            ginfo.signature_heckbert = group->signature_heckbert();
+            ginfo.object_ids = group->object_ids();
             ginfo.sample_count = group->stats.count;
             ginfo.mean_luminance = group->mean_contribution();
             ginfo.variance_luminance = group->total_variance();
-            ginfo.mean_rgb = {group->stats.mean.r, group->stats.mean.g, group->stats.mean.b};
-            ginfo.variance_rgb = {group->stats.variance.r, group->stats.variance.g, group->stats.variance.b};
+            ginfo.mean_rgb[0] = group->stats.mean.r;
+            ginfo.mean_rgb[1] = group->stats.mean.g;
+            ginfo.mean_rgb[2] = group->stats.mean.b;
+            ginfo.variance_rgb[0] = group->stats.variance.r;
+            ginfo.variance_rgb[1] = group->stats.variance.g;
+            ginfo.variance_rgb[2] = group->stats.variance.b;
             ginfo.depth = group->depth;
             ginfo.coarse_type = group->coarse_type;
             ginfo.coarse_type_name = render::diagnostics::coarse_type_name(group->coarse_type);
+            
+            // オブジェクト名パスを生成（light_typeを含む）
+            ginfo.object_path = object_path_string(ginfo.object_ids, group->light_type);
             
             info.top_groups.push_back(ginfo);
         }
@@ -607,6 +651,131 @@ private:
     bool diagnostics_enabled_ = false;
     render::diagnostics::PathRecordingConfig diagnostic_config_;
     std::unique_ptr<render::diagnostics::DiagnosticFilm> diagnostic_film_;
+    
+    // オブジェクト名マッピング（診断表示用）
+    std::vector<std::string> object_names_;
+    
+public:
+    /**
+     * オブジェクト名を設定（load_scene後に呼び出し）
+     * @param names オブジェクト名のリスト（メッシュインデックス順）
+     */
+    void set_object_names(const std::vector<std::string>& names) {
+        object_names_ = names;
+    }
+    
+    /**
+     * オブジェクトIDから名前を取得
+     * @param object_id オブジェクトID
+     * @return オブジェクト名（見つからない場合は "Object_N"）
+     */
+    std::string get_object_name(int32_t object_id) const {
+        if (object_id < 0) {
+            return "Environment";
+        }
+        if (static_cast<size_t>(object_id) < object_names_.size()) {
+            return object_names_[object_id];
+        }
+        return "Object_" + std::to_string(object_id);
+    }
+    
+    /**
+     * LightSourceTypeから表示用ライト名を取得（Blenderネイティブライト用）
+     */
+    static std::string light_source_name(render::diagnostics::LightSourceType type) {
+        switch (type) {
+            case render::diagnostics::LightSourceType::Point:
+                return "PointLight";
+            case render::diagnostics::LightSourceType::Area:
+                return "AreaLight";
+            case render::diagnostics::LightSourceType::Directional:
+                return "SunLight";
+            case render::diagnostics::LightSourceType::Spot:
+                return "SpotLight";
+            default:
+                return "";  // Environment/Unknown は object_ids から判定
+        }
+    }
+    
+    /**
+     * オブジェクトIDリストから名前パスを生成
+     * object_idsはカメラ→ライトの順で記録されているので、
+     * Heckbert表記（ライト→カメラ）に合わせて逆順で表示
+     * 
+     * 光源の判定：
+     * - light_type が Environment または object_ids の最後が -1 → Environment
+     * - light_type が Point/Area/Sun/Spot → Blenderネイティブライト名を使用
+     * - light_type が Emissive → Emissive mesh（オブジェクト名を使用）
+     * - light_type が Unknown → 通常のオブジェクト（光源判定せず）
+     * 
+     * 例: "Environment → Plane → Camera"
+     *     "AreaLight → Plane → Camera"
+     *     "EmissiveSphere → Plane → Camera" (Emissive mesh)
+     */
+    std::string object_path_string(const std::vector<int32_t>& object_ids,
+                                    render::diagnostics::LightSourceType light_type = 
+                                        render::diagnostics::LightSourceType::Unknown) const {
+        if (object_ids.empty()) {
+            return "Camera";
+        }
+        
+        std::string path;
+        size_t start_idx = object_ids.size();
+        int32_t last_obj_id = object_ids[start_idx - 1];
+        
+        // 光源の判定（light_typeを優先）
+        if (light_type == render::diagnostics::LightSourceType::Environment) {
+            // Environment light
+            path = "Environment";
+            // Environment の object_id (-1) をスキップ
+            if (last_obj_id == -1) {
+                start_idx--;
+            }
+        } else if (light_type == render::diagnostics::LightSourceType::Emissive) {
+            // Emissive mesh - オブジェクト名を使用
+            path = get_object_name(last_obj_id);
+            start_idx--;
+        } else if (light_type == render::diagnostics::LightSourceType::Point ||
+                   light_type == render::diagnostics::LightSourceType::Area ||
+                   light_type == render::diagnostics::LightSourceType::Directional ||
+                   light_type == render::diagnostics::LightSourceType::Spot) {
+            // Blender native light (Point, Area, Sun, Spot)
+            path = light_source_name(light_type);
+            // ライトのobject_idは負の値 (<= -2) なのでスキップ
+            if (last_obj_id <= -2) {
+                start_idx--;
+            }
+        } else {
+            // Unknown light type - 光源に到達していないパス
+            // (Russian Rouletteやmax depthでterminate)
+            // または light_type が正しく設定されていないケース
+            if (last_obj_id <= -2) {
+                // Native light ID but light_type not set - should not happen
+                path = "Light(?)";
+                start_idx--;
+            } else if (last_obj_id == -1) {
+                // Environment ID but light_type not set
+                path = "Environment(?)";
+                start_idx--;
+            } else {
+                // 通常オブジェクトで終了 = 光源に未到達
+                // このパスは表示しない方がいいが、とりあえず "→ (terminated)" として表示
+                path = "(terminated)";
+                // start_idx は変更しない（最後のオブジェクトも表示する）
+            }
+        }
+        
+        // 残りのオブジェクトを追加
+        for (size_t i = start_idx; i > 0; --i) {
+            path += " → ";
+            path += get_object_name(object_ids[i - 1]);
+        }
+        
+        path += " → Camera";
+        return path;
+    }
+
+private:
     
     // JSON からシーンを読み込むヘルパー（server.cpp と共通化）
     Scene loadSceneFromJsonString(const std::string& json_str) {

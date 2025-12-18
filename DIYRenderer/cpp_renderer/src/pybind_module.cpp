@@ -69,6 +69,22 @@ PYBIND11_MODULE(diyrenderer, m) {
              py::arg("algorithm"),
              "Set path tracing algorithm: 'simple', 'nee', or 'mis'")
         
+        .def("set_object_names", &PyRenderer::set_object_names,
+             py::arg("names"),
+             "Set object names for diagnostic display (list of strings, mesh index order)")
+        
+        .def("get_object_name", &PyRenderer::get_object_name,
+             py::arg("object_id"),
+             "Get object name by ID, returns 'Object_N' if not found")
+        
+        // object_path_stringはPythonから直接呼ばれることはないので、
+        // シンプルなラムダでラップしてデフォルト引数問題を回避
+        .def("object_path_string", [](const PyRenderer& r, const std::vector<int32_t>& ids) {
+                return r.object_path_string(ids);
+             },
+             py::arg("object_ids"),
+             "Convert object ID list to path string like 'Light → Plane → Camera'")
+        
         // =====================================================================
         // レンダリング（GIL 解放）
         // =====================================================================
@@ -174,9 +190,17 @@ PYBIND11_MODULE(diyrenderer, m) {
              py::arg("count") = 10,
              "Get top N path groups by variance")
         
-        .def("get_pixel_diagnostic", &PyRenderer::get_pixel_diagnostic,
+        .def("get_pixel_diagnostic", 
+             [](const PyRenderer& self, size_t x, size_t y, const std::string& sort_by) {
+                 PyRenderer::TopGroupSortBy sort_mode = PyRenderer::TopGroupSortBy::Variance;
+                 if (sort_by == "mean") {
+                     sort_mode = PyRenderer::TopGroupSortBy::Mean;
+                 }
+                 return self.get_pixel_diagnostic(x, y, sort_mode);
+             },
              py::arg("x"), py::arg("y"),
-             "Get diagnostic data for a specific pixel")
+             py::arg("sort_by") = "variance",
+             "Get diagnostic data for a specific pixel, sorted by 'variance' (default) or 'mean'")
         
         // =====================================================================
         // Python 的な機能
@@ -236,6 +260,9 @@ PYBIND11_MODULE(diyrenderer, m) {
         .def_readonly("pixel_x", &ExportedGroupInfo::pixel_x)
         .def_readonly("pixel_y", &ExportedGroupInfo::pixel_y)
         .def_readonly("signature", &ExportedGroupInfo::signature)
+        .def_readonly("signature_heckbert", &ExportedGroupInfo::signature_heckbert)
+        .def_readonly("object_ids", &ExportedGroupInfo::object_ids)
+        .def_readonly("object_path", &ExportedGroupInfo::object_path)
         .def_readonly("sample_count", &ExportedGroupInfo::sample_count)
         .def_readonly("mean_luminance", &ExportedGroupInfo::mean_luminance)
         .def_readonly("variance_luminance", &ExportedGroupInfo::variance_luminance)
@@ -246,9 +273,17 @@ PYBIND11_MODULE(diyrenderer, m) {
         .def_readonly("coarse_type_name", &ExportedGroupInfo::coarse_type_name)
         .def("__repr__", [](const ExportedGroupInfo& g) {
             return "<ExportedGroupInfo signature='" + g.signature + 
-                   "' mean=" + std::to_string(g.mean_luminance) +
+                   "' heckbert='" + g.signature_heckbert + "'" +
+                   " path='" + g.object_path + "'" +
+                   " mean=" + std::to_string(g.mean_luminance) +
                    " var=" + std::to_string(g.variance_luminance) + ">";
         });
+    
+    // TopGroupSortBy enum for pixel diagnostics
+    py::enum_<PyRenderer::TopGroupSortBy>(m, "TopGroupSortBy")
+        .value("Variance", PyRenderer::TopGroupSortBy::Variance, "Sort by variance (noisy paths first)")
+        .value("Mean", PyRenderer::TopGroupSortBy::Mean, "Sort by mean contribution (bright paths first)")
+        .export_values();
     
     // PixelDiagnosticInfo - Per-pixel diagnostic data
     py::class_<PyRenderer::PixelDiagnosticInfo>(m, "PixelDiagnosticInfo")
@@ -353,6 +388,17 @@ PYBIND11_MODULE(diyrenderer, m) {
         .value("Environment", BsdfType::Environment)
         .export_values();
     
+    // LightSourceType enum for Heckbert notation
+    py::enum_<LightSourceType>(m, "LightSourceType")
+        .value("Unknown", LightSourceType::Unknown)
+        .value("Point", LightSourceType::Point)
+        .value("Area", LightSourceType::Area)
+        .value("Directional", LightSourceType::Directional)
+        .value("Spot", LightSourceType::Spot)
+        .value("Environment", LightSourceType::Environment)
+        .value("Emissive", LightSourceType::Emissive)
+        .export_values();
+    
     // PathTrace - Raw path data structure
     py::class_<PathTrace>(m, "PathTrace")
         .def(py::init<>(), "Create empty path trace")
@@ -374,7 +420,8 @@ PYBIND11_MODULE(diyrenderer, m) {
             "Record environment map hit")
         .def("record_light_hit", &PathDiagnosticRecorder::record_light_hit,
             py::arg("light_id"),
-            "Record light hit")
+            py::arg("light_source_type") = LightSourceType::Unknown,
+            "Record light hit with optional light source type for Heckbert notation")
         .def("record_emissive_hit", &PathDiagnosticRecorder::record_emissive_hit,
             py::arg("object_id"), py::arg("material_id"),
             "Record emissive mesh hit")
