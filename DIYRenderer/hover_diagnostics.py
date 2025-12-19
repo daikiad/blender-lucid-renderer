@@ -445,12 +445,14 @@ def _draw_inspector_callback(context_dummy):
     # Image Editor の左上に固定表示
     # 現在のリージョンの高さを取得
     region_height = 600  # デフォルト値
+    region_obj = None
     try:
         for area in bpy.context.screen.areas:
             if area.type == 'IMAGE_EDITOR':
                 for region in area.regions:
                     if region.type == 'WINDOW':
                         region_height = region.height
+                        region_obj = region
                         break
                 break
     except:
@@ -460,6 +462,140 @@ def _draw_inspector_callback(context_dummy):
     draw_y = region_height - 20  # 上端から20px下
     
     draw_text_box(draw_x, draw_y, lines)
+    
+    # 2Dパス描画（ロック中かつ選択がある場合）
+    if state['locked'] and state.get('selected_path_indices'):
+        _draw_paths_2d(region_obj)
+
+
+def _draw_paths_2d(region):
+    """Image Editor上で2Dパスを描画"""
+    import colorsys
+    from bpy_extras.object_utils import world_to_camera_view
+    
+    state = _inspector_state
+    paths_data = state.get('paths_data', [])
+    selected = state.get('selected_path_indices', set())
+    
+    if not paths_data or not selected or not region:
+        return
+    
+    scene = bpy.context.scene
+    camera = scene.camera
+    if not camera:
+        return
+    
+    # 画像サイズを取得
+    try:
+        space = None
+        for area in bpy.context.screen.areas:
+            if area.type == 'IMAGE_EDITOR':
+                space = area.spaces.active
+                break
+        
+        if not space or not space.image:
+            return
+        
+        image = space.image
+        img_width, img_height = image.size
+        
+        if img_width == 0 or img_height == 0:
+            if image.name == 'Render Result':
+                render = scene.render
+                img_width = int(render.resolution_x * render.resolution_percentage / 100)
+                img_height = int(render.resolution_y * render.resolution_percentage / 100)
+            else:
+                return
+    except:
+        return
+    
+    gpu.state.blend_set('ALPHA')
+    gpu.state.line_width_set(2.0)
+    
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    
+    from mathutils import Vector
+    
+    for i, path_positions in enumerate(paths_data):
+        # 選択されたパスのみ描画
+        if i not in selected:
+            continue
+        
+        if len(path_positions) < 2:
+            continue
+        
+        # ワールド座標を画像座標に変換
+        coords_2d = []
+        for pos in path_positions:
+            try:
+                # world_to_camera_view: (0,0) = 左下, (1,1) = 右上
+                co = world_to_camera_view(scene, camera, Vector(pos))
+                
+                # カメラの後ろにある点はスキップ
+                if co.z <= 0:
+                    coords_2d.append(None)
+                    continue
+                
+                # 画像座標に変換
+                img_x = co.x * img_width
+                img_y = co.y * img_height
+                
+                # region.view2d でリージョン座標に変換
+                reg_x, reg_y = region.view2d.view_to_region(img_x / img_width, img_y / img_height, clip=False)
+                coords_2d.append((reg_x, reg_y))
+            except:
+                coords_2d.append(None)
+        
+        # 有効な座標のみで線分を描画
+        # パスインデックスに基づいて色を生成（虹色）
+        hue = (i / max(len(paths_data), 1)) * 0.8
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.9, 1.0)
+        color = (r, g, b, 0.9)
+        
+        # 連続した有効座標をセグメントとして描画
+        segments = []
+        current_segment = []
+        for coord in coords_2d:
+            if coord is not None:
+                current_segment.append(coord)
+            else:
+                if len(current_segment) >= 2:
+                    segments.append(current_segment)
+                current_segment = []
+        if len(current_segment) >= 2:
+            segments.append(current_segment)
+        
+        for segment in segments:
+            batch = batch_for_shader(shader, 'LINE_STRIP', {"pos": segment})
+            shader.bind()
+            shader.uniform_float("color", color)
+            batch.draw(shader)
+        
+        # バウンス点にマーカーを描画
+        for j, coord in enumerate(coords_2d):
+            if coord is not None and j > 0:  # カメラ位置はスキップ
+                _draw_bounce_marker_2d(shader, coord, color)
+    
+    gpu.state.line_width_set(1.0)
+    gpu.state.blend_set('NONE')
+
+
+def _draw_bounce_marker_2d(shader, position: Tuple[float, float], color: Tuple[float, float, float, float]):
+    """2Dでバウンス点にマーカーを描画"""
+    size = 4
+    x, y = position
+    
+    # 小さな十字
+    lines = [
+        [(x - size, y), (x + size, y)],
+        [(x, y - size), (x, y + size)],
+    ]
+    
+    for line in lines:
+        batch = batch_for_shader(shader, 'LINES', {"pos": line})
+        shader.bind()
+        shader.uniform_float("color", color)
+        batch.draw(shader)
 
 
 def _draw_paths_3d_callback(context_dummy):
