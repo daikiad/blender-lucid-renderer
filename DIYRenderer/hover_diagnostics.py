@@ -1069,10 +1069,8 @@ class DIY_OT_toggle_path_selection(bpy.types.Operator):
         
         _inspector_state['selected_path_indices'] = selected
         
-        # 再描画
-        for area in context.screen.areas:
-            if area.type in {'VIEW_3D', 'IMAGE_EDITOR'}:
-                area.tag_redraw()
+        # 全ウィンドウの関連エリアを再描画
+        _redraw_all_viewports()
         
         return {'FINISHED'}
 
@@ -1089,10 +1087,8 @@ class DIY_OT_select_all_paths(bpy.types.Operator):
         paths_count = len(_inspector_state.get('paths_data', []))
         _inspector_state['selected_path_indices'] = set(range(paths_count))
         
-        # 再描画
-        for area in context.screen.areas:
-            if area.type in {'VIEW_3D', 'IMAGE_EDITOR'}:
-                area.tag_redraw()
+        # 全ウィンドウの関連エリアを再描画
+        _redraw_all_viewports()
         
         return {'FINISHED'}
 
@@ -1108,12 +1104,18 @@ class DIY_OT_deselect_all_paths(bpy.types.Operator):
         global _inspector_state
         _inspector_state['selected_path_indices'] = set()
         
-        # 再描画
-        for area in context.screen.areas:
-            if area.type in {'VIEW_3D', 'IMAGE_EDITOR'}:
-                area.tag_redraw()
+        # 全ウィンドウの関連エリアを再描画
+        _redraw_all_viewports()
         
         return {'FINISHED'}
+
+
+def _redraw_all_viewports():
+    """全ウィンドウの3D ViewportとImage Editorを再描画"""
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type in {'VIEW_3D', 'IMAGE_EDITOR'}:
+                area.tag_redraw()
 
 
 # =============================================================================
