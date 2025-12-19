@@ -255,8 +255,8 @@ TEST_F(PyPathRecordingConfigTest, FormatMemory) {
     PathRecordingConfig config = PathRecordingConfig::standard();
     size_t mem = config.estimate_memory_bytes(1920, 1080);
     
-    // Memory should be reasonable (< 2GB for 1080p with standard preset)
-    EXPECT_LT(mem, 2UL * 1024 * 1024 * 1024);
+    // Memory should be reasonable (< 10GB for 1080p with standard preset, includes geometry)
+    EXPECT_LT(mem, 10UL * 1024 * 1024 * 1024);
     EXPECT_GT(mem, 0u);
 }
 

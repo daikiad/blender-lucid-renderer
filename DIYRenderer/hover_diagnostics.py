@@ -10,14 +10,19 @@ Modal Operator とカスタム描画ハンドラを使用して実装されて�
 2. Image Editor で DIY > Pixel Inspector を開く
 3. "Start Inspection" ボタンをクリック
 4. マウスをレンダリング結果上で動かすとピクセル情報が表示される
-5. ESCキーまたは右クリックで終了
+5. クリックでピクセルをロック/アンロック（パス可視化に使用）
+6. ESCキーまたは右クリックで終了
+
+パス可視化機能:
+- ピクセルをクリックでロックすると、そのピクセルのパスが3D Viewportに表示される
+- Ctrl+クリックで強制ロック解除
 """
 
 import bpy
 import blf
 import gpu
 from gpu_extras.batch import batch_for_shader
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 
 
 # =============================================================================
@@ -315,6 +320,7 @@ def draw_text_box(x: float, y: float, lines: list, font_size: int = 18):
 _inspector_state = {
     'is_active': False,
     'handle': None,
+    'handle_3d': None,  # 3D Viewport用のハンドラ
     'mouse_x': 0,
     'mouse_y': 0,
     'pixel_x': -1,
@@ -323,6 +329,11 @@ _inspector_state = {
     'image_height': 0,
     'pixel_info': None,
     'variance': None,
+    # パス可視化用
+    'locked': False,
+    'locked_pixel_x': -1,
+    'locked_pixel_y': -1,
+    'paths_data': [],  # List of path positions for visualization
 }
 
 
@@ -339,6 +350,11 @@ def _draw_inspector_callback(context_dummy):
     pixel_x = state['pixel_x']
     pixel_y = state['pixel_y']
     
+    # ロック状態の場合はロックされたピクセルを表示
+    if state['locked'] and state['locked_pixel_x'] >= 0:
+        pixel_x = state['locked_pixel_x']
+        pixel_y = state['locked_pixel_y']
+    
     # 表示するテキスト行を構築
     if pixel_x < 0 or pixel_y < 0:
         lines = [
@@ -350,8 +366,10 @@ def _draw_inspector_callback(context_dummy):
             lines.append(debug_info)
         lines.append("(Outside image bounds)")
     else:
+        # ロック状態のインジケーター
+        lock_icon = "🔒" if state['locked'] else ""
         lines = [
-            f"Pixel: ({pixel_x}, {pixel_y})",
+            f"Pixel: ({pixel_x}, {pixel_y}) {lock_icon}",
         ]
         
         # 診断情報を追加
@@ -442,6 +460,117 @@ def _draw_inspector_callback(context_dummy):
     draw_text_box(draw_x, draw_y, lines)
 
 
+def _draw_paths_3d_callback(context_dummy):
+    """3D Viewport用のパス描画コールバック"""
+    state = _inspector_state
+    
+    if not state['is_active'] or not state['locked']:
+        return
+    
+    paths_data = state.get('paths_data', [])
+    if not paths_data:
+        return
+    
+    gpu.state.blend_set('ALPHA')
+    gpu.state.line_width_set(2.0)
+    gpu.state.depth_test_set('LESS_EQUAL')
+    
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    
+    for i, path_positions in enumerate(paths_data):
+        if len(path_positions) < 2:
+            continue
+        
+        # パスインデックスに基づいて色を生成（虹色）
+        import colorsys
+        hue = (i / max(len(paths_data), 1)) * 0.8  # 0 to 0.8 (赤から紫)
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.9, 1.0)
+        color = (r, g, b, 0.8)
+        
+        # ポリラインを描画
+        batch = batch_for_shader(shader, 'LINE_STRIP', {"pos": path_positions})
+        shader.bind()
+        shader.uniform_float("color", color)
+        batch.draw(shader)
+        
+        # バウンス点にマーカーを描画
+        for pos in path_positions[1:]:  # カメラ位置をスキップ
+            _draw_bounce_marker_3d(shader, pos, color)
+    
+    # 状態を復元
+    gpu.state.depth_test_set('NONE')
+    gpu.state.line_width_set(1.0)
+    gpu.state.blend_set('NONE')
+
+
+def _draw_bounce_marker_3d(shader, position: Tuple[float, float, float], color: Tuple[float, float, float, float]):
+    """バウンス点に小さな十字マーカーを描画"""
+    size = 0.05
+    x, y, z = position
+    
+    # 3軸方向に短い線を描画
+    lines = [
+        [(x - size, y, z), (x + size, y, z)],
+        [(x, y - size, z), (x, y + size, z)],
+        [(x, y, z - size), (x, y, z + size)],
+    ]
+    
+    for line in lines:
+        batch = batch_for_shader(shader, 'LINES', {"pos": line})
+        shader.bind()
+        shader.uniform_float("color", color)
+        batch.draw(shader)
+
+
+def _update_paths_data(pixel_x: int, pixel_y: int):
+    """ロックされたピクセルのパスデータを更新"""
+    global _inspector_state
+    
+    try:
+        from .diagnostics import get_global_diagnostics
+        manager = get_global_diagnostics()
+        
+        if manager is None or not manager.is_available:
+            _inspector_state['paths_data'] = []
+            return
+        
+        # 診断データを取得
+        result = manager.get_pixel_diagnostic(pixel_x, pixel_y)
+        if result is None or not result.valid:
+            _inspector_state['paths_data'] = []
+            return
+        
+        # max_visualized_paths を取得
+        max_paths = 20
+        try:
+            settings = bpy.context.scene.diy_renderer
+            max_paths = settings.max_visualized_paths
+        except:
+            pass
+        
+        # パスデータを抽出（positions配列を持つグループのみ）
+        paths_data = []
+        for group in result.top_groups[:max_paths]:
+            if hasattr(group, 'positions') and group.positions:
+                # positions は list of list/tuple で [x, y, z]
+                positions = [tuple(p) for p in group.positions]
+                if len(positions) >= 2:
+                    paths_data.append(positions)
+        
+        _inspector_state['paths_data'] = paths_data
+        
+        # 3D Viewport を更新
+        for area in bpy.context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        
+    except Exception as e:
+        print(f"[HoverDiagnostics] Error updating paths data: {e}")
+        import traceback
+        traceback.print_exc()
+        _inspector_state['paths_data'] = []
+
+
 class DIY_OT_pixel_inspector(bpy.types.Operator):
     """
     ピクセル診断インスペクター
@@ -502,10 +631,18 @@ class DIY_OT_pixel_inspector(bpy.types.Operator):
         _inspector_state['pixel_y'] = -1
         _inspector_state['pixel_info'] = None
         _inspector_state['variance'] = None
+        _inspector_state['locked'] = False
+        _inspector_state['locked_pixel_x'] = -1
+        _inspector_state['locked_pixel_y'] = -1
+        _inspector_state['paths_data'] = []
         
         # 描画ハンドラを登録（グローバル関数を使用）
         _inspector_state['handle'] = bpy.types.SpaceImageEditor.draw_handler_add(
             _draw_inspector_callback, (None,), 'WINDOW', 'POST_PIXEL'
+        )
+        # 3D Viewport用ハンドラも登録
+        _inspector_state['handle_3d'] = bpy.types.SpaceView3D.draw_handler_add(
+            _draw_paths_3d_callback, (None,), 'WINDOW', 'POST_VIEW'
         )
         _inspector_state['is_active'] = True
         
@@ -513,7 +650,7 @@ class DIY_OT_pixel_inspector(bpy.types.Operator):
         context.window_manager.modal_handler_add(self)
         context.area.tag_redraw()
         
-        self.report({'INFO'}, "ピクセルインスペクター開始 (ESC で終了)")
+        self.report({'INFO'}, "ピクセルインスペクター開始 (クリックでロック, ESC で終了)")
         return {'RUNNING_MODAL'}
     
     def modal(self, context, event):
@@ -533,10 +670,56 @@ class DIY_OT_pixel_inspector(bpy.types.Operator):
             self.report({'INFO'}, "ピクセルインスペクター終了")
             return {'CANCELLED'}
         
-        # マウス移動（全イベントで座標更新）
-        _inspector_state['mouse_x'] = event.mouse_region_x
-        _inspector_state['mouse_y'] = event.mouse_region_y
-        self._update_pixel_info(context)
+        # クリックでピクセルをロック/アンロック
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            pixel_x = _inspector_state['pixel_x']
+            pixel_y = _inspector_state['pixel_y']
+            
+            if pixel_x >= 0 and pixel_y >= 0:
+                # Ctrl+クリックで強制アンロック
+                if event.ctrl:
+                    _inspector_state['locked'] = False
+                    _inspector_state['locked_pixel_x'] = -1
+                    _inspector_state['locked_pixel_y'] = -1
+                    _inspector_state['paths_data'] = []
+                    self.report({'INFO'}, "ピクセルロック解除")
+                else:
+                    # 同じピクセルをクリックでトグル、別のピクセルは新しくロック
+                    if (_inspector_state['locked'] and 
+                        _inspector_state['locked_pixel_x'] == pixel_x and 
+                        _inspector_state['locked_pixel_y'] == pixel_y):
+                        # 同じピクセル → アンロック
+                        _inspector_state['locked'] = False
+                        _inspector_state['locked_pixel_x'] = -1
+                        _inspector_state['locked_pixel_y'] = -1
+                        _inspector_state['paths_data'] = []
+                        self.report({'INFO'}, f"ピクセル ({pixel_x}, {pixel_y}) アンロック")
+                    else:
+                        # 新しいピクセルをロック
+                        _inspector_state['locked'] = True
+                        _inspector_state['locked_pixel_x'] = pixel_x
+                        _inspector_state['locked_pixel_y'] = pixel_y
+                        # パスデータを更新
+                        _update_paths_data(pixel_x, pixel_y)
+                        path_count = len(_inspector_state['paths_data'])
+                        self.report({'INFO'}, f"ピクセル ({pixel_x}, {pixel_y}) ロック - {path_count} パス可視化")
+                
+                # 3D Viewport も更新
+                for area in context.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        area.tag_redraw()
+                
+                return {'RUNNING_MODAL'}
+        
+        # マウス移動（ロック中はスキップ）
+        if not _inspector_state['locked']:
+            _inspector_state['mouse_x'] = event.mouse_region_x
+            _inspector_state['mouse_y'] = event.mouse_region_y
+            self._update_pixel_info(context)
+        else:
+            # ロック中でもマウス座標は更新（表示用）
+            _inspector_state['mouse_x'] = event.mouse_region_x
+            _inspector_state['mouse_y'] = event.mouse_region_y
         
         # 他のイベントはパススルー（通常操作を許可）
         return {'PASS_THROUGH'}
@@ -619,6 +802,10 @@ class DIY_OT_pixel_inspector(bpy.types.Operator):
         global _inspector_state
         
         _inspector_state['is_active'] = False
+        _inspector_state['locked'] = False
+        _inspector_state['locked_pixel_x'] = -1
+        _inspector_state['locked_pixel_y'] = -1
+        _inspector_state['paths_data'] = []
         
         if _inspector_state['handle']:
             bpy.types.SpaceImageEditor.draw_handler_remove(
@@ -626,8 +813,19 @@ class DIY_OT_pixel_inspector(bpy.types.Operator):
             )
             _inspector_state['handle'] = None
         
+        if _inspector_state['handle_3d']:
+            bpy.types.SpaceView3D.draw_handler_remove(
+                _inspector_state['handle_3d'], 'WINDOW'
+            )
+            _inspector_state['handle_3d'] = None
+        
         if context.area:
             context.area.tag_redraw()
+        
+        # 3D Viewport も更新
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
 
 
 # =============================================================================
@@ -702,7 +900,18 @@ class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
             col = box.column(align=True)
             col.scale_y = 0.8
             col.label(text="Move mouse to inspect")
+            col.label(text="Click to lock pixel")
+            col.label(text="Ctrl+Click to unlock")
             col.label(text="ESC or Right-click to exit")
+            
+            # ロック状態表示
+            if _inspector_state['locked']:
+                px = _inspector_state['locked_pixel_x']
+                py = _inspector_state['locked_pixel_y']
+                path_count = len(_inspector_state['paths_data'])
+                col.separator()
+                col.label(text=f"🔒 Locked: ({px}, {py})", icon='LOCKED')
+                col.label(text=f"   Paths: {path_count}")
 
 
 # =============================================================================
@@ -734,7 +943,19 @@ def unregister():
         except:
             pass
         _inspector_state['handle'] = None
-        _inspector_state['is_active'] = False
+    
+    if _inspector_state['handle_3d']:
+        try:
+            bpy.types.SpaceView3D.draw_handler_remove(
+                _inspector_state['handle_3d'], 'WINDOW'
+            )
+        except:
+            pass
+        _inspector_state['handle_3d'] = None
+    
+    _inspector_state['is_active'] = False
+    _inspector_state['locked'] = False
+    _inspector_state['paths_data'] = []
     
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

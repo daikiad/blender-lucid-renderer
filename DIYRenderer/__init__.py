@@ -70,6 +70,7 @@ from .panels import (
     DIY_RENDER_PT_performance,
     DIY_RENDER_PT_diagnostics,
     DIY_RENDER_PT_diagnostics_results,
+    DIY_PT_viewport_path_visualization,
 )
 from .hover_diagnostics import (
     DIY_OT_pixel_inspector,
@@ -150,6 +151,7 @@ def register():
     bpy.utils.register_class(DIY_RENDER_PT_performance)  # パフォーマンスパネル
     bpy.utils.register_class(DIY_RENDER_PT_diagnostics)  # 診断パネル
     bpy.utils.register_class(DIY_RENDER_PT_diagnostics_results)  # 診断結果パネル
+    bpy.utils.register_class(DIY_PT_viewport_path_visualization)  # 3D Viewport パス可視化パネル
     bpy.utils.register_class(DIY_OT_pixel_inspector)  # ピクセルインスペクター
     bpy.utils.register_class(DIY_PT_image_editor_diagnostics)  # Image Editor パネル
     bpy.utils.register_class(DIYRenderEngine)         # レンダーエンジン本体
@@ -264,6 +266,7 @@ def unregister():
     bpy.utils.unregister_class(DIYRenderEngine)
     bpy.utils.unregister_class(DIY_PT_image_editor_diagnostics)  # Image Editor パネル
     bpy.utils.unregister_class(DIY_OT_pixel_inspector)  # ピクセルインスペクター
+    bpy.utils.unregister_class(DIY_PT_viewport_path_visualization)  # 3D Viewport パス可視化パネル
     bpy.utils.unregister_class(DIY_RENDER_PT_diagnostics_results)  # 子パネルは先に解除
     bpy.utils.unregister_class(DIY_RENDER_PT_diagnostics)
     bpy.utils.unregister_class(DIY_RENDER_PT_performance)

@@ -139,6 +139,8 @@ struct PathGroup {
     SamplingStrategy strategy;           // Plan E: How the path was sampled
     uint8_t     _pad[4];                 // Padding for alignment
     PathVertex  vertices[MAX_GROUP_DEPTH];  // Path structure
+    Vec3f       positions[MAX_GROUP_DEPTH]; // Representative geometry (first sample)
+    Vec3f       normals[MAX_GROUP_DEPTH];   // Representative normals (first sample)
     
     PathGroup()
         : path_hash(0)
@@ -149,6 +151,8 @@ struct PathGroup {
         , strategy(SamplingStrategy::BSDF)
         , _pad{}
         , vertices{}
+        , positions{}
+        , normals{}
     {}
     
     /**
@@ -163,6 +167,8 @@ struct PathGroup {
         
         for (size_t i = 0; i < depth; ++i) {
             vertices[i] = trace.vertices[i];
+            positions[i] = trace.positions[i];  // Copy geometry from first sample
+            normals[i] = trace.normals[i];
         }
         
         stats = PathStatistics{};

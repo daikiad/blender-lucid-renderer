@@ -621,6 +621,30 @@ public:
             // オブジェクト名パスを生成（light_typeを含む）
             ginfo.object_path = object_path_string(ginfo.object_ids, group->light_type);
             
+            // Export path geometry for visualization
+            // First position is camera origin
+            ginfo.positions.reserve(group->depth + 1);
+            ginfo.normals.reserve(group->depth);
+            
+            // Add camera position as first point
+            auto cam_disp = render::displacement_from_origin(camera_.pos);
+            auto cam_pos = cam_disp.numerical_value_in(render::si::metre);
+            ginfo.positions.push_back(std::array<float, 3>{cam_pos.x, cam_pos.y, cam_pos.z});
+            
+            // Add vertex positions and normals
+            for (size_t vi = 0; vi < group->depth; ++vi) {
+                ginfo.positions.push_back(std::array<float, 3>{
+                    group->positions[vi].x,
+                    group->positions[vi].y,
+                    group->positions[vi].z
+                });
+                ginfo.normals.push_back(std::array<float, 3>{
+                    group->normals[vi].x,
+                    group->normals[vi].y,
+                    group->normals[vi].z
+                });
+            }
+            
             info.top_groups.push_back(ginfo);
         }
         

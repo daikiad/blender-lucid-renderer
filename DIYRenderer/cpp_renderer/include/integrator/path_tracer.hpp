@@ -473,6 +473,40 @@ inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& scene
 
 #include "diagnostics/diagnostic_integrator.hpp"
 
+// Helper to convert Position to Vec3f for diagnostics
+inline render::Vec3f position_to_vec3f(const render::Position& pos) {
+    render::Displacement disp = render::displacement_from_origin(pos);
+    return disp.numerical_value_in(render::si::metre);
+}
+
+// Helper to convert Normal to Vec3f for diagnostics
+inline render::Vec3f normal_to_vec3f(const render::Normal& n) {
+    return n.vec();
+}
+
+// Helper to calculate ray hit point position as Vec3f
+inline render::Vec3f ray_hit_position(const Ray& ray, render::Length t) {
+    render::Displacement origin_disp = render::displacement_from_origin(ray.origin);
+    render::Vec3f origin_vec = origin_disp.numerical_value_in(render::si::metre);
+    float t_val = t.numerical_value_in(render::si::metre);
+    return render::Vec3f{
+        origin_vec.x + ray.direction.vec().x * t_val,
+        origin_vec.y + ray.direction.vec().y * t_val,
+        origin_vec.z + ray.direction.vec().z * t_val
+    };
+}
+
+// Helper to calculate far environment hit position
+inline render::Vec3f env_hit_position(const Ray& ray, float distance = 1000.0f) {
+    render::Displacement origin_disp = render::displacement_from_origin(ray.origin);
+    render::Vec3f origin_vec = origin_disp.numerical_value_in(render::si::metre);
+    return render::Vec3f{
+        origin_vec.x + ray.direction.vec().x * distance,
+        origin_vec.y + ray.direction.vec().y * distance,
+        origin_vec.z + ray.direction.vec().z * distance
+    };
+}
+
 /**
  * Simple path tracer with diagnostic recording
  * Records each vertex for path analysis
@@ -504,6 +538,9 @@ inline render::RadianceRGB traceSimpleWithDiagnostics(
                     static_cast<int>(scene.nativeLights[lightHit.lightIndex].type));
             }
             
+            // Calculate light position for visualization
+            render::Vec3f lightPos = ray_hit_position(currentRay, lightHit.t);
+            
             // Calculate contribution
             render::RadianceRGB pathContrib = throughput * lightHit.emission;
             render::RGB3f contrib = render::RGB3f(
@@ -512,11 +549,12 @@ inline render::RadianceRGB traceSimpleWithDiagnostics(
                 pathContrib.b.numerical_value_in(render::radiance_unit)
             );
             
-            // Plan E: Record as completed path with BSDF strategy
-            recorder.record_completed_path(SamplingStrategy::BSDF, 
+            // Plan E: Record as completed path with BSDF strategy and geometry
+            recorder.record_completed_path_with_geometry(SamplingStrategy::BSDF, 
                                            lightHit.lightIndex, 
                                            lightSourceType, 
-                                           contrib);
+                                           contrib,
+                                           lightPos);
             
             result += pathContrib;
             break;
@@ -531,11 +569,15 @@ inline render::RadianceRGB traceSimpleWithDiagnostics(
                 envContrib.b.numerical_value_in(render::radiance_unit)
             );
             
-            // Plan E: Record as completed path hitting environment
-            recorder.record_completed_path(SamplingStrategy::BSDF,
+            // Calculate far point for environment visualization
+            render::Vec3f envPos = env_hit_position(currentRay);
+            
+            // Plan E: Record as completed path hitting environment with geometry
+            recorder.record_completed_path_with_geometry(SamplingStrategy::BSDF,
                                            -1,  // No light index for environment
                                            LightSourceType::Environment,
-                                           contrib);
+                                           contrib,
+                                           envPos);
             
             result += envContrib;
             break;
@@ -544,9 +586,13 @@ inline render::RadianceRGB traceSimpleWithDiagnostics(
         MaterialParams mat = getMaterialParams(hit);
         render::RadianceRGB emission = getEmission(hit);
         
-        // Record vertex
+        // Record vertex with geometry for path visualization
         BsdfType bsdfType = classify_bsdf(mat);
         bool isDelta = is_delta_bsdf(mat);
+        
+        // Convert hit position and normal to Vec3f for diagnostics
+        render::Vec3f hitPos = position_to_vec3f(hit.point);
+        render::Vec3f hitNorm = normal_to_vec3f(hit.normal);
         
         if (render::is_emissive(emission)) {
             // Emissive mesh hit - this is a completed path!
@@ -557,17 +603,19 @@ inline render::RadianceRGB traceSimpleWithDiagnostics(
                 emissionContrib.b.numerical_value_in(render::radiance_unit)
             );
             
-            // Record emissive hit as completed path
-            recorder.record_completed_path(SamplingStrategy::BSDF,
+            // Record emissive hit as completed path with geometry
+            recorder.record_completed_path_with_geometry(SamplingStrategy::BSDF,
                                            hit.meshIdx,  // Use mesh index for emissive
                                            LightSourceType::Emissive,
-                                           contrib);
+                                           contrib,
+                                           hitPos);
             
             result += emissionContrib;
             break;  // Path terminates at emissive surface
         } else {
-            recorder.record_vertex(hit.meshIdx, 0, 
-                                   bsdfType, isDelta, false);
+            recorder.record_vertex_with_geometry(hit.meshIdx, 0, 
+                                   bsdfType, isDelta, false,
+                                   hitPos, hitNorm);
         }
         
         // Setup normals
@@ -654,6 +702,9 @@ inline render::RadianceRGB traceNEEWithDiagnostics(
                         static_cast<int>(scene.nativeLights[lightHit.lightIndex].type));
                 }
                 
+                // Calculate light position for visualization
+                render::Vec3f lightPos = ray_hit_position(currentRay, lightHit.t);
+                
                 render::RadianceRGB pathContrib = throughput * lightHit.emission;
                 render::RGB3f contrib = render::RGB3f(
                     pathContrib.r.numerical_value_in(render::radiance_unit),
@@ -662,10 +713,11 @@ inline render::RadianceRGB traceNEEWithDiagnostics(
                 );
                 
                 // Direct view of light uses BSDF strategy (camera ray hit light)
-                recorder.record_completed_path(SamplingStrategy::BSDF,
+                recorder.record_completed_path_with_geometry(SamplingStrategy::BSDF,
                                                lightHit.lightIndex,
                                                lightSourceType,
-                                               contrib);
+                                               contrib,
+                                               lightPos);
                 
                 result += pathContrib;
             }
@@ -684,10 +736,14 @@ inline render::RadianceRGB traceNEEWithDiagnostics(
                     envContrib.b.numerical_value_in(render::radiance_unit)
                 );
                 
-                recorder.record_completed_path(SamplingStrategy::BSDF,
+                // Calculate far point for environment visualization
+                render::Vec3f envPos = env_hit_position(currentRay);
+                
+                recorder.record_completed_path_with_geometry(SamplingStrategy::BSDF,
                                                -1,
                                                LightSourceType::Environment,
-                                               contrib);
+                                               contrib,
+                                               envPos);
                 
                 result += envContrib;
             }
@@ -715,6 +771,9 @@ inline render::RadianceRGB traceNEEWithDiagnostics(
         
         // Add emission only on first hit (direct view of emissive)
         if (hasEmission && depth == 0) {
+            // Calculate emissive hit position for visualization
+            render::Vec3f emissivePos = position_to_vec3f(hit.point);
+            
             render::RadianceRGB emissionContrib = throughput * emission;
             render::RGB3f contrib = render::RGB3f(
                 emissionContrib.r.numerical_value_in(render::radiance_unit),
@@ -722,15 +781,21 @@ inline render::RadianceRGB traceNEEWithDiagnostics(
                 emissionContrib.b.numerical_value_in(render::radiance_unit)
             );
             // Direct view uses BSDF strategy (camera ray hit emissive)
-            recorder.record_completed_path(SamplingStrategy::BSDF,
+            recorder.record_completed_path_with_geometry(SamplingStrategy::BSDF,
                                            hit.meshIdx,
                                            LightSourceType::Emissive,
-                                           contrib);
+                                           contrib,
+                                           emissivePos);
             result += emissionContrib;
         } else if (!hasEmission) {
-            // Record vertex first (before NEE)
-            recorder.record_vertex(hit.meshIdx, 0, 
-                                   bsdfType, isDelta, false);
+            // Convert hit position and normal to Vec3f for diagnostics
+            render::Vec3f hitPos = position_to_vec3f(hit.point);
+            render::Vec3f hitNorm = normal_to_vec3f(hit.normal);
+            
+            // Record vertex first (before NEE) with geometry
+            recorder.record_vertex_with_geometry(hit.meshIdx, 0, 
+                                   bsdfType, isDelta, false,
+                                   hitPos, hitNorm);
             
             // Next Event Estimation
             bool isTransmissive = mat.transmission > 0.5f;
@@ -763,6 +828,10 @@ inline render::RadianceRGB traceNEEWithDiagnostics(
                                 LightSourceType lightSourceType = to_light_source_type(
                                     static_cast<int>(light.type));
                                 
+                                // Calculate light position for visualization
+                                render::Displacement lightDisp = render::displacement_from_origin(ls.position);
+                                render::Vec3f lightPos = lightDisp.numerical_value_in(render::si::metre);
+                                
                                 // NEE contribution = throughput * BSDF * emission / pdf
                                 render::RadianceRGB total_nee = throughput * nee_radiance;
                                 render::RGB3f nee_contrib(
@@ -771,11 +840,12 @@ inline render::RadianceRGB traceNEEWithDiagnostics(
                                     total_nee.b.numerical_value_in(render::radiance_unit)
                                 );
                                 
-                                // Plan E: Use NEE strategy (pure NEE, no MIS weights)
-                                recorder.record_completed_path(SamplingStrategy::NEE,
+                                // Plan E: Use NEE strategy with geometry
+                                recorder.record_completed_path_with_geometry(SamplingStrategy::NEE,
                                                                nativeLightIdx,
                                                                lightSourceType,
-                                                               nee_contrib);
+                                                               nee_contrib,
+                                                               lightPos);
                                 
                                 result += throughput * nee_radiance;
                             }
@@ -868,6 +938,10 @@ inline render::RadianceRGB traceMISWithDiagnostics(
                     static_cast<int>(scene.nativeLights[lightHit.lightIndex].type));
             }
             
+            // Calculate light position for visualization
+            // Calculate light position for visualization
+            render::Vec3f lightPos = ray_hit_position(currentRay, lightHit.t);
+            
             // Calculate MIS weight for BSDF sampling
             render::PdfW lightPdf = render::zero_pdf_w();
             if (sceneLights.hasLights() && lightHit.lightIndex >= 0) {
@@ -893,11 +967,12 @@ inline render::RadianceRGB traceMISWithDiagnostics(
                 pathContrib.b.numerical_value_in(render::radiance_unit)
             );
             
-            // Plan E: Record as MIS_BSDF (BSDF sampling hit light)
-            recorder.record_completed_path(SamplingStrategy::MIS_BSDF,
+            // Plan E: Record as MIS_BSDF with geometry
+            recorder.record_completed_path_with_geometry(SamplingStrategy::MIS_BSDF,
                                            lightHit.lightIndex,
                                            lightSourceType,
-                                           contrib);
+                                           contrib,
+                                           lightPos);
             
             result += pathContrib;
             break;
@@ -912,11 +987,15 @@ inline render::RadianceRGB traceMISWithDiagnostics(
                 envContrib.b.numerical_value_in(render::radiance_unit)
             );
             
-            // Plan E: Record environment hit as MIS_BSDF
-            recorder.record_completed_path(SamplingStrategy::MIS_BSDF,
+            // Calculate far point for environment visualization
+            render::Vec3f envPos = env_hit_position(currentRay);
+            
+            // Plan E: Record environment hit as MIS_BSDF with geometry
+            recorder.record_completed_path_with_geometry(SamplingStrategy::MIS_BSDF,
                                            -1,
                                            LightSourceType::Environment,
-                                           contrib);
+                                           contrib,
+                                           envPos);
             
             result += envContrib;
             break;
@@ -957,6 +1036,9 @@ inline render::RadianceRGB traceMISWithDiagnostics(
                 }
             }
             
+            // Calculate emissive hit position for visualization
+            render::Vec3f emissivePos = position_to_vec3f(hit.point);
+            
             // Calculate MIS-weighted contribution
             render::RadianceRGB emissionContrib = throughput * emission * misWeight;
             render::RGB3f contrib = render::RGB3f(
@@ -965,17 +1047,23 @@ inline render::RadianceRGB traceMISWithDiagnostics(
                 emissionContrib.b.numerical_value_in(render::radiance_unit)
             );
             
-            // Plan E: Record emissive mesh hit as MIS_BSDF
-            recorder.record_completed_path(SamplingStrategy::MIS_BSDF,
+            // Plan E: Record emissive mesh hit as MIS_BSDF with geometry
+            recorder.record_completed_path_with_geometry(SamplingStrategy::MIS_BSDF,
                                            hit.meshIdx,
                                            LightSourceType::Emissive,
-                                           contrib);
+                                           contrib,
+                                           emissivePos);
             
             result += emissionContrib;
         } else {
-            // Record vertex first (before NEE)
-            recorder.record_vertex(hit.meshIdx, 0, 
-                                   bsdfType, isDelta, false);
+            // Convert hit position and normal to Vec3f for diagnostics
+            render::Vec3f hitPos = position_to_vec3f(hit.point);
+            render::Vec3f hitNorm = normal_to_vec3f(hit.normal);
+            
+            // Record vertex first (before NEE) with geometry
+            recorder.record_vertex_with_geometry(hit.meshIdx, 0, 
+                                   bsdfType, isDelta, false,
+                                   hitPos, hitNorm);
             
             // Next Event Estimation with MIS
             bool isTransmissive = mat.transmission > 0.5f;
@@ -1012,6 +1100,10 @@ inline render::RadianceRGB traceMISWithDiagnostics(
                                 LightSourceType lightSourceType = to_light_source_type(
                                     static_cast<int>(light.type));
                                 
+                                // Calculate light position for visualization
+                                render::Displacement lightDisp = render::displacement_from_origin(ls.position);
+                                render::Vec3f lightPos = lightDisp.numerical_value_in(render::si::metre);
+                                
                                 render::RadianceRGB total_nee = throughput * nee_radiance;
                                 render::RGB3f nee_contrib(
                                     total_nee.r.numerical_value_in(render::radiance_unit),
@@ -1019,11 +1111,12 @@ inline render::RadianceRGB traceMISWithDiagnostics(
                                     total_nee.b.numerical_value_in(render::radiance_unit)
                                 );
                                 
-                                // Plan E: Record as MIS_NEE (NEE sampling hit light)
-                                recorder.record_completed_path(SamplingStrategy::MIS_NEE,
+                                // Plan E: Record as MIS_NEE with geometry
+                                recorder.record_completed_path_with_geometry(SamplingStrategy::MIS_NEE,
                                                                nativeLightIdx,
                                                                lightSourceType,
-                                                               nee_contrib);
+                                                               nee_contrib,
+                                                               lightPos);
                                 
                                 result += throughput * nee_radiance;
                             }

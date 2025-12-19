@@ -396,3 +396,167 @@ TEST(DiagnosticPathTracerTest, Clear) {
     
     EXPECT_EQ(tracer.film().total_paths_recorded(), 0);
 }
+
+// ============================================================================
+// Path Visualization - Geometry Recording Tests
+// ============================================================================
+
+TEST(PathDiagnosticRecorderGeometryTest, RecordVertexWithGeometry) {
+    PathDiagnosticRecorder recorder;
+    recorder.begin_path();
+    
+    Vec3f pos1{1.0f, 2.0f, 3.0f};
+    Vec3f norm1{0.0f, 1.0f, 0.0f};
+    recorder.record_vertex_with_geometry(0, 1, BsdfType::Diffuse, false, false, pos1, norm1);
+    
+    EXPECT_EQ(recorder.current_depth(), 1);
+    
+    PathTrace trace = recorder.end_path(RGB3f{1.0f, 1.0f, 1.0f});
+    EXPECT_FLOAT_EQ(trace.positions[0].x, 1.0f);
+    EXPECT_FLOAT_EQ(trace.positions[0].y, 2.0f);
+    EXPECT_FLOAT_EQ(trace.positions[0].z, 3.0f);
+    EXPECT_FLOAT_EQ(trace.normals[0].y, 1.0f);
+}
+
+TEST(PathDiagnosticRecorderGeometryTest, RecordEnvironmentHitWithGeometry) {
+    PathDiagnosticRecorder recorder;
+    recorder.begin_path();
+    
+    // Record surface hit first
+    Vec3f surface_pos{0.0f, 0.0f, 0.0f};
+    Vec3f surface_norm{0.0f, 1.0f, 0.0f};
+    recorder.record_vertex_with_geometry(0, 0, BsdfType::Diffuse, false, false, surface_pos, surface_norm);
+    
+    // Then environment hit with ray direction
+    Vec3f ray_dir{0.0f, 1.0f, 0.0f};
+    Vec3f ray_origin{0.0f, 0.0f, 0.0f};
+    recorder.record_environment_hit_with_geometry(ray_dir, ray_origin);
+    
+    PathTrace trace = recorder.end_path(RGB3f{0.5f, 0.7f, 1.0f});
+    EXPECT_EQ(trace.depth, 2);
+    
+    // Environment position should be far along ray direction
+    EXPECT_GT(trace.positions[1].y, 100.0f);  // 1000 * ray_dir.y
+    
+    // Normal should point back (toward camera)
+    EXPECT_FLOAT_EQ(trace.normals[1].y, -1.0f);
+}
+
+TEST(PathDiagnosticRecorderGeometryTest, RecordLightHitWithGeometry) {
+    PathDiagnosticRecorder recorder;
+    recorder.begin_path();
+    
+    Vec3f surface_pos{0.0f, 0.0f, 0.0f};
+    Vec3f surface_norm{0.0f, 1.0f, 0.0f};
+    recorder.record_vertex_with_geometry(0, 0, BsdfType::Diffuse, false, false, surface_pos, surface_norm);
+    
+    Vec3f light_pos{5.0f, 10.0f, 0.0f};
+    recorder.record_light_hit_with_geometry(0, LightSourceType::Point, light_pos);
+    
+    PathTrace trace = recorder.end_path(RGB3f{1.0f, 1.0f, 1.0f});
+    EXPECT_EQ(trace.depth, 2);
+    EXPECT_FLOAT_EQ(trace.positions[1].x, 5.0f);
+    EXPECT_FLOAT_EQ(trace.positions[1].y, 10.0f);
+}
+
+TEST(PathDiagnosticRecorderGeometryTest, RecordEmissiveHitWithGeometry) {
+    PathDiagnosticRecorder recorder;
+    recorder.begin_path();
+    
+    Vec3f surface_pos{0.0f, 0.0f, 0.0f};
+    Vec3f surface_norm{0.0f, 1.0f, 0.0f};
+    recorder.record_vertex_with_geometry(0, 0, BsdfType::Diffuse, false, false, surface_pos, surface_norm);
+    
+    Vec3f emissive_pos{0.0f, 5.0f, 0.0f};
+    Vec3f emissive_norm{0.0f, -1.0f, 0.0f};
+    recorder.record_emissive_hit_with_geometry(1, 0, emissive_pos, emissive_norm);
+    
+    PathTrace trace = recorder.end_path(RGB3f{1.0f, 1.0f, 1.0f});
+    EXPECT_EQ(trace.depth, 2);
+    EXPECT_FLOAT_EQ(trace.positions[1].y, 5.0f);
+    EXPECT_FLOAT_EQ(trace.normals[1].y, -1.0f);
+}
+
+TEST(PathDiagnosticRecorderGeometryTest, CompletedPathPreservesGeometry) {
+    PathDiagnosticRecorder recorder;
+    recorder.begin_path();
+    
+    // Record camera position (vertex 0)
+    Vec3f cam_pos{0.0f, 1.0f, 5.0f};
+    Vec3f cam_dir{0.0f, 0.0f, -1.0f};
+    recorder.record_vertex_with_geometry(-1, -1, BsdfType::Diffuse, false, false, cam_pos, cam_dir);
+    
+    // Record surface hit
+    Vec3f hit_pos{0.0f, 0.0f, 0.0f};
+    Vec3f hit_norm{0.0f, 1.0f, 0.0f};
+    recorder.record_vertex_with_geometry(0, 0, BsdfType::Diffuse, false, false, hit_pos, hit_norm);
+    
+    // Record completed path with light position
+    Vec3f light_pos{0.0f, 10.0f, 0.0f};
+    recorder.record_completed_path_with_geometry(
+        SamplingStrategy::MIS_BSDF,
+        0, LightSourceType::Point,
+        RGB3f{1.0f, 1.0f, 1.0f},
+        light_pos
+    );
+    
+    const auto& paths = recorder.get_completed_paths();
+    ASSERT_EQ(paths.size(), 1);
+    
+    const auto& path = paths[0];
+    EXPECT_EQ(path.depth, 3);  // cam + surface + light
+    
+    // Check geometry is preserved
+    EXPECT_FLOAT_EQ(path.positions[0].z, 5.0f);  // Camera pos
+    EXPECT_FLOAT_EQ(path.positions[1].y, 0.0f);  // Surface hit
+    EXPECT_FLOAT_EQ(path.positions[2].y, 10.0f); // Light pos
+    EXPECT_FLOAT_EQ(path.normals[1].y, 1.0f);    // Surface normal
+}
+
+TEST(PathDiagnosticRecorderGeometryTest, MultiBouncePath) {
+    PathDiagnosticRecorder recorder;
+    recorder.begin_path();
+    
+    // Camera → Surface1 → Surface2 → Surface3 → Light
+    std::vector<Vec3f> positions = {
+        {0.0f, 0.0f, 10.0f},  // Camera
+        {0.0f, 0.0f, 0.0f},   // Surface 1
+        {5.0f, 0.0f, 0.0f},   // Surface 2 (bounce)
+        {5.0f, 0.0f, 5.0f},   // Surface 3 (bounce)
+    };
+    std::vector<Vec3f> normals = {
+        {0.0f, 0.0f, -1.0f},
+        {0.0f, 1.0f, 0.0f},
+        {-1.0f, 0.0f, 0.0f},
+        {0.0f, 0.0f, -1.0f},
+    };
+    
+    for (size_t i = 0; i < positions.size(); ++i) {
+        recorder.record_vertex_with_geometry(
+            static_cast<int32_t>(i), 0, BsdfType::Diffuse,
+            false, false, positions[i], normals[i]
+        );
+    }
+    
+    Vec3f light_pos{5.0f, 10.0f, 5.0f};
+    recorder.record_completed_path_with_geometry(
+        SamplingStrategy::BSDF,
+        0, LightSourceType::Area,
+        RGB3f{0.5f, 0.5f, 0.5f},
+        light_pos
+    );
+    
+    const auto& paths = recorder.get_completed_paths();
+    ASSERT_EQ(paths.size(), 1);
+    
+    const auto& path = paths[0];
+    EXPECT_EQ(path.depth, 5);  // 4 surfaces + 1 light
+    
+    // Verify path positions can be used for visualization
+    for (size_t i = 0; i < positions.size(); ++i) {
+        EXPECT_FLOAT_EQ(path.positions[i].x, positions[i].x);
+        EXPECT_FLOAT_EQ(path.positions[i].y, positions[i].y);
+        EXPECT_FLOAT_EQ(path.positions[i].z, positions[i].z);
+    }
+    EXPECT_FLOAT_EQ(path.positions[4].y, 10.0f);  // Light position
+}

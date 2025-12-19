@@ -241,3 +241,38 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
         ],
         default='STANDARD'
     )
+    
+    # ==========================================================================
+    # Path Visualization Settings
+    # ==========================================================================
+    
+    # 最大可視化パス数（2D/3D可視化で同時表示する最大本数）
+    max_visualized_paths: bpy.props.IntProperty(
+        name="Max Visualized Paths",
+        description="Maximum number of paths to visualize simultaneously in 2D/3D view",
+        default=20,
+        min=1,
+        max=100
+    )
+    
+    # パス選択のロック状態（クリックで固定）
+    path_selection_locked: bpy.props.BoolProperty(
+        name="Lock Selection",
+        description="Lock the current pixel selection for path visualization",
+        default=False
+    )
+    
+    # ロックされたピクセル座標
+    locked_pixel_x: bpy.props.IntProperty(
+        name="Locked Pixel X",
+        description="X coordinate of locked pixel for path visualization",
+        default=0,
+        min=0
+    )
+    
+    locked_pixel_y: bpy.props.IntProperty(
+        name="Locked Pixel Y",
+        description="Y coordinate of locked pixel for path visualization",
+        default=0,
+        min=0
+    )

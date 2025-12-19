@@ -42,6 +42,10 @@ struct ExportedGroupInfo {
     // Plan E: Sampling strategy
     SamplingStrategy strategy = SamplingStrategy::BSDF;  // How the path was sampled
     std::string strategy_name;                           // "BSDF", "NEE", "MIS_BSDF", "MIS_NEE"
+    
+    // Path geometry for visualization (positions and normals at each vertex)
+    std::vector<std::array<float, 3>> positions;  // World positions [depth+1 for camera]
+    std::vector<std::array<float, 3>> normals;    // Surface normals [depth]
 };
 
 /**

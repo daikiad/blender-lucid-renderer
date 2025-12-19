@@ -67,9 +67,9 @@ TEST(PathRecordingConfigTest, MemoryEstimate1080p) {
     auto detailed = PathRecordingConfig::detailed();
     size_t mem_detailed = detailed.estimate_memory_bytes(width, height);
     
-    // Should be around 6-16GB (depends on PathGroup size)
+    // Should be around 10-40GB (depends on PathGroup size with geometry)
     EXPECT_GT(mem_detailed, 3UL * 1024 * 1024 * 1024);  // > 3 GB
-    EXPECT_LT(mem_detailed, 20UL * 1024 * 1024 * 1024); // < 20 GB
+    EXPECT_LT(mem_detailed, 50UL * 1024 * 1024 * 1024); // < 50 GB
 }
 
 TEST(PathRecordingConfigTest, MemoryScalesWithResolution) {
@@ -133,5 +133,5 @@ TEST(PathRecordingConfigTest, PerPixelDataSize) {
     
     // Reasonable bounds
     EXPECT_GT(size_minimal, 100);     // At least 100 bytes per pixel
-    EXPECT_LT(size_detailed, 16384);  // At most 16KB per pixel
+    EXPECT_LT(size_detailed, 32768);  // At most 32KB per pixel (with geometry)
 }

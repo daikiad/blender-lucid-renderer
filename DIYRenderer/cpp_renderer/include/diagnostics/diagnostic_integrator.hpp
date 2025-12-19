@@ -112,6 +112,26 @@ public:
     }
     
     /**
+     * Record a surface interaction vertex with geometry (position and normal)
+     * Used for path visualization feature
+     */
+    void record_vertex_with_geometry(int32_t object_id, int16_t material_id, 
+                                     BsdfType type, bool is_delta, bool is_light_sampled,
+                                     const Vec3f& position, const Vec3f& normal) {
+        if (current_path_.depth >= MAX_PATH_DEPTH) return;
+        
+        PathVertex v{object_id, material_id, type, 0};
+        v.set_delta(is_delta);
+        v.set_light_sampled(is_light_sampled);
+        
+        size_t idx = current_path_.depth;
+        current_path_.vertices[idx] = v;
+        current_path_.positions[idx] = position;
+        current_path_.normals[idx] = normal;
+        ++current_path_.depth;
+    }
+    
+    /**
      * Record environment map hit (no surface)
      * Sets light type to Environment for Heckbert notation
      */
@@ -122,6 +142,26 @@ public:
         current_path_.vertices[current_path_.depth++] = v;
         
         // Environment is also a light source
+        current_path_.light_type = LightSourceType::Environment;
+    }
+    
+    /**
+     * Record environment map hit with ray direction for visualization
+     * The position is set to a far point along the ray direction
+     */
+    void record_environment_hit_with_geometry(const Vec3f& ray_direction, const Vec3f& ray_origin) {
+        if (current_path_.depth >= MAX_PATH_DEPTH) return;
+        
+        PathVertex v{-1, -1, BsdfType::Environment, 0};
+        
+        size_t idx = current_path_.depth;
+        current_path_.vertices[idx] = v;
+        // Place environment hit at a far distance along ray direction
+        constexpr float ENV_DISTANCE = 1000.0f;
+        current_path_.positions[idx] = ray_origin + ray_direction * ENV_DISTANCE;
+        current_path_.normals[idx] = ray_direction * -1.0f;  // Normal points back toward camera
+        ++current_path_.depth;
+        
         current_path_.light_type = LightSourceType::Environment;
     }
     
@@ -142,6 +182,25 @@ public:
     }
     
     /**
+     * Record light hit with geometry (position for visualization)
+     */
+    void record_light_hit_with_geometry(int32_t light_id, 
+                                        LightSourceType light_source_type,
+                                        const Vec3f& position) {
+        if (current_path_.depth >= MAX_PATH_DEPTH) return;
+        
+        PathVertex v{-(light_id + 2), -1, BsdfType::Emission, 0};
+        
+        size_t idx = current_path_.depth;
+        current_path_.vertices[idx] = v;
+        current_path_.positions[idx] = position;
+        current_path_.normals[idx] = Vec3f{0, 0, 0};  // Lights don't have surface normals
+        ++current_path_.depth;
+        
+        current_path_.light_type = light_source_type;
+    }
+    
+    /**
      * Record emissive mesh hit
      * Emissive meshes use the Emissive light type to show object name
      */
@@ -152,6 +211,24 @@ public:
         current_path_.vertices[current_path_.depth++] = v;
         
         // Use Emissive type to distinguish from Blender native lights
+        current_path_.light_type = LightSourceType::Emissive;
+    }
+    
+    /**
+     * Record emissive mesh hit with geometry
+     */
+    void record_emissive_hit_with_geometry(int32_t object_id, int16_t material_id,
+                                           const Vec3f& position, const Vec3f& normal) {
+        if (current_path_.depth >= MAX_PATH_DEPTH) return;
+        
+        PathVertex v{object_id, material_id, BsdfType::Emission, 0};
+        
+        size_t idx = current_path_.depth;
+        current_path_.vertices[idx] = v;
+        current_path_.positions[idx] = position;
+        current_path_.normals[idx] = normal;
+        ++current_path_.depth;
+        
         current_path_.light_type = LightSourceType::Emissive;
     }
     
@@ -238,7 +315,7 @@ public:
                                int32_t light_id,
                                LightSourceType light_source_type,
                                const RGB3f& contribution) {
-        PathTrace path = current_path_;  // Copy current vertices
+        PathTrace path = current_path_;  // Copy current vertices (including geometry)
         
         // Add light vertex
         if (path.depth < MAX_PATH_DEPTH) {
@@ -251,6 +328,44 @@ public:
                 PathVertex v{-(light_id + 2), -1, BsdfType::Emission, 0};
                 path.vertices[path.depth++] = v;
             }
+        }
+        
+        path.light_type = light_source_type;
+        path.strategy = strategy;
+        path.contribution = contribution;
+        
+        completed_paths_.push_back(path);
+    }
+    
+    /**
+     * Record a completed path with light position for visualization
+     * 
+     * @param strategy How the light was found (BSDF, NEE, MIS_BSDF, MIS_NEE)
+     * @param light_id Light index (-1 for environment)
+     * @param light_source_type Type of light source
+     * @param contribution MIS-weighted contribution of this path
+     * @param light_position World position of the light hit point
+     */
+    void record_completed_path_with_geometry(SamplingStrategy strategy,
+                                             int32_t light_id,
+                                             LightSourceType light_source_type,
+                                             const RGB3f& contribution,
+                                             const Vec3f& light_position) {
+        PathTrace path = current_path_;  // Copy current vertices (including geometry)
+        
+        // Add light vertex with geometry
+        if (path.depth < MAX_PATH_DEPTH) {
+            size_t idx = path.depth;
+            if (light_source_type == LightSourceType::Environment) {
+                PathVertex v{-1, -1, BsdfType::Emission, 0};
+                path.vertices[idx] = v;
+            } else {
+                PathVertex v{-(light_id + 2), -1, BsdfType::Emission, 0};
+                path.vertices[idx] = v;
+            }
+            path.positions[idx] = light_position;
+            path.normals[idx] = Vec3f{0, 0, 0};  // Lights don't have meaningful normals
+            ++path.depth;
         }
         
         path.light_type = light_source_type;

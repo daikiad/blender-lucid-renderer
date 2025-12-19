@@ -272,13 +272,18 @@ PYBIND11_MODULE(diyrenderer, m) {
         .def_readonly("coarse_type", &ExportedGroupInfo::coarse_type)
         .def_readonly("coarse_type_name", &ExportedGroupInfo::coarse_type_name)
         .def_readonly("strategy_name", &ExportedGroupInfo::strategy_name)  // Plan E
+        .def_readonly("positions", &ExportedGroupInfo::positions,
+            "Path vertex world positions (camera first, then hit points)")
+        .def_readonly("normals", &ExportedGroupInfo::normals,
+            "Surface normals at each hit point")
         .def("__repr__", [](const ExportedGroupInfo& g) {
             return "<ExportedGroupInfo signature='" + g.signature + 
                    "' heckbert='" + g.signature_heckbert + "'" +
                    " path='" + g.object_path + "'" +
                    " strategy='" + g.strategy_name + "'" +
                    " mean=" + std::to_string(g.mean_luminance) +
-                   " var=" + std::to_string(g.variance_luminance) + ">";
+                   " var=" + std::to_string(g.variance_luminance) +
+                   " positions=" + std::to_string(g.positions.size()) + ">";
         });
     
     // TopGroupSortBy enum for pixel diagnostics

@@ -248,6 +248,8 @@ static_assert(sizeof(PathVertex) == 8, "PathVertex must be 8 bytes");
 
 struct PathTrace {
     PathVertex vertices[MAX_PATH_DEPTH];  // Vertex array
+    Vec3f      positions[MAX_PATH_DEPTH]; // World position at each vertex (for visualization)
+    Vec3f      normals[MAX_PATH_DEPTH];   // Surface normal at each vertex (for visualization)
     size_t     depth;                     // Number of vertices (0 = empty)
     RGB3f      contribution;              // Final radiance contribution
     LightSourceType light_type;           // Light source type for Heckbert notation
@@ -256,6 +258,8 @@ struct PathTrace {
     // Default constructor
     PathTrace()
         : vertices{}
+        , positions{}
+        , normals{}
         , depth(0)
         , contribution{}
         , light_type(LightSourceType::Unknown)
@@ -270,10 +274,11 @@ struct PathTrace {
         contribution = RGB3f{};
         light_type = LightSourceType::Unknown;
         strategy = SamplingStrategy::BSDF;
+        // Note: positions/normals arrays don't need clearing, depth handles validity
     }
     
     /**
-     * Add a vertex to the path
+     * Add a vertex to the path (without geometry)
      * Returns false if path is full
      */
     bool add_vertex(int32_t object_id, int16_t material_id, BsdfType type) {
@@ -282,6 +287,31 @@ struct PathTrace {
         }
         vertices[depth++] = PathVertex{object_id, material_id, type};
         return true;
+    }
+    
+    /**
+     * Add a vertex to the path with geometry (position and normal)
+     * Returns false if path is full
+     */
+    bool add_vertex_with_geometry(int32_t object_id, int16_t material_id, BsdfType type,
+                                  const Vec3f& position, const Vec3f& normal) {
+        if (depth >= MAX_PATH_DEPTH) {
+            return false;
+        }
+        vertices[depth] = PathVertex{object_id, material_id, type};
+        positions[depth] = position;
+        normals[depth] = normal;
+        ++depth;
+        return true;
+    }
+    
+    /**
+     * Set geometry for an existing vertex
+     * No bounds checking - caller must ensure index < depth
+     */
+    void set_vertex_geometry(size_t index, const Vec3f& position, const Vec3f& normal) {
+        positions[index] = position;
+        normals[index] = normal;
     }
     
     /**

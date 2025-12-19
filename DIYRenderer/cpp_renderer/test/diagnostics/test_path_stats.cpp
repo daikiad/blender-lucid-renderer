@@ -101,10 +101,9 @@ TEST(PathStatisticsTest, Luminance) {
 // ============================================================================
 
 TEST(PathGroupTest, Size) {
-    // Target: ~140 bytes for efficient Top-N storage
-    // hash(8) + stats(48) + depth(4) + vertices(8*16=128) = 188
-    // But we can use max stored depth
-    EXPECT_LE(sizeof(PathGroup), 256);
+    // Target: ~568 bytes with geometry arrays for path visualization
+    // hash(8) + stats(48) + depth(4) + vertices(8*16=128) + positions(12*16=192) + normals(12*16=192) = 572
+    EXPECT_LE(sizeof(PathGroup), 600);
 }
 
 TEST(PathGroupTest, Initialize) {

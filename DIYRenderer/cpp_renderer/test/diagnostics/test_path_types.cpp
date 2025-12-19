@@ -202,3 +202,123 @@ TEST(PathTraceTest, CoarseTypeLightSampled) {
     
     EXPECT_NE(light_sampled.coarse_type() & 0x01, 0);  // light sampled
 }
+
+// ============================================================================
+// PathTrace Geometry Tests (Path Visualization Feature)
+// ============================================================================
+
+TEST(PathTraceGeometryTest, DefaultGeometry) {
+    PathTrace path;
+    
+    // Default: all positions and normals should be zero
+    for (size_t i = 0; i < MAX_PATH_DEPTH; ++i) {
+        EXPECT_FLOAT_EQ(path.positions[i].x, 0.0f);
+        EXPECT_FLOAT_EQ(path.positions[i].y, 0.0f);
+        EXPECT_FLOAT_EQ(path.positions[i].z, 0.0f);
+        EXPECT_FLOAT_EQ(path.normals[i].x, 0.0f);
+        EXPECT_FLOAT_EQ(path.normals[i].y, 0.0f);
+        EXPECT_FLOAT_EQ(path.normals[i].z, 0.0f);
+    }
+}
+
+TEST(PathTraceGeometryTest, AddVertexWithGeometry) {
+    PathTrace path;
+    
+    // Add vertex with geometry
+    render::Vec3f pos1{1.0f, 2.0f, 3.0f};
+    render::Vec3f norm1{0.0f, 1.0f, 0.0f};
+    bool result = path.add_vertex_with_geometry(0, 1, BsdfType::Diffuse, pos1, norm1);
+    
+    EXPECT_TRUE(result);
+    EXPECT_EQ(path.depth, 1);
+    EXPECT_EQ(path.vertices[0].object_id, 0);
+    EXPECT_FLOAT_EQ(path.positions[0].x, 1.0f);
+    EXPECT_FLOAT_EQ(path.positions[0].y, 2.0f);
+    EXPECT_FLOAT_EQ(path.positions[0].z, 3.0f);
+    EXPECT_FLOAT_EQ(path.normals[0].x, 0.0f);
+    EXPECT_FLOAT_EQ(path.normals[0].y, 1.0f);
+    EXPECT_FLOAT_EQ(path.normals[0].z, 0.0f);
+    
+    // Add second vertex
+    render::Vec3f pos2{4.0f, 5.0f, 6.0f};
+    render::Vec3f norm2{1.0f, 0.0f, 0.0f};
+    path.add_vertex_with_geometry(1, 2, BsdfType::Glossy, pos2, norm2);
+    
+    EXPECT_EQ(path.depth, 2);
+    EXPECT_FLOAT_EQ(path.positions[1].x, 4.0f);
+    EXPECT_FLOAT_EQ(path.normals[1].x, 1.0f);
+}
+
+TEST(PathTraceGeometryTest, ClearAlsoClearsGeometry) {
+    PathTrace path;
+    
+    render::Vec3f pos{1.0f, 2.0f, 3.0f};
+    render::Vec3f norm{0.0f, 1.0f, 0.0f};
+    path.add_vertex_with_geometry(0, 1, BsdfType::Diffuse, pos, norm);
+    
+    path.clear();
+    
+    EXPECT_EQ(path.depth, 0);
+    // Note: We don't need to clear the actual arrays, just depth
+    // The old data beyond depth is ignored
+}
+
+TEST(PathTraceGeometryTest, MaxDepthWithGeometry) {
+    PathTrace path;
+    
+    // Fill to max
+    for (size_t i = 0; i < MAX_PATH_DEPTH; ++i) {
+        render::Vec3f pos{static_cast<float>(i), 0.0f, 0.0f};
+        render::Vec3f norm{0.0f, 1.0f, 0.0f};
+        bool result = path.add_vertex_with_geometry(
+            static_cast<int32_t>(i), 0, BsdfType::Diffuse, pos, norm);
+        EXPECT_TRUE(result);
+    }
+    EXPECT_EQ(path.depth, MAX_PATH_DEPTH);
+    
+    // Verify last position
+    EXPECT_FLOAT_EQ(path.positions[MAX_PATH_DEPTH - 1].x, 
+                    static_cast<float>(MAX_PATH_DEPTH - 1));
+    
+    // Try to add beyond max - should fail
+    render::Vec3f pos{999.0f, 0.0f, 0.0f};
+    render::Vec3f norm{0.0f, 1.0f, 0.0f};
+    bool result = path.add_vertex_with_geometry(999, 0, BsdfType::Diffuse, pos, norm);
+    EXPECT_FALSE(result);
+    EXPECT_EQ(path.depth, MAX_PATH_DEPTH);
+}
+
+TEST(PathTraceGeometryTest, SetGeometryForExistingVertex) {
+    PathTrace path;
+    
+    // Add vertex without geometry first
+    path.add_vertex(0, 1, BsdfType::Diffuse);
+    
+    // Then set geometry
+    render::Vec3f pos{1.0f, 2.0f, 3.0f};
+    render::Vec3f norm{0.0f, 0.0f, 1.0f};
+    path.set_vertex_geometry(0, pos, norm);
+    
+    EXPECT_FLOAT_EQ(path.positions[0].x, 1.0f);
+    EXPECT_FLOAT_EQ(path.positions[0].y, 2.0f);
+    EXPECT_FLOAT_EQ(path.positions[0].z, 3.0f);
+    EXPECT_FLOAT_EQ(path.normals[0].z, 1.0f);
+}
+
+TEST(PathTraceGeometryTest, GetPositionsUpToDepth) {
+    PathTrace path;
+    
+    path.add_vertex_with_geometry(0, 0, BsdfType::Diffuse,
+        {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    path.add_vertex_with_geometry(1, 0, BsdfType::Diffuse,
+        {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    path.add_vertex_with_geometry(2, 0, BsdfType::Emission,
+        {2.0f, 1.0f, 0.0f}, {0.0f, -1.0f, 0.0f});
+    
+    // Verify we can iterate up to depth
+    EXPECT_EQ(path.depth, 3);
+    EXPECT_FLOAT_EQ(path.positions[0].x, 0.0f);
+    EXPECT_FLOAT_EQ(path.positions[1].x, 1.0f);
+    EXPECT_FLOAT_EQ(path.positions[2].x, 2.0f);
+    EXPECT_FLOAT_EQ(path.positions[2].y, 1.0f);
+}

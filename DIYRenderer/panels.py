@@ -327,3 +327,83 @@ class DIY_RENDER_PT_diagnostics_results(bpy.types.Panel):
         except Exception as e:
             layout.label(text=f"Error: {str(e)[:30]}")
 
+
+class DIY_PT_viewport_path_visualization(bpy.types.Panel):
+    """
+    3D Viewport用のパス可視化パネル
+    
+    Image Editorでロックしたピクセルのパスを3D Viewportに表示します。
+    """
+    bl_label = "DIY Path Visualization"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'DIY'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        
+        # 診断データの確認
+        has_data = False
+        try:
+            from .diagnostics import get_global_diagnostics
+            manager = get_global_diagnostics()
+            has_data = manager is not None and manager.is_available
+        except:
+            pass
+        
+        # hover_diagnostics の状態を確認
+        try:
+            from .hover_diagnostics import _inspector_state
+            is_active = _inspector_state.get('is_active', False)
+            is_locked = _inspector_state.get('locked', False)
+            locked_x = _inspector_state.get('locked_pixel_x', -1)
+            locked_y = _inspector_state.get('locked_pixel_y', -1)
+            paths_count = len(_inspector_state.get('paths_data', []))
+        except:
+            is_active = False
+            is_locked = False
+            locked_x = -1
+            locked_y = -1
+            paths_count = 0
+        
+        # ステータス表示
+        box = layout.box()
+        if not has_data:
+            box.label(text="No diagnostic data", icon='INFO')
+            col = box.column(align=True)
+            col.scale_y = 0.8
+            col.label(text="1. Enable diagnostics")
+            col.label(text="2. Run F12 render")
+            col.label(text="3. Use Pixel Inspector")
+        elif not is_active:
+            box.label(text="Inspector not active", icon='INFO')
+            col = box.column(align=True)
+            col.scale_y = 0.8
+            col.label(text="Open Image Editor →")
+            col.label(text="DIY panel →")
+            col.label(text="Start Inspection")
+        elif not is_locked:
+            box.label(text="No pixel locked", icon='INFO')
+            col = box.column(align=True)
+            col.scale_y = 0.8
+            col.label(text="Click on a pixel in")
+            col.label(text="Image Editor to lock")
+        else:
+            box.label(text=f"Locked: ({locked_x}, {locked_y})", icon='LOCKED')
+            col = box.column(align=True)
+            col.label(text=f"Paths visualized: {paths_count}")
+            
+            # 設定
+            diy = context.scene.diy_renderer
+            col.separator()
+            col.prop(diy, "max_visualized_paths", text="Max Paths")
+        
+        # 使い方
+        if is_active:
+            box = layout.box()
+            box.label(text="Controls:", icon='HELP')
+            col = box.column(align=True)
+            col.scale_y = 0.8
+            col.label(text="Click: Lock/unlock pixel")
+            col.label(text="Ctrl+Click: Force unlock")
