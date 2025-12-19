@@ -360,12 +360,14 @@ class DIY_PT_viewport_path_visualization(bpy.types.Panel):
             locked_x = _inspector_state.get('locked_pixel_x', -1)
             locked_y = _inspector_state.get('locked_pixel_y', -1)
             paths_count = len(_inspector_state.get('paths_data', []))
+            selected_count = len(_inspector_state.get('selected_path_indices', set()))
         except:
             is_active = False
             is_locked = False
             locked_x = -1
             locked_y = -1
             paths_count = 0
+            selected_count = 0
         
         # ステータス表示
         box = layout.box()
@@ -392,7 +394,14 @@ class DIY_PT_viewport_path_visualization(bpy.types.Panel):
         else:
             box.label(text=f"Locked: ({locked_x}, {locked_y})", icon='LOCKED')
             col = box.column(align=True)
-            col.label(text=f"Paths visualized: {paths_count}")
+            col.label(text=f"Paths: {paths_count}")
+            col.label(text=f"Selected: {selected_count}")
+            
+            # 全選択/全解除ボタン
+            if paths_count > 0:
+                row = box.row(align=True)
+                row.operator("diy_render.select_all_paths", text="All", icon='CHECKBOX_HLT')
+                row.operator("diy_render.deselect_all_paths", text="None", icon='CHECKBOX_DEHLT')
             
             # 設定
             diy = context.scene.diy_renderer
@@ -407,3 +416,4 @@ class DIY_PT_viewport_path_visualization(bpy.types.Panel):
             col.scale_y = 0.8
             col.label(text="Click: Lock/unlock pixel")
             col.label(text="Ctrl+Click: Force unlock")
+            col.label(text="Select paths in Image Editor")

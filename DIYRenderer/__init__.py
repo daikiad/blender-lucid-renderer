@@ -74,6 +74,9 @@ from .panels import (
 )
 from .hover_diagnostics import (
     DIY_OT_pixel_inspector,
+    DIY_OT_toggle_path_selection,
+    DIY_OT_select_all_paths,
+    DIY_OT_deselect_all_paths,
     DIY_PT_image_editor_diagnostics,
 )
 from .engine import DIYRenderEngine
@@ -153,6 +156,9 @@ def register():
     bpy.utils.register_class(DIY_RENDER_PT_diagnostics_results)  # 診断結果パネル
     bpy.utils.register_class(DIY_PT_viewport_path_visualization)  # 3D Viewport パス可視化パネル
     bpy.utils.register_class(DIY_OT_pixel_inspector)  # ピクセルインスペクター
+    bpy.utils.register_class(DIY_OT_toggle_path_selection)  # パス選択トグル
+    bpy.utils.register_class(DIY_OT_select_all_paths)  # 全パス選択
+    bpy.utils.register_class(DIY_OT_deselect_all_paths)  # 全パス選択解除
     bpy.utils.register_class(DIY_PT_image_editor_diagnostics)  # Image Editor パネル
     bpy.utils.register_class(DIYRenderEngine)         # レンダーエンジン本体
     
@@ -265,6 +271,9 @@ def unregister():
     # 登録の逆順で解除（依存関係を壊さないため）
     bpy.utils.unregister_class(DIYRenderEngine)
     bpy.utils.unregister_class(DIY_PT_image_editor_diagnostics)  # Image Editor パネル
+    bpy.utils.unregister_class(DIY_OT_deselect_all_paths)  # 全パス選択解除
+    bpy.utils.unregister_class(DIY_OT_select_all_paths)  # 全パス選択
+    bpy.utils.unregister_class(DIY_OT_toggle_path_selection)  # パス選択トグル
     bpy.utils.unregister_class(DIY_OT_pixel_inspector)  # ピクセルインスペクター
     bpy.utils.unregister_class(DIY_PT_viewport_path_visualization)  # 3D Viewport パス可視化パネル
     bpy.utils.unregister_class(DIY_RENDER_PT_diagnostics_results)  # 子パネルは先に解除

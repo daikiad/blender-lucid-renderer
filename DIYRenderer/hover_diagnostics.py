@@ -334,6 +334,8 @@ _inspector_state = {
     'locked_pixel_x': -1,
     'locked_pixel_y': -1,
     'paths_data': [],  # List of path positions for visualization
+    'paths_metadata': [],  # List of path metadata (signature, mean, object_path)
+    'selected_path_indices': set(),  # Set of selected path indices
 }
 
 
@@ -471,6 +473,11 @@ def _draw_paths_3d_callback(context_dummy):
     if not paths_data:
         return
     
+    selected = state.get('selected_path_indices', set())
+    # 選択がなければ描画しない
+    if not selected:
+        return
+    
     gpu.state.blend_set('ALPHA')
     gpu.state.line_width_set(2.0)
     gpu.state.depth_test_set('LESS_EQUAL')
@@ -478,6 +485,10 @@ def _draw_paths_3d_callback(context_dummy):
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     
     for i, path_positions in enumerate(paths_data):
+        # 選択されたパスのみ描画
+        if i not in selected:
+            continue
+        
         if len(path_positions) < 2:
             continue
         
@@ -532,12 +543,16 @@ def _update_paths_data(pixel_x: int, pixel_y: int):
         
         if manager is None or not manager.is_available:
             _inspector_state['paths_data'] = []
+            _inspector_state['paths_metadata'] = []
+            _inspector_state['selected_path_indices'] = set()
             return
         
         # 診断データを取得
         result = manager.get_pixel_diagnostic(pixel_x, pixel_y)
         if result is None or not result.valid:
             _inspector_state['paths_data'] = []
+            _inspector_state['paths_metadata'] = []
+            _inspector_state['selected_path_indices'] = set()
             return
         
         # max_visualized_paths を取得
@@ -548,16 +563,27 @@ def _update_paths_data(pixel_x: int, pixel_y: int):
         except:
             pass
         
-        # パスデータを抽出（positions配列を持つグループのみ）
+        # パスデータとメタデータを抽出（positions配列を持つグループのみ）
         paths_data = []
+        paths_metadata = []
         for group in result.top_groups[:max_paths]:
             if hasattr(group, 'positions') and group.positions:
                 # positions は list of list/tuple で [x, y, z]
                 positions = [tuple(p) for p in group.positions]
                 if len(positions) >= 2:
                     paths_data.append(positions)
+                    # メタデータを保存
+                    paths_metadata.append({
+                        'signature': getattr(group, 'signature_heckbert', '') or getattr(group, 'signature', ''),
+                        'mean': getattr(group, 'mean_luminance', 0.0),
+                        'object_path': getattr(group, 'object_path', ''),
+                        'sample_count': getattr(group, 'sample_count', 0),
+                        'strategy': getattr(group, 'strategy_name', ''),
+                    })
         
         _inspector_state['paths_data'] = paths_data
+        _inspector_state['paths_metadata'] = paths_metadata
+        _inspector_state['selected_path_indices'] = set()  # 選択をリセット
         
         # 3D Viewport を更新
         for area in bpy.context.screen.areas:
@@ -569,6 +595,8 @@ def _update_paths_data(pixel_x: int, pixel_y: int):
         import traceback
         traceback.print_exc()
         _inspector_state['paths_data'] = []
+        _inspector_state['paths_metadata'] = []
+        _inspector_state['selected_path_indices'] = set()
 
 
 class DIY_OT_pixel_inspector(bpy.types.Operator):
@@ -670,39 +698,36 @@ class DIY_OT_pixel_inspector(bpy.types.Operator):
             self.report({'INFO'}, "ピクセルインスペクター終了")
             return {'CANCELLED'}
         
-        # クリックでピクセルをロック/アンロック
+        # クリック処理（画像領域内のみ）
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
-            pixel_x = _inspector_state['pixel_x']
-            pixel_y = _inspector_state['pixel_y']
+            # マウスがUIパネル上にあるかチェック（UIパネル上ならスキップ）
+            if self._is_mouse_over_ui_panel(context, event.mouse_x, event.mouse_y):
+                return {'PASS_THROUGH'}
             
-            if pixel_x >= 0 and pixel_y >= 0:
+            # クリック時に現在のマウス座標から画像範囲内かを判定
+            click_pixel = self._get_pixel_at_mouse(context, event.mouse_region_x, event.mouse_region_y)
+            
+            # 画像範囲内のクリックのみ処理
+            if click_pixel is not None:
+                pixel_x, pixel_y = click_pixel
                 # Ctrl+クリックで強制アンロック
                 if event.ctrl:
                     _inspector_state['locked'] = False
                     _inspector_state['locked_pixel_x'] = -1
                     _inspector_state['locked_pixel_y'] = -1
                     _inspector_state['paths_data'] = []
+                    _inspector_state['paths_metadata'] = []
+                    _inspector_state['selected_path_indices'] = set()
                     self.report({'INFO'}, "ピクセルロック解除")
-                else:
-                    # 同じピクセルをクリックでトグル、別のピクセルは新しくロック
-                    if (_inspector_state['locked'] and 
-                        _inspector_state['locked_pixel_x'] == pixel_x and 
-                        _inspector_state['locked_pixel_y'] == pixel_y):
-                        # 同じピクセル → アンロック
-                        _inspector_state['locked'] = False
-                        _inspector_state['locked_pixel_x'] = -1
-                        _inspector_state['locked_pixel_y'] = -1
-                        _inspector_state['paths_data'] = []
-                        self.report({'INFO'}, f"ピクセル ({pixel_x}, {pixel_y}) アンロック")
-                    else:
-                        # 新しいピクセルをロック
-                        _inspector_state['locked'] = True
-                        _inspector_state['locked_pixel_x'] = pixel_x
-                        _inspector_state['locked_pixel_y'] = pixel_y
-                        # パスデータを更新
-                        _update_paths_data(pixel_x, pixel_y)
-                        path_count = len(_inspector_state['paths_data'])
-                        self.report({'INFO'}, f"ピクセル ({pixel_x}, {pixel_y}) ロック - {path_count} パス可視化")
+                elif not _inspector_state['locked']:
+                    # ロックされていない場合のみ新しいピクセルをロック
+                    _inspector_state['locked'] = True
+                    _inspector_state['locked_pixel_x'] = pixel_x
+                    _inspector_state['locked_pixel_y'] = pixel_y
+                    _update_paths_data(pixel_x, pixel_y)
+                    path_count = len(_inspector_state['paths_data'])
+                    self.report({'INFO'}, f"ピクセル ({pixel_x}, {pixel_y}) ロック - {path_count} パス")
+                # ロック中に画像上をクリックしても何もしない
                 
                 # 3D Viewport も更新
                 for area in context.screen.areas:
@@ -710,6 +735,7 @@ class DIY_OT_pixel_inspector(bpy.types.Operator):
                         area.tag_redraw()
                 
                 return {'RUNNING_MODAL'}
+            # 画像範囲外のクリックは PASS_THROUGH（UIパネル等に渡す）
         
         # マウス移動（ロック中はスキップ）
         if not _inspector_state['locked']:
@@ -723,6 +749,55 @@ class DIY_OT_pixel_inspector(bpy.types.Operator):
         
         # 他のイベントはパススルー（通常操作を許可）
         return {'PASS_THROUGH'}
+    
+    def _is_mouse_over_ui_panel(self, context, mouse_x: int, mouse_y: int) -> bool:
+        """マウスがUIパネル（またはヘッダー等）上にあるかチェック"""
+        if not context.area:
+            return False
+        
+        for region in context.area.regions:
+            # WINDOW以外のリージョン（UI, HEADER, TOOLS等）をチェック
+            if region.type != 'WINDOW':
+                # マウスがこのリージョン内にあるか
+                if (region.x <= mouse_x < region.x + region.width and
+                    region.y <= mouse_y < region.y + region.height):
+                    return True
+        return False
+    
+    def _get_pixel_at_mouse(self, context, mouse_x: int, mouse_y: int):
+        """マウス座標から画像ピクセル座標を取得。範囲外なら None を返す。"""
+        region = context.region
+        space = context.space_data
+        
+        if not region or not space or not space.image:
+            return None
+        
+        # 画像サイズを取得
+        image = space.image
+        width, height = image.size
+        
+        if width == 0 or height == 0:
+            if image.name == 'Render Result':
+                render = context.scene.render
+                width = int(render.resolution_x * render.resolution_percentage / 100)
+                height = int(render.resolution_y * render.resolution_percentage / 100)
+            else:
+                return None
+        
+        # リージョン座標をビュー座標に変換
+        try:
+            view_x, view_y = region.view2d.region_to_view(mouse_x, mouse_y)
+        except:
+            return None
+        
+        # view座標をピクセル座標に変換
+        pixel_x = int(view_x * width)
+        pixel_y = height - 1 - int(view_y * height)
+        
+        # 範囲チェック
+        if 0 <= pixel_x < width and 0 <= pixel_y < height:
+            return (pixel_x, pixel_y)
+        return None
     
     def _update_pixel_info(self, context):
         """マウス位置からピクセル情報を更新"""
@@ -904,14 +979,141 @@ class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
             col.label(text="Ctrl+Click to unlock")
             col.label(text="ESC or Right-click to exit")
             
-            # ロック状態表示
+            # ロック状態表示とパスリスト
             if _inspector_state['locked']:
                 px = _inspector_state['locked_pixel_x']
                 py = _inspector_state['locked_pixel_y']
-                path_count = len(_inspector_state['paths_data'])
-                col.separator()
-                col.label(text=f"🔒 Locked: ({px}, {py})", icon='LOCKED')
-                col.label(text=f"   Paths: {path_count}")
+                paths_metadata = _inspector_state.get('paths_metadata', [])
+                selected = _inspector_state.get('selected_path_indices', set())
+                
+                box = layout.box()
+                box.label(text=f"Locked: ({px}, {py})", icon='LOCKED')
+                
+                # パスリスト
+                if paths_metadata:
+                    box.label(text=f"Paths ({len(paths_metadata)}):")
+                    
+                    # 全選択/全解除ボタン
+                    row = box.row(align=True)
+                    row.operator("diy_render.select_all_paths", text="All", icon='CHECKBOX_HLT')
+                    row.operator("diy_render.deselect_all_paths", text="None", icon='CHECKBOX_DEHLT')
+                    
+                    # パスリスト表示
+                    col = box.column(align=True)
+                    for i, meta in enumerate(paths_metadata):
+                        is_selected = i in selected
+                        
+                        # 行: 選択ボタン + パス情報
+                        row = col.row(align=True)
+                        
+                        # 選択トグルボタン
+                        op = row.operator(
+                            "diy_render.toggle_path_selection",
+                            text="",
+                            icon='CHECKBOX_HLT' if is_selected else 'CHECKBOX_DEHLT',
+                            depress=is_selected
+                        )
+                        op.path_index = i
+                        
+                        # パス情報（クリックで選択トグル）
+                        sig = meta.get('signature', '?')[:20]
+                        mean = meta.get('mean', 0)
+                        strategy = meta.get('strategy', '')
+                        
+                        label = f"{i+1}. {sig}"
+                        if strategy:
+                            label += f" [{strategy[:3]}]"
+                        
+                        op2 = row.operator(
+                            "diy_render.toggle_path_selection",
+                            text=label,
+                            depress=is_selected
+                        )
+                        op2.path_index = i
+                        
+                        # 寄与度
+                        row.label(text=f"{mean:.4f}")
+                    
+                    # 選択数表示
+                    box.label(text=f"Selected: {len(selected)} / {len(paths_metadata)}")
+                else:
+                    box.label(text="No paths with geometry")
+
+
+# =============================================================================
+# パス選択オペレーター
+# =============================================================================
+
+class DIY_OT_toggle_path_selection(bpy.types.Operator):
+    """パスの選択をトグルする"""
+    bl_idname = "diy_render.toggle_path_selection"
+    bl_label = "Toggle Path Selection"
+    bl_description = "Toggle selection of this path for 3D visualization"
+    bl_options = {'INTERNAL'}
+    
+    path_index: bpy.props.IntProperty(default=-1)
+    
+    def execute(self, context):
+        global _inspector_state
+        idx = self.path_index
+        
+        if idx < 0 or idx >= len(_inspector_state.get('paths_data', [])):
+            return {'CANCELLED'}
+        
+        selected = _inspector_state.get('selected_path_indices', set())
+        
+        if idx in selected:
+            selected.discard(idx)
+        else:
+            selected.add(idx)
+        
+        _inspector_state['selected_path_indices'] = selected
+        
+        # 再描画
+        for area in context.screen.areas:
+            if area.type in {'VIEW_3D', 'IMAGE_EDITOR'}:
+                area.tag_redraw()
+        
+        return {'FINISHED'}
+
+
+class DIY_OT_select_all_paths(bpy.types.Operator):
+    """全パスを選択する"""
+    bl_idname = "diy_render.select_all_paths"
+    bl_label = "Select All Paths"
+    bl_description = "Select all paths for 3D visualization"
+    bl_options = {'INTERNAL'}
+    
+    def execute(self, context):
+        global _inspector_state
+        paths_count = len(_inspector_state.get('paths_data', []))
+        _inspector_state['selected_path_indices'] = set(range(paths_count))
+        
+        # 再描画
+        for area in context.screen.areas:
+            if area.type in {'VIEW_3D', 'IMAGE_EDITOR'}:
+                area.tag_redraw()
+        
+        return {'FINISHED'}
+
+
+class DIY_OT_deselect_all_paths(bpy.types.Operator):
+    """全パスの選択を解除する"""
+    bl_idname = "diy_render.deselect_all_paths"
+    bl_label = "Deselect All Paths"
+    bl_description = "Deselect all paths"
+    bl_options = {'INTERNAL'}
+    
+    def execute(self, context):
+        global _inspector_state
+        _inspector_state['selected_path_indices'] = set()
+        
+        # 再描画
+        for area in context.screen.areas:
+            if area.type in {'VIEW_3D', 'IMAGE_EDITOR'}:
+                area.tag_redraw()
+        
+        return {'FINISHED'}
 
 
 # =============================================================================
@@ -920,6 +1122,9 @@ class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
 
 classes = (
     DIY_OT_pixel_inspector,
+    DIY_OT_toggle_path_selection,
+    DIY_OT_select_all_paths,
+    DIY_OT_deselect_all_paths,
     DIY_PT_image_editor_diagnostics,
 )
 
@@ -956,6 +1161,8 @@ def unregister():
     _inspector_state['is_active'] = False
     _inspector_state['locked'] = False
     _inspector_state['paths_data'] = []
+    _inspector_state['paths_metadata'] = []
+    _inspector_state['selected_path_indices'] = set()
     
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
