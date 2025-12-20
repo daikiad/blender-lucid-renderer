@@ -1579,12 +1579,39 @@ class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
                         reverse=True
                     )
                     
+                    # パスの数から色アイコンを決定する関数
+                    def get_color_icon(path_index, total_paths):
+                        """パスインデックスに基づいて色アイコンを返す（描画と同じ色計算）"""
+                        hue = (path_index / max(total_paths, 1)) * 0.8  # 0 to 0.8
+                        # STRIP_COLOR: 01=赤, 02=オレンジ, 03=黄, 04=緑, 05=水色, 06=青, 07=紫, 08=ピンク, 09=茶
+                        # hue: 0=赤, 0.1=オレンジ, 0.16=黄, 0.33=緑, 0.5=水色, 0.66=青, 0.8=紫
+                        if hue < 0.06:
+                            return 'STRIP_COLOR_01'  # 赤
+                        elif hue < 0.13:
+                            return 'STRIP_COLOR_02'  # オレンジ
+                        elif hue < 0.22:
+                            return 'STRIP_COLOR_03'  # 黄
+                        elif hue < 0.4:
+                            return 'STRIP_COLOR_04'  # 緑
+                        elif hue < 0.55:
+                            return 'STRIP_COLOR_05'  # 水色
+                        elif hue < 0.7:
+                            return 'STRIP_COLOR_06'  # 青
+                        else:
+                            return 'STRIP_COLOR_07'  # 紫
+                    
+                    total_paths = len(paths_metadata)
+                    
                     for i, meta in sorted_paths:
                         is_selected = i in selected
                         is_highlighted = (i == highlighted)
                         
-                        # 行: ハイライト + 選択ボタン + パス情報
+                        # 行: 色 + ハイライト + 選択ボタン + パス情報
                         row = col.row(align=True)
+                        
+                        # 色アイコン（描画色に対応）
+                        color_icon = get_color_icon(i, total_paths)
+                        row.label(text="", icon=color_icon)
                         
                         # ハイライトボタン（目のアイコン）
                         op_hl = row.operator(
