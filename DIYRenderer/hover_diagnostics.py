@@ -336,6 +336,7 @@ _inspector_state = {
     'paths_data': [],  # List of path positions for visualization
     'paths_metadata': [],  # List of path metadata (signature, mean, object_path)
     'selected_path_indices': set(),  # Set of selected path indices
+    'highlighted_path_index': -1,  # Highlighted path index (-1 = none)
 }
 
 
@@ -601,7 +602,16 @@ def _draw_paths_2d(region):
         # パスインデックスに基づいて色を生成（虹色）
         hue = (i / max(len(paths_data), 1)) * 0.8
         r, g, b = colorsys.hsv_to_rgb(hue, 0.9, 1.0)
-        color = (r, g, b, 0.9)
+        
+        # ハイライトパスは明るく、それ以外は薄く表示
+        highlighted = state.get('highlighted_path_index', -1)
+        if i == highlighted:
+            alpha = 1.0
+            gpu.state.line_width_set(3.0)
+        else:
+            alpha = 0.35
+            gpu.state.line_width_set(1.5)
+        color = (r, g, b, alpha)
         
         # 隣接する有効座標ペアを線分として描画（クリッピング付き）
         for j in range(len(coords_2d) - 1):
@@ -770,7 +780,16 @@ def _draw_paths_3d_callback(context_dummy):
         import colorsys
         hue = (i / max(len(paths_data), 1)) * 0.8  # 0 to 0.8 (赤から紫)
         r, g, b = colorsys.hsv_to_rgb(hue, 0.9, 1.0)
-        color = (r, g, b, 0.8)
+        
+        # ハイライトパスは明るく、それ以外は薄く表示
+        highlighted = state.get('highlighted_path_index', -1)
+        if i == highlighted:
+            alpha = 1.0
+            gpu.state.line_width_set(3.0)
+        else:
+            alpha = 0.35
+            gpu.state.line_width_set(2.0)
+        color = (r, g, b, alpha)
         
         # ポリラインを描画
         batch = batch_for_shader(shader, 'LINE_STRIP', {"pos": path_positions})
@@ -1551,11 +1570,22 @@ class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
                     
                     # パスリスト表示
                     col = box.column(align=True)
+                    highlighted = _inspector_state.get('highlighted_path_index', -1)
                     for i, meta in enumerate(paths_metadata):
                         is_selected = i in selected
+                        is_highlighted = (i == highlighted)
                         
-                        # 行: 選択ボタン + パス情報
+                        # 行: ハイライト + 選択ボタン + パス情報
                         row = col.row(align=True)
+                        
+                        # ハイライトボタン（目のアイコン）
+                        op_hl = row.operator(
+                            "diy_render.highlight_path",
+                            text="",
+                            icon='HIDE_OFF' if is_highlighted else 'HIDE_ON',
+                            depress=is_highlighted
+                        )
+                        op_hl.path_index = i
                         
                         # 選択トグルボタン
                         op = row.operator(
@@ -1634,6 +1664,35 @@ class DIY_OT_toggle_path_selection(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class DIY_OT_highlight_path(bpy.types.Operator):
+    """パスをハイライトする（トグル）"""
+    bl_idname = "diy_render.highlight_path"
+    bl_label = "Highlight Path"
+    bl_description = "Highlight this path (toggle). Highlighted path is shown brighter and thicker"
+    bl_options = {'INTERNAL'}
+    
+    path_index: bpy.props.IntProperty(default=-1)
+    
+    def execute(self, context):
+        global _inspector_state
+        idx = self.path_index
+        
+        if idx < 0 or idx >= len(_inspector_state.get('paths_data', [])):
+            return {'CANCELLED'}
+        
+        # トグル: 同じパスを再度クリックしたらハイライト解除
+        current = _inspector_state.get('highlighted_path_index', -1)
+        if current == idx:
+            _inspector_state['highlighted_path_index'] = -1
+        else:
+            _inspector_state['highlighted_path_index'] = idx
+        
+        # 全ウィンドウの関連エリアを再描画
+        _redraw_all_viewports()
+        
+        return {'FINISHED'}
+
+
 class DIY_OT_select_all_paths(bpy.types.Operator):
     """全パスを選択する"""
     bl_idname = "diy_render.select_all_paths"
@@ -1684,6 +1743,7 @@ def _redraw_all_viewports():
 classes = (
     DIY_OT_pixel_inspector,
     DIY_OT_toggle_path_selection,
+    DIY_OT_highlight_path,
     DIY_OT_select_all_paths,
     DIY_OT_deselect_all_paths,
     DIY_OT_create_path_curves,
