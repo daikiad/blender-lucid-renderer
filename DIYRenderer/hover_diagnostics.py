@@ -560,7 +560,9 @@ def _draw_paths_2d(region):
                 co = world_to_camera_view(scene, camera, Vector(pos))
                 raw_uv.append((co.x, co.y, co.z))
                 
-                behind = co.z <= 0
+                # カメラ位置（index 0）はz=0になるが、これは有効な点
+                # それ以外でz<=0はカメラの後ろ
+                behind = co.z < 0 if k == 0 else co.z <= 0
                 is_behind_camera.append(behind)
                 
                 # カメラの後ろにある点は一旦Noneにして、後で方向から計算
