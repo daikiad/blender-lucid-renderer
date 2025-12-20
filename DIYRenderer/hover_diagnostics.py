@@ -516,6 +516,36 @@ def _draw_paths_2d(region):
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     
     from mathutils import Vector
+    import math
+    
+    def draw_thick_line_2d(shader, p1, p2, color, thickness=4.0):
+        """2Dで太い線を三角形で描画（macOS対応）"""
+        x1, y1 = p1
+        x2, y2 = p2
+        
+        # 方向ベクトル
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.sqrt(dx*dx + dy*dy)
+        
+        if length < 0.001:
+            return
+        
+        # 垂直方向のオフセット
+        nx = -dy / length * thickness / 2
+        ny = dx / length * thickness / 2
+        
+        # 四角形の4頂点
+        v1 = (x1 + nx, y1 + ny)
+        v2 = (x1 - nx, y1 - ny)
+        v3 = (x2 - nx, y2 - ny)
+        v4 = (x2 + nx, y2 + ny)
+        
+        # 2つの三角形で四角形を描画
+        batch = batch_for_shader(shader, 'TRIS', {"pos": [v1, v2, v3, v1, v3, v4]})
+        shader.bind()
+        shader.uniform_float("color", color)
+        batch.draw(shader)
     
     # 画面クリッピング用のマージン
     CLIP_MARGIN = 5000  # 画面外に大きく出る座標をクリップ
@@ -607,10 +637,10 @@ def _draw_paths_2d(region):
         highlighted = state.get('highlighted_path_index', -1)
         if i == highlighted:
             alpha = 1.0
-            gpu.state.line_width_set(3.0)
+            line_thickness = 6.0
         else:
-            alpha = 0.35
-            gpu.state.line_width_set(1.5)
+            alpha = 0.4
+            line_thickness = 4.0
         color = (r, g, b, alpha)
         
         # 隣接する有効座標ペアを線分として描画（クリッピング付き）
@@ -624,10 +654,8 @@ def _draw_paths_2d(region):
             # 画面外に大きく出る線分をクリップ
             p1_clipped, p2_clipped = clip_line_to_screen(p1, p2)
             
-            batch = batch_for_shader(shader, 'LINES', {"pos": [p1_clipped, p2_clipped]})
-            shader.bind()
-            shader.uniform_float("color", color)
-            batch.draw(shader)
+            # 太い線を三角形で描画（macOSでline_widthが効かないため）
+            draw_thick_line_2d(shader, p1_clipped, p2_clipped, color, line_thickness)
         
         # 始点マーカー（カメラ位置）- 円
         if len(coords_2d) > 0 and coords_2d[0] is not None:
@@ -785,10 +813,10 @@ def _draw_paths_3d_callback(context_dummy):
         highlighted = state.get('highlighted_path_index', -1)
         if i == highlighted:
             alpha = 1.0
-            gpu.state.line_width_set(3.0)
+            gpu.state.line_width_set(6.0)
         else:
-            alpha = 0.35
-            gpu.state.line_width_set(2.0)
+            alpha = 0.4
+            gpu.state.line_width_set(4.0)
         color = (r, g, b, alpha)
         
         # ポリラインを描画
