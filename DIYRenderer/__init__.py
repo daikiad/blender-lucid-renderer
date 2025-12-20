@@ -75,6 +75,7 @@ from .panels import (
 from .hover_diagnostics import (
     DIY_OT_pixel_inspector,
     DIY_OT_toggle_path_selection,
+    DIY_OT_highlight_path,
     DIY_OT_select_all_paths,
     DIY_OT_deselect_all_paths,
     DIY_OT_create_path_curves,
@@ -159,6 +160,7 @@ def register():
     bpy.utils.register_class(DIY_PT_viewport_path_visualization)  # 3D Viewport パス可視化パネル
     bpy.utils.register_class(DIY_OT_pixel_inspector)  # ピクセルインスペクター
     bpy.utils.register_class(DIY_OT_toggle_path_selection)  # パス選択トグル
+    bpy.utils.register_class(DIY_OT_highlight_path)  # パスハイライト
     bpy.utils.register_class(DIY_OT_select_all_paths)  # 全パス選択
     bpy.utils.register_class(DIY_OT_deselect_all_paths)  # 全パス選択解除
     bpy.utils.register_class(DIY_OT_create_path_curves)  # パスCurve作成
@@ -279,6 +281,7 @@ def unregister():
     bpy.utils.unregister_class(DIY_OT_create_path_curves)  # パスCurve作成
     bpy.utils.unregister_class(DIY_OT_deselect_all_paths)  # 全パス選択解除
     bpy.utils.unregister_class(DIY_OT_select_all_paths)  # 全パス選択
+    bpy.utils.unregister_class(DIY_OT_highlight_path)  # パスハイライト
     bpy.utils.unregister_class(DIY_OT_toggle_path_selection)  # パス選択トグル
     bpy.utils.unregister_class(DIY_OT_pixel_inspector)  # ピクセルインスペクター
     bpy.utils.unregister_class(DIY_PT_viewport_path_visualization)  # 3D Viewport パス可視化パネル
