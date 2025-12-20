@@ -843,27 +843,15 @@ class DIY_OT_pixel_inspector(bpy.types.Operator):
             # クリック時に現在のマウス座標から画像範囲内かを判定
             click_pixel = self._get_pixel_at_mouse(context, event.mouse_region_x, event.mouse_region_y)
             
-            # 画像範囲内のクリックのみ処理
+            # 画像範囲内のクリックでピクセルロックを更新
             if click_pixel is not None:
                 pixel_x, pixel_y = click_pixel
-                # Ctrl+クリックで強制アンロック
-                if event.ctrl:
-                    _inspector_state['locked'] = False
-                    _inspector_state['locked_pixel_x'] = -1
-                    _inspector_state['locked_pixel_y'] = -1
-                    _inspector_state['paths_data'] = []
-                    _inspector_state['paths_metadata'] = []
-                    _inspector_state['selected_path_indices'] = set()
-                    self.report({'INFO'}, "ピクセルロック解除")
-                elif not _inspector_state['locked']:
-                    # ロックされていない場合のみ新しいピクセルをロック
-                    _inspector_state['locked'] = True
-                    _inspector_state['locked_pixel_x'] = pixel_x
-                    _inspector_state['locked_pixel_y'] = pixel_y
-                    _update_paths_data(pixel_x, pixel_y)
-                    path_count = len(_inspector_state['paths_data'])
-                    self.report({'INFO'}, f"ピクセル ({pixel_x}, {pixel_y}) ロック - {path_count} パス")
-                # ロック中に画像上をクリックしても何もしない
+                _inspector_state['locked'] = True
+                _inspector_state['locked_pixel_x'] = pixel_x
+                _inspector_state['locked_pixel_y'] = pixel_y
+                _update_paths_data(pixel_x, pixel_y)
+                path_count = len(_inspector_state['paths_data'])
+                self.report({'INFO'}, f"ピクセル ({pixel_x}, {pixel_y}) ロック - {path_count} パス")
                 
                 # 3D Viewport も更新
                 for area in context.screen.areas:
