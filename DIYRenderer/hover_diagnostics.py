@@ -516,6 +516,32 @@ def _draw_paths_2d(region):
     
     from mathutils import Vector
     
+    # 画面クリッピング用のマージン
+    CLIP_MARGIN = 5000  # 画面外に大きく出る座標をクリップ
+    
+    def clip_line_to_screen(p1, p2, margin=CLIP_MARGIN):
+        """2点間の線分を画面内にクリップ"""
+        x1, y1 = p1
+        x2, y2 = p2
+        
+        # 両方が範囲内ならそのまま
+        if (abs(x1) < margin and abs(y1) < margin and 
+            abs(x2) < margin and abs(y2) < margin):
+            return p1, p2
+        
+        # p2が非常に遠い場合、p1からp2方向へ一定距離で切る
+        dx = x2 - x1
+        dy = y2 - y1
+        length = (dx*dx + dy*dy) ** 0.5
+        
+        if length > margin:
+            # 方向ベクトルを正規化してmargin分だけ伸ばす
+            scale = margin / length
+            x2 = x1 + dx * scale
+            y2 = y1 + dy * scale
+        
+        return p1, (x2, y2)
+    
     for i, path_positions in enumerate(paths_data):
         # 選択されたパスのみ描画
         if i not in selected:
@@ -526,25 +552,48 @@ def _draw_paths_2d(region):
         
         # ワールド座標を画像座標に変換
         coords_2d = []
-        for pos in path_positions:
+        is_behind_camera = []  # カメラの後ろにあるかどうか
+        raw_uv = []  # UV座標を保存（後で方向計算に使う）
+        for k, pos in enumerate(path_positions):
             try:
                 # world_to_camera_view: (0,0) = 左下, (1,1) = 右上
                 co = world_to_camera_view(scene, camera, Vector(pos))
+                raw_uv.append((co.x, co.y, co.z))
                 
-                # カメラの後ろにある点はスキップ
-                if co.z <= 0:
+                behind = co.z <= 0
+                is_behind_camera.append(behind)
+                
+                # カメラの後ろにある点は一旦Noneにして、後で方向から計算
+                if behind:
                     coords_2d.append(None)
-                    continue
-                
-                # 画像座標に変換
-                img_x = co.x * img_width
-                img_y = co.y * img_height
-                
-                # region.view2d でリージョン座標に変換
-                reg_x, reg_y = region.view2d.view_to_region(img_x / img_width, img_y / img_height, clip=False)
-                coords_2d.append((reg_x, reg_y))
-            except:
+                else:
+                    reg_x, reg_y = region.view2d.view_to_region(co.x, co.y, clip=False)
+                    coords_2d.append((reg_x, reg_y))
+            except Exception as e:
                 coords_2d.append(None)
+                is_behind_camera.append(True)
+                raw_uv.append(None)
+        
+        # カメラの後ろにある点への線は、前の点からの方向で延長
+        for j in range(len(coords_2d)):
+            if is_behind_camera[j] and j > 0 and raw_uv[j] is not None and raw_uv[j-1] is not None:
+                # 前の点と現在の点のUV方向を計算
+                prev_uv = raw_uv[j-1]
+                curr_uv = raw_uv[j]
+                
+                # 前の点がカメラの前にある場合のみ
+                if prev_uv[2] > 0:
+                    # UV空間での方向
+                    dir_u = curr_uv[0] - prev_uv[0]
+                    dir_v = curr_uv[1] - prev_uv[1]
+                    
+                    # 方向を反転（z < 0なので逆方向に出るため）
+                    # 前の点から正しい方向へ延長
+                    ext_u = prev_uv[0] - dir_u * 10  # 反転して延長
+                    ext_v = prev_uv[1] - dir_v * 10
+                    
+                    reg_x, reg_y = region.view2d.view_to_region(ext_u, ext_v, clip=False)
+                    coords_2d[j] = (reg_x, reg_y)
         
         # 有効な座標のみで線分を描画
         # パスインデックスに基づいて色を生成（虹色）
@@ -552,29 +601,31 @@ def _draw_paths_2d(region):
         r, g, b = colorsys.hsv_to_rgb(hue, 0.9, 1.0)
         color = (r, g, b, 0.9)
         
-        # 連続した有効座標をセグメントとして描画
-        segments = []
-        current_segment = []
-        for coord in coords_2d:
-            if coord is not None:
-                current_segment.append(coord)
-            else:
-                if len(current_segment) >= 2:
-                    segments.append(current_segment)
-                current_segment = []
-        if len(current_segment) >= 2:
-            segments.append(current_segment)
-        
-        for segment in segments:
-            batch = batch_for_shader(shader, 'LINE_STRIP', {"pos": segment})
+        # 隣接する有効座標ペアを線分として描画（クリッピング付き）
+        for j in range(len(coords_2d) - 1):
+            p1 = coords_2d[j]
+            p2 = coords_2d[j + 1]
+            
+            if p1 is None or p2 is None:
+                continue
+            
+            # 画面外に大きく出る線分をクリップ
+            p1_clipped, p2_clipped = clip_line_to_screen(p1, p2)
+            
+            batch = batch_for_shader(shader, 'LINES', {"pos": [p1_clipped, p2_clipped]})
             shader.bind()
             shader.uniform_float("color", color)
             batch.draw(shader)
         
-        # バウンス点にマーカーを描画
+        # バウンス点にマーカーを描画（カメラの前にある点のみ）
         for j, coord in enumerate(coords_2d):
             if coord is not None and j > 0:  # カメラ位置はスキップ
-                _draw_bounce_marker_2d(shader, coord, color)
+                # カメラの後ろにある点はスキップ
+                if is_behind_camera[j]:
+                    continue
+                # 画面内の点のみマーカーを描画
+                if abs(coord[0]) < CLIP_MARGIN and abs(coord[1]) < CLIP_MARGIN:
+                    _draw_bounce_marker_2d(shader, coord, color)
     
     gpu.state.line_width_set(1.0)
     gpu.state.blend_set('NONE')
