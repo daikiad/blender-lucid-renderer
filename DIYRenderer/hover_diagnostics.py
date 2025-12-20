@@ -1568,10 +1568,18 @@ class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
                     row.operator("diy_render.select_all_paths", text="All", icon='CHECKBOX_HLT')
                     row.operator("diy_render.deselect_all_paths", text="None", icon='CHECKBOX_DEHLT')
                     
-                    # パスリスト表示
+                    # パスリスト表示（mean値の大きい順にソート）
                     col = box.column(align=True)
                     highlighted = _inspector_state.get('highlighted_path_index', -1)
-                    for i, meta in enumerate(paths_metadata):
+                    
+                    # インデックス付きでソート（元のインデックスを保持）
+                    sorted_paths = sorted(
+                        enumerate(paths_metadata),
+                        key=lambda x: x[1].get('mean', 0),
+                        reverse=True
+                    )
+                    
+                    for i, meta in sorted_paths:
                         is_selected = i in selected
                         is_highlighted = (i == highlighted)
                         
