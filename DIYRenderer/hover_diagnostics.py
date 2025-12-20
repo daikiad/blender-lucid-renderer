@@ -617,18 +617,103 @@ def _draw_paths_2d(region):
             shader.uniform_float("color", color)
             batch.draw(shader)
         
+        # 始点マーカー（カメラ位置）- 円
+        if len(coords_2d) > 0 and coords_2d[0] is not None:
+            if not is_behind_camera[0]:
+                _draw_camera_marker_2d(shader, coords_2d[0], color)
+        
         # バウンス点にマーカーを描画（カメラの前にある点のみ）
         for j, coord in enumerate(coords_2d):
-            if coord is not None and j > 0:  # カメラ位置はスキップ
+            if coord is not None and j > 0 and j < len(coords_2d) - 1:  # 始点・終点以外
                 # カメラの後ろにある点はスキップ
                 if is_behind_camera[j]:
                     continue
                 # 画面内の点のみマーカーを描画
                 if abs(coord[0]) < CLIP_MARGIN and abs(coord[1]) < CLIP_MARGIN:
                     _draw_bounce_marker_2d(shader, coord, color)
+        
+        # 終点マーカー（光源/環境光）- 矢印
+        if len(coords_2d) >= 2:
+            last_idx = len(coords_2d) - 1
+            prev_idx = last_idx - 1
+            
+            # 終点と前の点が両方有効な場合のみ矢印を描画
+            if coords_2d[last_idx] is not None and coords_2d[prev_idx] is not None:
+                # クリップ後の終点を使う
+                p1, p2 = clip_line_to_screen(coords_2d[prev_idx], coords_2d[last_idx])
+                _draw_arrow_marker_2d(shader, p1, p2, color)
     
     gpu.state.line_width_set(1.0)
     gpu.state.blend_set('NONE')
+
+
+def _draw_camera_marker_2d(shader, position: Tuple[float, float], color: Tuple[float, float, float, float]):
+    """2Dで始点（カメラ）に円マーカーを描画"""
+    import math
+    size = 6
+    x, y = position
+    segments = 12
+    
+    # 円を線分で近似
+    points = []
+    for i in range(segments + 1):
+        angle = 2 * math.pi * i / segments
+        px = x + size * math.cos(angle)
+        py = y + size * math.sin(angle)
+        points.append((px, py))
+    
+    batch = batch_for_shader(shader, 'LINE_STRIP', {"pos": points})
+    shader.bind()
+    shader.uniform_float("color", color)
+    batch.draw(shader)
+
+
+def _draw_arrow_marker_2d(shader, from_pos: Tuple[float, float], to_pos: Tuple[float, float], color: Tuple[float, float, float, float]):
+    """2Dで終点に矢印マーカーを描画（光の到達方向を示す）"""
+    import math
+    
+    x1, y1 = from_pos
+    x2, y2 = to_pos
+    
+    # 方向ベクトル
+    dx = x2 - x1
+    dy = y2 - y1
+    length = math.sqrt(dx*dx + dy*dy)
+    
+    if length < 1:
+        return
+    
+    # 正規化
+    dx /= length
+    dy /= length
+    
+    # 矢印のサイズ
+    arrow_size = 12
+    arrow_angle = math.pi / 6  # 30度
+    
+    # 矢印の両翼の終点を計算
+    cos_a = math.cos(arrow_angle)
+    sin_a = math.sin(arrow_angle)
+    
+    # 左翼
+    left_x = x2 - arrow_size * (dx * cos_a + dy * sin_a)
+    left_y = y2 - arrow_size * (dy * cos_a - dx * sin_a)
+    
+    # 右翼
+    right_x = x2 - arrow_size * (dx * cos_a - dy * sin_a)
+    right_y = y2 - arrow_size * (dy * cos_a + dx * sin_a)
+    
+    # 矢印を描画
+    arrow_lines = [
+        [(x2, y2), (left_x, left_y)],
+        [(x2, y2), (right_x, right_y)],
+    ]
+    
+    for line in arrow_lines:
+        batch = batch_for_shader(shader, 'LINES', {"pos": line})
+        shader.bind()
+        shader.uniform_float("color", color)
+        batch.draw(shader)
 
 
 def _draw_bounce_marker_2d(shader, position: Tuple[float, float], color: Tuple[float, float, float, float]):
@@ -691,14 +776,92 @@ def _draw_paths_3d_callback(context_dummy):
         shader.uniform_float("color", color)
         batch.draw(shader)
         
-        # バウンス点にマーカーを描画
-        for pos in path_positions[1:]:  # カメラ位置をスキップ
-            _draw_bounce_marker_3d(shader, pos, color)
+        # 始点マーカー（カメラ位置）- 球
+        _draw_camera_marker_3d(shader, path_positions[0], color)
+        
+        # バウンス点にマーカーを描画（始点・終点以外）
+        for j, pos in enumerate(path_positions):
+            if j > 0 and j < len(path_positions) - 1:
+                _draw_bounce_marker_3d(shader, pos, color)
+        
+        # 終点マーカー（光源/環境光）- 矢印
+        if len(path_positions) >= 2:
+            _draw_arrow_marker_3d(shader, path_positions[-2], path_positions[-1], color)
     
     # 状態を復元
     gpu.state.depth_test_set('NONE')
     gpu.state.line_width_set(1.0)
     gpu.state.blend_set('NONE')
+
+
+def _draw_camera_marker_3d(shader, position: Tuple[float, float, float], color: Tuple[float, float, float, float]):
+    """3Dで始点（カメラ位置）に円マーカーを描画"""
+    import math
+    size = 0.08
+    x, y, z = position
+    segments = 8
+    
+    # XY平面、XZ平面、YZ平面に円を描画
+    for plane in ['xy', 'xz', 'yz']:
+        points = []
+        for i in range(segments + 1):
+            angle = 2 * math.pi * i / segments
+            if plane == 'xy':
+                px = x + size * math.cos(angle)
+                py = y + size * math.sin(angle)
+                pz = z
+            elif plane == 'xz':
+                px = x + size * math.cos(angle)
+                py = y
+                pz = z + size * math.sin(angle)
+            else:  # yz
+                px = x
+                py = y + size * math.cos(angle)
+                pz = z + size * math.sin(angle)
+            points.append((px, py, pz))
+        
+        batch = batch_for_shader(shader, 'LINE_STRIP', {"pos": points})
+        shader.bind()
+        shader.uniform_float("color", color)
+        batch.draw(shader)
+
+
+def _draw_arrow_marker_3d(shader, from_pos: Tuple[float, float, float], to_pos: Tuple[float, float, float], color: Tuple[float, float, float, float]):
+    """3Dで終点に矢印マーカーを描画"""
+    import math
+    from mathutils import Vector
+    
+    p1 = Vector(from_pos)
+    p2 = Vector(to_pos)
+    
+    # 方向ベクトル
+    direction = p2 - p1
+    length = direction.length
+    
+    if length < 0.001:
+        return
+    
+    direction.normalize()
+    
+    # 矢印のサイズ
+    arrow_size = 0.15
+    
+    # 方向に垂直なベクトルを作成
+    up = Vector((0, 0, 1))
+    if abs(direction.dot(up)) > 0.9:
+        up = Vector((1, 0, 0))
+    
+    perp1 = direction.cross(up).normalized()
+    perp2 = direction.cross(perp1).normalized()
+    
+    # 矢印の翼を描画（4方向）
+    arrow_angle = 0.4  # 約23度
+    for perp in [perp1, -perp1, perp2, -perp2]:
+        wing_end = p2 - direction * arrow_size + perp * arrow_size * arrow_angle
+        batch = batch_for_shader(shader, 'LINES', {"pos": [tuple(p2), tuple(wing_end)]})
+        shader.bind()
+        shader.uniform_float("color", color)
+        batch.draw(shader)
 
 
 def _draw_bounce_marker_3d(shader, position: Tuple[float, float, float], color: Tuple[float, float, float, float]):
@@ -784,6 +947,217 @@ def _update_paths_data(pixel_x: int, pixel_y: int):
         _inspector_state['paths_data'] = []
         _inspector_state['paths_metadata'] = []
         _inspector_state['selected_path_indices'] = set()
+
+
+# =============================================================================
+# Curve オブジェクトによるパス可視化
+# =============================================================================
+
+PATHS_COLLECTION_NAME = "DIY_PathVisualization"
+
+
+def _get_or_create_paths_collection():
+    """パス可視化用のコレクションを取得または作成"""
+    if PATHS_COLLECTION_NAME in bpy.data.collections:
+        return bpy.data.collections[PATHS_COLLECTION_NAME]
+    
+    collection = bpy.data.collections.new(PATHS_COLLECTION_NAME)
+    bpy.context.scene.collection.children.link(collection)
+    return collection
+
+
+def _clear_path_objects():
+    """既存のパスオブジェクトを削除"""
+    if PATHS_COLLECTION_NAME not in bpy.data.collections:
+        return
+    
+    collection = bpy.data.collections[PATHS_COLLECTION_NAME]
+    
+    # コレクション内のオブジェクトを削除
+    objects_to_remove = list(collection.objects)
+    for obj in objects_to_remove:
+        bpy.data.objects.remove(obj, do_unlink=True)
+
+
+def _create_path_material(name: str, color: tuple) -> bpy.types.Material:
+    """パス用のマテリアルを作成"""
+    mat_name = f"DIY_PathMaterial_{name}"
+    
+    if mat_name in bpy.data.materials:
+        mat = bpy.data.materials[mat_name]
+    else:
+        mat = bpy.data.materials.new(name=mat_name)
+    
+    mat.use_nodes = False
+    mat.diffuse_color = (*color[:3], 1.0)
+    return mat
+
+
+def _create_path_curve(path_positions: list, index: int, metadata: dict, color: tuple):
+    """1つのパスをCurveオブジェクトとして作成"""
+    import colorsys
+    
+    # カーブデータを作成
+    curve_name = f"Path_{index:03d}"
+    curve_data = bpy.data.curves.new(name=curve_name, type='CURVE')
+    curve_data.dimensions = '3D'
+    curve_data.bevel_depth = 0.01  # 線の太さ
+    curve_data.bevel_resolution = 2
+    
+    # スプラインを追加
+    spline = curve_data.splines.new('POLY')  # ポリライン
+    spline.points.add(len(path_positions) - 1)  # 最初の1点は自動で作成される
+    
+    for i, pos in enumerate(path_positions):
+        spline.points[i].co = (*pos, 1.0)  # (x, y, z, w)
+    
+    # オブジェクトを作成
+    curve_obj = bpy.data.objects.new(curve_name, curve_data)
+    
+    # マテリアルを設定
+    mat = _create_path_material(f"{index}", color)
+    curve_obj.data.materials.append(mat)
+    
+    # カスタムプロパティを追加（メタデータ）
+    curve_obj["path_index"] = index
+    curve_obj["signature"] = metadata.get('signature', '')
+    curve_obj["mean_luminance"] = metadata.get('mean', 0.0)
+    curve_obj["sample_count"] = metadata.get('sample_count', 0)
+    
+    # コレクションに追加
+    collection = _get_or_create_paths_collection()
+    collection.objects.link(curve_obj)
+    
+    return curve_obj
+
+
+def _create_endpoint_marker(position: tuple, marker_type: str, index: int, color: tuple):
+    """始点/終点のマーカーオブジェクトを作成"""
+    if marker_type == 'camera':
+        # 始点: 小さな球
+        bpy.ops.mesh.primitive_uv_sphere_add(radius=0.03, location=position)
+        obj = bpy.context.active_object
+        obj.name = f"PathStart_{index:03d}"
+    else:
+        # 終点: コーン（矢印の先端）
+        bpy.ops.mesh.primitive_cone_add(radius1=0.04, depth=0.1, location=position)
+        obj = bpy.context.active_object
+        obj.name = f"PathEnd_{index:03d}"
+        
+        # 前のポイントから終点への方向に回転
+        # （この関数外で呼び出し側が方向を設定する）
+    
+    # マテリアルを設定
+    mat = _create_path_material(f"{marker_type}_{index}", color)
+    if obj.data.materials:
+        obj.data.materials[0] = mat
+    else:
+        obj.data.materials.append(mat)
+    
+    # コレクションに移動
+    collection = _get_or_create_paths_collection()
+    
+    # 現在のコレクションから削除
+    for coll in obj.users_collection:
+        coll.objects.unlink(obj)
+    
+    collection.objects.link(obj)
+    
+    return obj
+
+
+def create_selected_paths_as_curves():
+    """選択されたパスをCurveオブジェクトとして作成"""
+    import colorsys
+    from mathutils import Vector, Matrix
+    import math
+    
+    state = _inspector_state
+    paths_data = state.get('paths_data', [])
+    paths_metadata = state.get('paths_metadata', [])
+    selected = state.get('selected_path_indices', set())
+    
+    if not paths_data or not selected:
+        return 0
+    
+    # 既存のパスオブジェクトをクリア
+    _clear_path_objects()
+    
+    created_count = 0
+    
+    for i in selected:
+        if i >= len(paths_data):
+            continue
+        
+        path_positions = paths_data[i]
+        metadata = paths_metadata[i] if i < len(paths_metadata) else {}
+        
+        if len(path_positions) < 2:
+            continue
+        
+        # 色を生成（虹色）
+        hue = (i / max(len(paths_data), 1)) * 0.8
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.9, 1.0)
+        color = (r, g, b)
+        
+        # カーブを作成
+        curve_obj = _create_path_curve(path_positions, i, metadata, color)
+        
+        # 始点マーカー
+        start_marker = _create_endpoint_marker(path_positions[0], 'camera', i, color)
+        
+        # 終点マーカー（コーン）
+        end_pos = path_positions[-1]
+        prev_pos = path_positions[-2]
+        end_marker = _create_endpoint_marker(end_pos, 'light', i, color)
+        
+        # コーンを方向に向ける
+        direction = Vector(end_pos) - Vector(prev_pos)
+        if direction.length > 0.001:
+            direction.normalize()
+            # デフォルトのコーンは-Z方向を向いている
+            up = Vector((0, 0, -1))
+            rot_axis = up.cross(direction)
+            if rot_axis.length > 0.001:
+                rot_angle = math.acos(max(-1, min(1, up.dot(direction))))
+                rot_axis.normalize()
+                rot_matrix = Matrix.Rotation(rot_angle, 4, rot_axis)
+                end_marker.matrix_world = Matrix.Translation(end_pos) @ rot_matrix
+        
+        created_count += 1
+    
+    return created_count
+
+
+class DIY_OT_create_path_curves(bpy.types.Operator):
+    """選択したパスをCurveオブジェクトとして3Dビューポートに作成"""
+    bl_idname = "diy_render.create_path_curves"
+    bl_label = "Create Path Curves"
+    bl_description = "Create selected paths as Curve objects in 3D viewport"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    def execute(self, context):
+        count = create_selected_paths_as_curves()
+        
+        if count > 0:
+            self.report({'INFO'}, f"{count} パスをCurveオブジェクトとして作成しました")
+        else:
+            self.report({'WARNING'}, "作成するパスがありません。パスを選択してください")
+        
+        return {'FINISHED'}
+
+
+class DIY_OT_clear_path_curves(bpy.types.Operator):
+    """パスのCurveオブジェクトを削除"""
+    bl_idname = "diy_render.clear_path_curves"
+    bl_label = "Clear Path Curves"
+    bl_description = "Remove all path visualization objects"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    def execute(self, context):
+        _clear_path_objects()
+        self.report({'INFO'}, "パスオブジェクトを削除しました")
+        return {'FINISHED'}
 
 
 class DIY_OT_pixel_inspector(bpy.types.Operator):
@@ -1211,6 +1585,14 @@ class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
                     
                     # 選択数表示
                     box.label(text=f"Selected: {len(selected)} / {len(paths_metadata)}")
+                    
+                    # Curveオブジェクト作成ボタン
+                    if selected:
+                        box2 = layout.box()
+                        box2.label(text="3D Visualization:", icon='OUTLINER_OB_CURVE')
+                        col = box2.column(align=True)
+                        col.operator("diy_render.create_path_curves", text="Create Curves", icon='CURVE_DATA')
+                        col.operator("diy_render.clear_path_curves", text="Clear Curves", icon='TRASH')
                 else:
                     box.label(text="No paths with geometry")
 
@@ -1302,6 +1684,8 @@ classes = (
     DIY_OT_toggle_path_selection,
     DIY_OT_select_all_paths,
     DIY_OT_deselect_all_paths,
+    DIY_OT_create_path_curves,
+    DIY_OT_clear_path_curves,
     DIY_PT_image_editor_diagnostics,
 )
 
