@@ -245,6 +245,17 @@ target_link_libraries(test_pixel_path_data PRIVATE
 target_compile_options(test_pixel_path_data PRIVATE -O2)
 gtest_discover_tests(test_pixel_path_data)
 
+# --- test_raw_path_storage: Full path collection storage tests ---
+add_executable(test_raw_path_storage test/diagnostics/test_raw_path_storage.cpp)
+target_include_directories(test_raw_path_storage PRIVATE include)
+target_link_libraries(test_raw_path_storage PRIVATE 
+    mp-units::mp-units 
+    GTest::gtest 
+    GTest::gtest_main
+)
+target_compile_options(test_raw_path_storage PRIVATE -O2)
+gtest_discover_tests(test_raw_path_storage)
+
 # --- test_diagnostic_film: Full image diagnostic data tests ---
 add_executable(test_diagnostic_film test/diagnostics/test_diagnostic_film.cpp)
 target_include_directories(test_diagnostic_film PRIVATE include)

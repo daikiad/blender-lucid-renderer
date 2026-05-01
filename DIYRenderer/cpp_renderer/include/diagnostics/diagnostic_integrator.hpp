@@ -10,6 +10,7 @@
 #pragma once
 
 #include "diagnostics/diagnostic_film.hpp"
+#include "diagnostics/raw_path_storage.hpp"
 
 namespace render::diagnostics {
 
@@ -411,6 +412,8 @@ public:
         : film_(width, height, config)
         , config_(config)
         , enabled_(true)
+        , raw_storage_enabled_(false)
+        , raw_storage_()
     {}
     
     /**
@@ -418,6 +421,28 @@ public:
      */
     void set_enabled(bool enabled) { enabled_ = enabled; }
     [[nodiscard]] bool is_enabled() const { return enabled_; }
+    
+    /**
+     * Enable raw path storage for full path collection
+     * @param expected_spp Expected samples per pixel for memory pre-allocation
+     */
+    void enable_raw_storage(size_t expected_spp) {
+        raw_storage_.init(film_.width(), film_.height(), expected_spp);
+        raw_storage_enabled_ = true;
+    }
+    
+    /**
+     * Disable raw path storage and free memory
+     */
+    void disable_raw_storage() {
+        raw_storage_enabled_ = false;
+        raw_storage_.reset();
+    }
+    
+    /**
+     * Check if raw storage is enabled
+     */
+    [[nodiscard]] bool is_raw_storage_enabled() const { return raw_storage_enabled_; }
     
     /**
      * Check if we should record at this pixel (subsampling)
@@ -436,6 +461,11 @@ public:
     void record_path(size_t x, size_t y, const PathTrace& trace) {
         if (!enabled_) return;
         film_.record_path(x, y, trace);
+        
+        // Also record to raw storage if enabled
+        if (raw_storage_enabled_) {
+            raw_storage_.record_path(x, y, trace);
+        }
     }
     
     /**
@@ -445,10 +475,19 @@ public:
     [[nodiscard]] DiagnosticFilm& film() { return film_; }
     
     /**
+     * Access raw path storage (for full path analysis)
+     */
+    [[nodiscard]] const RawPathStorage& raw_storage() const { return raw_storage_; }
+    [[nodiscard]] RawPathStorage& raw_storage() { return raw_storage_; }
+    
+    /**
      * Clear all recorded data
      */
     void clear() {
         film_.clear();
+        if (raw_storage_enabled_) {
+            raw_storage_.clear();
+        }
     }
     
     /**
@@ -460,6 +499,8 @@ private:
     DiagnosticFilm film_;
     PathRecordingConfig config_;
     bool enabled_;
+    bool raw_storage_enabled_;
+    RawPathStorage raw_storage_;
 };
 
 }  // namespace render::diagnostics

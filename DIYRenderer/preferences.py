@@ -243,6 +243,18 @@ class DIYRendererSettings(bpy.types.PropertyGroup):
     )
     
     # ==========================================================================
+    # Raw Path Storage (Full Path Collection)
+    # ==========================================================================
+    
+    # フルパス収集の有効化
+    enable_raw_path_storage: bpy.props.BoolProperty(
+        name="Store All Paths",
+        description="Store ALL individual paths (high memory usage: ~6.5GB for FHD 32SPP). "
+                    "Enables per-sample analysis and visualization of path groups",
+        default=False
+    )
+    
+    # ==========================================================================
     # Path Visualization Settings
     # ==========================================================================
     

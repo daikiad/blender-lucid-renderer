@@ -312,7 +312,96 @@ class DiagnosticsManager:
     def clear(self):
         """Clear all recorded diagnostic data."""
         if self._tracer:
-            self._tracer.film().clear()
+            self._tracer.clear()
+    
+    # =========================================================================
+    # Raw Path Storage API (full path collection)
+    # =========================================================================
+    
+    def enable_raw_storage(self, expected_spp: int = 32):
+        """
+        Enable raw path storage for full path collection.
+        
+        Warning: This can use significant memory (~6.5GB for FHD 32SPP).
+        
+        Args:
+            expected_spp: Expected samples per pixel for memory pre-allocation
+        """
+        if self._tracer:
+            self._tracer.enable_raw_storage(expected_spp)
+    
+    def disable_raw_storage(self):
+        """Disable raw path storage and free memory."""
+        if self._tracer:
+            self._tracer.disable_raw_storage()
+    
+    @property
+    def is_raw_storage_enabled(self) -> bool:
+        """Check if raw path storage is enabled."""
+        if self._tracer:
+            return self._tracer.is_raw_storage_enabled()
+        return False
+    
+    def get_raw_storage(self):
+        """Get the underlying RawPathStorage (for C++ integration)."""
+        if self._tracer and self._tracer.is_raw_storage_enabled():
+            return self._tracer.raw_storage()
+        return None
+    
+    def get_pixel_raw_paths(self, x: int, y: int):
+        """
+        Get all raw paths for a specific pixel.
+        
+        Returns:
+            PixelRawPaths object or None if not available
+        """
+        storage = self.get_raw_storage()
+        if storage is None:
+            return None
+        if x < 0 or x >= storage.width or y < 0 or y >= storage.height:
+            return None
+        return storage.pixel(x, y)
+    
+    def analyze_pixel_paths(self, x: int, y: int, sort_by: str = "mean") -> list:
+        """
+        Analyze and group paths at a specific pixel.
+        
+        Args:
+            x, y: Pixel coordinates
+            sort_by: "mean" or "variance"
+            
+        Returns:
+            List of PathGroupResult objects with:
+            - signature_string: Heckbert notation
+            - sample_count: Number of samples in group
+            - mean_contribution: RGB mean
+            - variance: Statistical variance
+            - path_indices: Indices to access individual paths
+        """
+        pixel_paths = self.get_pixel_raw_paths(x, y)
+        if pixel_paths is None or pixel_paths.count() == 0:
+            return []
+        
+        try:
+            import diyrenderer
+            groups = diyrenderer.analyze_pixel_paths(pixel_paths)
+            
+            if sort_by == "variance":
+                diyrenderer.sort_groups_by_variance(groups)
+            else:
+                diyrenderer.sort_groups_by_mean(groups)
+            
+            return groups
+        except Exception as e:
+            print(f"[Diagnostics] Error analyzing pixel paths: {e}")
+            return []
+    
+    def get_raw_storage_memory_mb(self) -> float:
+        """Get memory usage of raw path storage in MB."""
+        storage = self.get_raw_storage()
+        if storage is None:
+            return 0.0
+        return storage.memory_usage_mb
 
 
 # Singleton for global access from render engine

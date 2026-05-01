@@ -27,6 +27,7 @@
 #include "diagnostics/diagnostic_export.hpp"
 #include "diagnostics/diagnostic_integrator.hpp"
 #include "diagnostics/path_stats_config.hpp"
+#include "diagnostics/raw_path_storage.hpp"
 
 namespace py = pybind11;
 using namespace render::diagnostics;
@@ -363,7 +364,19 @@ PYBIND11_MODULE(diyrenderer, m) {
         .def("is_enabled", &DiagnosticPathTracer::is_enabled)
         .def("set_enabled", &DiagnosticPathTracer::set_enabled)
         .def("film", static_cast<DiagnosticFilm& (DiagnosticPathTracer::*)()>(&DiagnosticPathTracer::film),
-            py::return_value_policy::reference_internal);
+            py::return_value_policy::reference_internal)
+        // Raw path storage methods
+        .def("enable_raw_storage", &DiagnosticPathTracer::enable_raw_storage,
+            py::arg("expected_spp"),
+            "Enable raw path storage for full path collection")
+        .def("disable_raw_storage", &DiagnosticPathTracer::disable_raw_storage,
+            "Disable raw path storage and free memory")
+        .def("is_raw_storage_enabled", &DiagnosticPathTracer::is_raw_storage_enabled)
+        .def("raw_storage", static_cast<RawPathStorage& (DiagnosticPathTracer::*)()>(&DiagnosticPathTracer::raw_storage),
+            py::return_value_policy::reference_internal,
+            "Access raw path storage")
+        .def("clear", &DiagnosticPathTracer::clear,
+            "Clear all recorded data");
     
     // DiagnosticExporter - Export interface for analysis results
     py::class_<DiagnosticExporter>(m, "DiagnosticExporter")
@@ -447,6 +460,104 @@ PYBIND11_MODULE(diyrenderer, m) {
             py::arg("luminance"),
             "Finalize path with grayscale luminance");
     
-    // Add record_path method to DiagnosticFilm that accepts PathTrace
-    // (The class binding is above, we just need the method)
+    // =========================================================================
+    // RawPathStorage - Full path collection system
+    // =========================================================================
+    
+    // RawPath - Single path data
+    py::class_<RawPath>(m, "RawPath")
+        .def_readonly("signature_hash", &RawPath::signature_hash)
+        .def_readonly("depth", &RawPath::depth)
+        .def_readonly("coarse_type", &RawPath::coarse_type)
+        .def_readonly("strategy", &RawPath::strategy)
+        .def_readonly("light_type", &RawPath::light_type)
+        .def("signature_string", &RawPath::signature_string)
+        .def("get_contribution", [](const RawPath& p) {
+            return std::array<float, 3>{p.contribution.r, p.contribution.g, p.contribution.b};
+        })
+        .def("get_positions", [](const RawPath& p) {
+            std::vector<std::array<float, 3>> result;
+            for (const auto& pos : p.positions) {
+                result.push_back({pos.x, pos.y, pos.z});
+            }
+            return result;
+        }, "Get all vertex positions as list of [x,y,z]")
+        .def("get_vertices", [](const RawPath& p) {
+            std::vector<py::dict> result;
+            for (const auto& v : p.vertices) {
+                py::dict d;
+                d["object_id"] = v.object_id;
+                d["material_id"] = v.material_id;
+                d["bsdf_type"] = v.bsdf_type;
+                d["flags"] = v.flags;
+                result.push_back(d);
+            }
+            return result;
+        }, "Get all vertices as list of dicts");
+    
+    // PixelRawPaths - All paths for a single pixel
+    py::class_<PixelRawPaths>(m, "PixelRawPaths")
+        .def("count", &PixelRawPaths::count)
+        .def("path", &PixelRawPaths::path, py::return_value_policy::reference_internal)
+        .def("paths", &PixelRawPaths::paths, py::return_value_policy::reference_internal)
+        .def("memory_usage", &PixelRawPaths::memory_usage);
+    
+    // RawPathStorage - Full image storage
+    py::class_<RawPathStorage>(m, "RawPathStorage")
+        .def(py::init<>())
+        .def("init", &RawPathStorage::init,
+            py::arg("width"), py::arg("height"), py::arg("expected_samples_per_pixel"),
+            "Initialize storage for image dimensions")
+        .def("record_path", &RawPathStorage::record_path,
+            py::arg("x"), py::arg("y"), py::arg("trace"),
+            "Record a path at pixel (x, y)")
+        .def("pixel", &RawPathStorage::pixel, py::return_value_policy::reference_internal,
+            py::arg("x"), py::arg("y"),
+            "Get paths for pixel (x, y)")
+        .def_property_readonly("width", &RawPathStorage::width)
+        .def_property_readonly("height", &RawPathStorage::height)
+        .def_property_readonly("sample_count", &RawPathStorage::sample_count)
+        .def_property_readonly("total_path_count", &RawPathStorage::total_path_count)
+        .def_property_readonly("active_pixel_count", &RawPathStorage::active_pixel_count)
+        .def_property_readonly("memory_usage", &RawPathStorage::memory_usage)
+        .def_property_readonly("memory_usage_mb", &RawPathStorage::memory_usage_mb)
+        .def("clear", &RawPathStorage::clear)
+        .def("reset", &RawPathStorage::reset);
+    
+    // PathGroupResult - Analysis result for a path group
+    py::class_<PathGroupResult>(m, "PathGroupResult")
+        .def_readonly("signature_hash", &PathGroupResult::signature_hash)
+        .def_readonly("signature_string", &PathGroupResult::signature_string)
+        .def_readonly("sample_count", &PathGroupResult::sample_count)
+        .def_readonly("variance", &PathGroupResult::variance)
+        .def_readonly("strategy", &PathGroupResult::strategy)
+        .def_readonly("light_type", &PathGroupResult::light_type)
+        .def_readonly("path_indices", &PathGroupResult::path_indices)
+        .def("get_mean_contribution", [](const PathGroupResult& g) {
+            return std::array<float, 3>{
+                g.mean_contribution.r, 
+                g.mean_contribution.g, 
+                g.mean_contribution.b
+            };
+        })
+        .def("get_total_contribution", [](const PathGroupResult& g) {
+            return std::array<float, 3>{
+                g.total_contribution.r, 
+                g.total_contribution.g, 
+                g.total_contribution.b
+            };
+        });
+    
+    // PixelPathAnalyzer - Static analysis utilities
+    m.def("analyze_pixel_paths", &PixelPathAnalyzer::analyze,
+        py::arg("pixel_paths"),
+        "Analyze paths for a pixel: group by signature and compute statistics");
+    
+    m.def("sort_groups_by_variance", &PixelPathAnalyzer::sort_by_variance,
+        py::arg("groups"),
+        "Sort path groups by variance (descending, in-place)");
+    
+    m.def("sort_groups_by_mean", &PixelPathAnalyzer::sort_by_mean,
+        py::arg("groups"),
+        "Sort path groups by mean contribution (descending, in-place)");
 }

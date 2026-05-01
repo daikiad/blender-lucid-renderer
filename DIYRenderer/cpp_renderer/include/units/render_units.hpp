@@ -912,6 +912,11 @@ struct RGB3f {
     constexpr bool operator==(RGB3f other) const { return r == other.r && g == other.g && b == other.b; }
     constexpr bool operator!=(RGB3f other) const { return !(*this == other); }
 
+    // Luminance (Rec. 709 coefficients)
+    [[nodiscard]] constexpr float luminance() const {
+        return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+    }
+
     // NOTE: dot(), cross(), length() are intentionally NOT defined.
     // RGB is a color/weight, not a geometric vector.
 };

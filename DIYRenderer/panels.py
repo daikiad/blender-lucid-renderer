@@ -255,6 +255,19 @@ class DIY_RENDER_PT_diagnostics(bpy.types.Panel):
             box = layout.box()
             box.label(text=f"Resolution: {width}×{height}")
             box.label(text=f"Est. Memory: ~{est_memory_mb:.0f} MB")
+            
+            # Raw Path Storage (フルパス収集)
+            layout.separator()
+            layout.prop(diy, "enable_raw_path_storage")
+            
+            if diy.enable_raw_path_storage:
+                # フルパス収集のメモリ警告
+                samples = diy.samples
+                raw_memory_mb = (width * height * samples * 104) / (1024 * 1024)
+                box = layout.box()
+                box.alert = raw_memory_mb > 2000  # 2GB以上で警告色
+                box.label(text=f"Est. Raw Storage: ~{raw_memory_mb:.1f} MB", icon='ERROR' if raw_memory_mb > 4000 else 'INFO')
+                box.label(text=f"({samples} SPP × ~104 bytes/path)")
 
 
 class DIY_RENDER_PT_diagnostics_results(bpy.types.Panel):
