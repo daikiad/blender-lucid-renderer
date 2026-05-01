@@ -1,5 +1,5 @@
 """
-DIY Render Engine - Blender レンダーエンジン統合
+Lucid Render Engine - Blender レンダーエンジン統合
 ===============================================
 
 このファイルは Blender RenderEngine のサブクラスを定義します。
@@ -16,7 +16,7 @@ DIY Render Engine - Blender レンダーエンジン統合
 4. render() で F12 レンダリング実行
 
 主要クラス:
-- DIYRenderEngine: bpy.types.RenderEngine のサブクラス
+- LucidRenderEngine: bpy.types.RenderEngine のサブクラス
 """
 
 import bpy
@@ -76,7 +76,7 @@ def compute_camera_params(scene, width: int, height: int) -> Optional[dict]:
     """
     cam = scene.camera
     if not cam:
-        print("[DIYRenderEngine] WARNING: No camera in scene!")
+        print("[LucidRenderEngine] WARNING: No camera in scene!")
         return None
     
     # カメラのワールド変換行列から位置と方向を取得
@@ -133,10 +133,10 @@ def compute_camera_params(scene, width: int, height: int) -> Optional[dict]:
 
 
 # =============================================================================
-# DIYRenderEngine
+# LucidRenderEngine
 # =============================================================================
 
-class DIYRenderEngine(bpy.types.RenderEngine):
+class LucidRenderEngine(bpy.types.RenderEngine):
     """
     Blender カスタムレンダーエンジン。
     
@@ -156,8 +156,8 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         bl_use_preview: マテリアルプレビューをサポート
         bl_use_shading_nodes: シェーディングノードをサポート
     """
-    bl_idname = "DIY_RENDER_MINIMAL"
-    bl_label = "DIY Renderer (Minimal)"
+    bl_idname = "LUCID_RENDER_MINIMAL"
+    bl_label = "Lucid Renderer (Minimal)"
     bl_use_preview = True
     bl_use_shading_nodes = True
     bl_use_shading_nodes_custom = False
@@ -174,7 +174,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         self._session: Optional[RenderSession] = None
         self._viewport_renderer: Optional[ViewportRenderer] = None
         
-        print("[DIYRenderEngine] __init__ called")
+        print("[LucidRenderEngine] __init__ called")
     
     def __del__(self):
         """デストラクタ - 公式パターンに従う"""
@@ -183,9 +183,9 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             if self._session is not None:
                 # 診断用グローバルセッションとして保持されている場合はシャットダウンしない
                 if self._session is get_diagnostic_session():
-                    print(f"[DIYRenderEngine] Session kept for diagnostics: {self._session}")
+                    print(f"[LucidRenderEngine] Session kept for diagnostics: {self._session}")
                 else:
-                    print(f"[DIYRenderEngine] Destroying session: {self._session}")
+                    print(f"[LucidRenderEngine] Destroying session: {self._session}")
                     self._session.shutdown()
                 self._session = None
         except (ReferenceError, AttributeError):
@@ -214,7 +214,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         """
         if self._session is None:
             self._session = RenderSession()
-            print(f"[DIYRenderEngine] Created new session: {self._session}")
+            print(f"[LucidRenderEngine] Created new session: {self._session}")
         return self._session
     
     def _get_viewport_renderer(self) -> ViewportRenderer:
@@ -255,7 +255,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         
         # 変更があった場合、viewport に通知
         if flags != UpdateFlags.NONE:
-            print(f"[DIYRenderEngine] view_update: {flags}")
+            print(f"[LucidRenderEngine] view_update: {flags}")
             # viewport.render() で処理されるよう state にフラグを立てる
             session.state.scene_update_pending = True
             # シーンキャッシュを無効化（次回のエクスポートで再生成）
@@ -305,7 +305,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         blf.size(0, 20)
         blf.color(0, 1.0, 0.8, 0.2, 1.0)
         blf.position(0, 20, height - 40, 0)
-        blf.draw(0, "DIY Renderer: pybind11 module not available")
+        blf.draw(0, "Lucid Renderer: pybind11 module not available")
         blf.position(0, 20, height - 70, 0)
         blf.draw(0, "Please build the C++ module with: cmake .. -DBUILD_PYBIND=ON && make")
 
@@ -328,14 +328,14 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         height = int(scene.render.resolution_y * scale)
         
         original_scene = depsgraph.scene
-        diy = original_scene.diy_renderer
-        target_samples = diy.samples
+        lucid = original_scene.lucid_renderer
+        target_samples = lucid.samples
         
-        print(f"[DIYRenderEngine] Starting F12 render ({width} x {height}, samples: {target_samples})")
+        print(f"[LucidRenderEngine] Starting F12 render ({width} x {height}, samples: {target_samples})")
         
         # pybind11 が必要
         if not session.is_available:
-            print("[DIYRenderEngine] ERROR: pybind11 module not available")
+            print("[LucidRenderEngine] ERROR: pybind11 module not available")
             self._render_fallback(width, height)
             return
         
@@ -352,7 +352,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             return
         
         # pybind11 でレンダリング
-        self._render_f12_pybind(session, depsgraph, width, height, cam_params, scene_file, target_samples, diy)
+        self._render_f12_pybind(session, depsgraph, width, height, cam_params, scene_file, target_samples, lucid)
         
         # シーンファイルを削除
         import os
@@ -371,7 +371,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         cam_params: dict,
         scene_file: str,
         target_samples: int,
-        diy: Any
+        lucid: Any
     ) -> None:
         """pybind11 を使用した F12 レンダリング"""
         # シーンをロード
@@ -383,23 +383,23 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         session.set_camera_from_dict(cam_params)
         
         # アルゴリズムを設定
-        session.set_algorithm(diy.sampling_algorithm)
+        session.set_algorithm(lucid.sampling_algorithm)
         
         # 診断機能を設定（ユーザー設定に基づく）
-        if diy.enable_diagnostics:
+        if lucid.enable_diagnostics:
             preset_map = {
                 'MINIMAL': 'minimal',
                 'STANDARD': 'standard',
                 'DETAILED': 'detailed',
             }
-            preset = preset_map.get(diy.diagnostics_preset, 'standard')
+            preset = preset_map.get(lucid.diagnostics_preset, 'standard')
             session.enable_diagnostics(preset)
         else:
             session.disable_diagnostics()
         
         # プログレッシブレンダリング
         sample_iterations = self._compute_sample_iterations(target_samples)
-        print(f"[DIYRenderEngine] Sample iterations: {sample_iterations}")
+        print(f"[LucidRenderEngine] Sample iterations: {sample_iterations}")
         
         accumulated_pixels = None
         total_samples = 0
@@ -409,7 +409,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
         for iteration_samples in sample_iterations:
             if self.test_break():
                 session.cancel()
-                print("[DIYRenderEngine] Render cancelled")
+                print("[LucidRenderEngine] Render cancelled")
                 break
             
             # 進捗を更新
@@ -425,8 +425,8 @@ class DIYRenderEngine(bpy.types.RenderEngine):
                 height=height,
                 samples=iteration_samples,
                 sample_offset=total_samples,
-                max_bounces=diy.max_bounces,
-                algorithm=diy.sampling_algorithm
+                max_bounces=lucid.max_bounces,
+                algorithm=lucid.sampling_algorithm
             )
             result = session.render_tile(params)
             
@@ -450,11 +450,11 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             self._update_render_result(accumulated_pixels, width, height, total_samples)
         
         # 診断データをグローバルに格納（UIパネルからアクセス可能にする）
-        if diy.enable_diagnostics and session.is_diagnostics_enabled():
+        if lucid.enable_diagnostics and session.is_diagnostics_enabled():
             self._store_diagnostic_results(session, width, height)
         
         elapsed = time.time() - render_start_time
-        print(f"[DIYRenderEngine] F12 render complete: {total_samples} samples in {elapsed:.2f}s")
+        print(f"[LucidRenderEngine] F12 render complete: {total_samples} samples in {elapsed:.2f}s")
     
     def _store_diagnostic_results(self, session: RenderSession, width: int, height: int) -> None:
         """診断結果をグローバルマネージャーに格納
@@ -473,7 +473,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             # 統計を取得
             cpp_stats = session.get_diagnostic_stats()
             if cpp_stats is None:
-                print("[DIYRenderEngine] No diagnostic stats available")
+                print("[LucidRenderEngine] No diagnostic stats available")
                 return
             
             # グローバル統計を変換
@@ -546,11 +546,11 @@ class DIYRenderEngine(bpy.types.RenderEngine):
             wrapper = _DiagnosticResultsWrapper(report)
             set_global_diagnostics(wrapper)
             
-            print(f"[DIYRenderEngine] Diagnostic results stored: {global_stats.total_samples} samples, "
+            print(f"[LucidRenderEngine] Diagnostic results stored: {global_stats.total_samples} samples, "
                   f"{global_stats.active_pixels} active pixels, {len(top_variance_groups)} variance groups")
             
         except Exception as e:
-            print(f"[DIYRenderEngine] Failed to store diagnostic results: {e}")
+            print(f"[LucidRenderEngine] Failed to store diagnostic results: {e}")
             import traceback
             traceback.print_exc()
     

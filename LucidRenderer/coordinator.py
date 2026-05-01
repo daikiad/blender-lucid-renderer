@@ -160,7 +160,7 @@ class RenderCoordinator:
         blf.size(0, 20)
         blf.color(0, 1.0, 0.8, 0.2, 1.0)
         blf.position(0, 20, height - 40, 0)
-        blf.draw(0, "DIY Renderer: pybind11 module not available")
+        blf.draw(0, "Lucid Renderer: pybind11 module not available")
         blf.position(0, 20, height - 70, 0)
         blf.draw(0, "Please build the C++ module with: cmake .. -DBUILD_PYBIND=ON && make")
     
@@ -240,8 +240,8 @@ class RenderCoordinator:
         height = int(scene.render.resolution_y * scale)
         
         original_scene = depsgraph.scene
-        diy = original_scene.diy_renderer
-        target_samples = diy.samples
+        lucid = original_scene.lucid_renderer
+        target_samples = lucid.samples
         
         print(f"[RenderCoordinator] Starting F12 render ({width} x {height}, samples: {target_samples})")
         
@@ -264,7 +264,7 @@ class RenderCoordinator:
             return
         
         # pybind11 でレンダリング
-        self._render_f12_pybind(engine, depsgraph, width, height, cam_params, scene_file, target_samples, diy)
+        self._render_f12_pybind(engine, depsgraph, width, height, cam_params, scene_file, target_samples, lucid)
         
         # シーンファイルを削除
         import os
@@ -283,7 +283,7 @@ class RenderCoordinator:
         cam_params: dict,
         scene_file: str,
         target_samples: int,
-        diy: Any
+        lucid: Any
     ) -> None:
         """pybind11 を使用した F12 レンダリング"""
         # シーンをロード
@@ -295,7 +295,7 @@ class RenderCoordinator:
         self.backend.set_camera_from_dict(cam_params)
         
         # アルゴリズムを設定
-        self.backend.set_algorithm(diy.sampling_algorithm)
+        self.backend.set_algorithm(lucid.sampling_algorithm)
         
         # プログレッシブレンダリング
         sample_iterations = self._compute_sample_iterations(target_samples)
@@ -321,9 +321,9 @@ class RenderCoordinator:
                 width=width,
                 height=height,
                 samples=iteration_samples,
-                max_bounces=diy.max_bounces,
-                algorithm=diy.sampling_algorithm,
-                debug_mode=diy.debug_mode if diy.debug_mode != 'NONE' else None,
+                max_bounces=lucid.max_bounces,
+                algorithm=lucid.sampling_algorithm,
+                debug_mode=lucid.debug_mode if lucid.debug_mode != 'NONE' else None,
                 sample_offset=total_samples
             )
             

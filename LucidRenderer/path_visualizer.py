@@ -105,7 +105,7 @@ class PathVisualizer:
     
     Attributes:
         renderer: The PyRenderer instance with diagnostics enabled
-        settings: DIYRendererSettings with visualization preferences
+        settings: LucidRendererSettings with visualization preferences
         cached_paths: List of PathData for the current pixel
         cached_pixel: The pixel coordinates for cached data
     """
@@ -116,7 +116,7 @@ class PathVisualizer:
         
         Args:
             renderer: PyRenderer instance with diagnostics enabled
-            settings: DIYRendererSettings from scene.diy_renderer
+            settings: LucidRendererSettings from scene.lucid_renderer
         """
         self.renderer = renderer
         self.settings = settings

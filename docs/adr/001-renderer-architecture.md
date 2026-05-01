@@ -5,7 +5,7 @@
 
 ## コンテキスト
 
-DIY Renderer は Blender のカスタムレンダーエンジンとして、Python アドオンと C++ パストレーサーで構成されている。現在の実装には以下の課題がある：
+Lucid Renderer は Blender のカスタムレンダーエンジンとして、Python アドオンと C++ パストレーサーで構成されている。現在の実装には以下の課題がある：
 
 ### 現状の問題
 
@@ -27,7 +27,7 @@ DIY Renderer は Blender のカスタムレンダーエンジンとして、Pyth
 ### 選択肢1: サーバーモード (stdin/stdout バイナリ通信)
 
 ```
-Python Addon ←──stdin/stdout──→ diyrt --server (常駐プロセス)
+Python Addon ←──stdin/stdout──→ lucidrt --server (常駐プロセス)
 ```
 
 - **実装工数**: 1-2週間
@@ -43,7 +43,7 @@ Python Addon ←──stdin/stdout──→ diyrt --server (常駐プロセス)
 ### 選択肢2: Python C拡張 (pybind11)
 
 ```
-Python Addon ←──直接呼出──→ diyrender.so (同一プロセス)
+Python Addon ←──直接呼出──→ lucidrender.so (同一プロセス)
 ```
 
 - **実装工数**: 3-4週間
@@ -59,7 +59,7 @@ Python Addon ←──直接呼出──→ diyrender.so (同一プロセス)
 ### 選択肢3: 共有メモリ (mmap)
 
 ```
-Python Addon ←──mmap + semaphore──→ diyrt --server
+Python Addon ←──mmap + semaphore──→ lucidrt --server
 ```
 
 - **実装工数**: 3-4週間
@@ -74,7 +74,7 @@ Python Addon ←──mmap + semaphore──→ diyrt --server
 ### 選択肢4: ソケット通信 (TCP/Unix)
 
 ```
-Python Addon ←──TCP localhost:12345──→ diyrt --server
+Python Addon ←──TCP localhost:12345──→ lucidrt --server
 ```
 
 - **実装工数**: 1-2週間
@@ -147,9 +147,9 @@ Phase 3: pybind11版追加 (オプション・性能最適化)
 ### アーキテクチャ
 
 ```
-DIYRenderer/
+LucidRenderer/
 ├── __init__.py
-├── engine.py                 # DIYRenderEngine
+├── engine.py                 # LucidRenderEngine
 ├── renderer_interface.py     # [NEW] Abstract interface
 ├── subprocess_renderer.py    # [NEW] stdin/stdout 実装
 ├── protocol.py               # [NEW] Binary protocol

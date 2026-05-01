@@ -209,7 +209,7 @@ if (trace.light_type != LightSourceType::Unknown) {
 1. レンダリング時に「Diagnostics」を有効化
 2. Image Editorで画像を表示
 3. `N`キーでサイドパネルを開く
-4. 「DIY Render」→「Pixel Inspector」をクリック
+4. 「Lucid Render」→「Pixel Inspector」をクリック
 5. 画像上でマウスを動かすと診断情報が表示される
 
 ### 表示される情報
@@ -227,7 +227,7 @@ if (trace.light_type != LightSourceType::Unknown) {
 ## ファイル構成
 
 ```
-DIYRenderer/
+LucidRenderer/
 ├── hover_diagnostics.py          # Hover UI実装
 ├── diagnostics.py                # 診断マネージャー
 └── cpp_renderer/

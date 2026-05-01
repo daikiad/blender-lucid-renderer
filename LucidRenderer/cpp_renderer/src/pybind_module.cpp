@@ -12,8 +12,8 @@
  *   make
  * 
  * 使用例:
- *   import diyrenderer
- *   r = diyrenderer.Renderer()
+ *   import lucidrenderer
+ *   r = lucidrenderer.Renderer()
  *   r.load_scene_json('{"meshes": [...]}')
  *   r.set_camera(0, 0, 5, 0, 0, -1, 0, 1, 0, 50)
  *   pixels = r.render_tile(0, 0, 800, 600, 800, 600, 16, 0, 8)
@@ -31,8 +31,8 @@
 namespace py = pybind11;
 using namespace render::diagnostics;
 
-PYBIND11_MODULE(diyrenderer, m) {
-    m.doc() = "DIY Path Tracer - Python bindings for the C++ renderer";
+PYBIND11_MODULE(lucidrenderer, m) {
+    m.doc() = "Lucid Path Tracer - Python bindings for the C++ renderer";
     
     py::class_<PyRenderer>(m, "Renderer")
         .def(py::init<>(), "Create a new renderer instance")
@@ -206,7 +206,7 @@ PYBIND11_MODULE(diyrenderer, m) {
         // Python 的な機能
         // =====================================================================
         .def("__repr__", [](const PyRenderer& r) {
-            return "<diyrenderer.Renderer scene_loaded=" + 
+            return "<lucidrenderer.Renderer scene_loaded=" + 
                    std::string(r.is_scene_loaded() ? "True" : "False") +
                    " meshes=" + std::to_string(r.get_mesh_count()) +
                    " algorithm='" + r.get_algorithm() + "'>";

@@ -1,15 +1,15 @@
 """
-UI Panels for DIY Renderer.
+UI Panels for Lucid Renderer.
 ============================
 
 このファイルは Blender のレンダープロパティパネル (Properties > Render) に
 表示される UI パネルを定義しています。
 
 各パネルの役割:
-- DIY_RENDER_PT_sampling: サンプル数の設定（レンダリング品質）
-- DIY_RENDER_PT_light_paths: 最大バウンス数の設定
-- DIY_RENDER_PT_debug: デバッグモード選択（ノーマル、アルベドなど）
-- DIY_RENDER_PT_performance: バックエンドとサーバーモードの設定
+- LUCID_RENDER_PT_sampling: サンプル数の設定（レンダリング品質）
+- LUCID_RENDER_PT_light_paths: 最大バウンス数の設定
+- LUCID_RENDER_PT_debug: デバッグモード選択（ノーマル、アルベドなど）
+- LUCID_RENDER_PT_performance: バックエンドとサーバーモードの設定
 
 Blender Panel の基本構造:
 - bl_label: パネルのタイトル
@@ -24,7 +24,7 @@ Blender Panel の基本構造:
 import bpy
 
 
-class DIY_RENDER_PT_sampling(bpy.types.Panel):
+class LUCID_RENDER_PT_sampling(bpy.types.Panel):
     """
     サンプリング設定パネル
     
@@ -41,13 +41,13 @@ class DIY_RENDER_PT_sampling(bpy.types.Panel):
     bl_space_type = 'PROPERTIES'
     bl_region_type = 'WINDOW'
     bl_context = "render"
-    COMPAT_ENGINES = {'DIY_RENDER_MINIMAL'}
+    COMPAT_ENGINES = {'LUCID_RENDER_MINIMAL'}
 
     @classmethod
     def poll(cls, context):
         """
         このパネルを表示するかどうかを判定します。
-        DIY Renderer が選択されている場合のみ True を返します。
+        Lucid Renderer が選択されている場合のみ True を返します。
         
         Args:
             context: Blender のコンテキスト
@@ -72,24 +72,24 @@ class DIY_RENDER_PT_sampling(bpy.types.Panel):
         layout.use_property_decorate = False  # アニメーションキーフレームボタンを非表示
         
         # シーンに紐づいた設定オブジェクトを取得
-        diy = context.scene.diy_renderer
+        lucid = context.scene.lucid_renderer
         
         # レンダリングセクション（Cyclesと同様のレイアウト）
         col = layout.column(heading="Render")
-        col.prop(diy, "samples", text="Render Samples")
+        col.prop(lucid, "samples", text="Render Samples")
         
         # Viewport section
         col = layout.column(heading="Viewport")
-        col.prop(diy, "viewport_samples", text="Viewport Samples")
-        col.prop(diy, "viewport_scale_editing", text="Scale (Editing)")
-        col.prop(diy, "viewport_scale_final", text="Scale (Final)")
+        col.prop(lucid, "viewport_samples", text="Viewport Samples")
+        col.prop(lucid, "viewport_scale_editing", text="Scale (Editing)")
+        col.prop(lucid, "viewport_scale_final", text="Scale (Final)")
         
         # Algorithm section
         col = layout.column(heading="Algorithm")
-        col.prop(diy, "sampling_algorithm", text="Method")
+        col.prop(lucid, "sampling_algorithm", text="Method")
 
 
-class DIY_RENDER_PT_light_paths(bpy.types.Panel):
+class LUCID_RENDER_PT_light_paths(bpy.types.Panel):
     """
     ライトパス設定パネル
     
@@ -107,7 +107,7 @@ class DIY_RENDER_PT_light_paths(bpy.types.Panel):
     bl_region_type = 'WINDOW'
     bl_context = "render"
     bl_options = {'DEFAULT_CLOSED'}  # デフォルトで折りたたんで表示
-    COMPAT_ENGINES = {'DIY_RENDER_MINIMAL'}
+    COMPAT_ENGINES = {'LUCID_RENDER_MINIMAL'}
 
     @classmethod
     def poll(cls, context):
@@ -118,13 +118,13 @@ class DIY_RENDER_PT_light_paths(bpy.types.Panel):
         layout.use_property_split = True
         layout.use_property_decorate = False
         
-        diy = context.scene.diy_renderer
+        lucid = context.scene.lucid_renderer
         
         col = layout.column(heading="Max Bounces")
-        col.prop(diy, "max_bounces", text="Total Max Bounces")
+        col.prop(lucid, "max_bounces", text="Total Max Bounces")
 
 
-class DIY_RENDER_PT_debug(bpy.types.Panel):
+class LUCID_RENDER_PT_debug(bpy.types.Panel):
     """
     デバッグモードパネル
     
@@ -142,7 +142,7 @@ class DIY_RENDER_PT_debug(bpy.types.Panel):
     bl_region_type = 'WINDOW'
     bl_context = "render"
     bl_options = {'DEFAULT_CLOSED'}  # デフォルトで折りたたんで表示
-    COMPAT_ENGINES = {'DIY_RENDER_MINIMAL'}
+    COMPAT_ENGINES = {'LUCID_RENDER_MINIMAL'}
 
     @classmethod
     def poll(cls, context):
@@ -153,11 +153,11 @@ class DIY_RENDER_PT_debug(bpy.types.Panel):
         layout.use_property_split = True
         layout.use_property_decorate = False
         
-        diy = context.scene.diy_renderer
-        layout.prop(diy, "debug_mode")
+        lucid = context.scene.lucid_renderer
+        layout.prop(lucid, "debug_mode")
 
 
-class DIY_RENDER_PT_performance(bpy.types.Panel):
+class LUCID_RENDER_PT_performance(bpy.types.Panel):
     """
     パフォーマンス設定パネル
     
@@ -177,7 +177,7 @@ class DIY_RENDER_PT_performance(bpy.types.Panel):
     bl_region_type = 'WINDOW'
     bl_context = "render"
     bl_options = {'DEFAULT_CLOSED'}  # デフォルトで折りたたんで表示
-    COMPAT_ENGINES = {'DIY_RENDER_MINIMAL'}
+    COMPAT_ENGINES = {'LUCID_RENDER_MINIMAL'}
 
     @classmethod
     def poll(cls, context):
@@ -188,13 +188,13 @@ class DIY_RENDER_PT_performance(bpy.types.Panel):
         layout.use_property_split = True
         layout.use_property_decorate = False
         
-        diy = context.scene.diy_renderer
+        lucid = context.scene.lucid_renderer
         
         col = layout.column(heading="Backend")
-        col.prop(diy, "backend", text="Device")
+        col.prop(lucid, "backend", text="Device")
 
 
-class DIY_RENDER_PT_diagnostics(bpy.types.Panel):
+class LUCID_RENDER_PT_diagnostics(bpy.types.Panel):
     """
     診断パネル - Path Variance Analyzer
     
@@ -216,7 +216,7 @@ class DIY_RENDER_PT_diagnostics(bpy.types.Panel):
     bl_region_type = 'WINDOW'
     bl_context = "render"
     bl_options = {'DEFAULT_CLOSED'}
-    COMPAT_ENGINES = {'DIY_RENDER_MINIMAL'}
+    COMPAT_ENGINES = {'LUCID_RENDER_MINIMAL'}
 
     @classmethod
     def poll(cls, context):
@@ -227,14 +227,14 @@ class DIY_RENDER_PT_diagnostics(bpy.types.Panel):
         layout.use_property_split = True
         layout.use_property_decorate = False
         
-        diy = context.scene.diy_renderer
+        lucid = context.scene.lucid_renderer
         
         # 診断の有効化
-        layout.prop(diy, "enable_diagnostics")
+        layout.prop(lucid, "enable_diagnostics")
         
-        if diy.enable_diagnostics:
+        if lucid.enable_diagnostics:
             # プリセット選択
-            layout.prop(diy, "diagnostics_preset")
+            layout.prop(lucid, "diagnostics_preset")
             
             # メモリ使用量の推定表示
             scene = context.scene
@@ -248,7 +248,7 @@ class DIY_RENDER_PT_diagnostics(bpy.types.Panel):
                 'STANDARD': 0.4,   # ~800MB at 1080p
                 'DETAILED': 1.6,   # ~3.2GB at 1080p
             }
-            factor = memory_factors.get(diy.diagnostics_preset, 0.4)
+            factor = memory_factors.get(lucid.diagnostics_preset, 0.4)
             est_memory_mb = (width * height * factor / (1920 * 1080)) * 800
             
             # 情報表示
@@ -257,25 +257,25 @@ class DIY_RENDER_PT_diagnostics(bpy.types.Panel):
             box.label(text=f"Est. Memory: ~{est_memory_mb:.0f} MB")
 
 
-class DIY_RENDER_PT_diagnostics_results(bpy.types.Panel):
+class LUCID_RENDER_PT_diagnostics_results(bpy.types.Panel):
     """
     診断結果の表示パネル
     
     レンダリング後の診断結果を表示します。
     """
     bl_label = "Analysis Results"
-    bl_parent_id = "DIY_RENDER_PT_diagnostics"
+    bl_parent_id = "LUCID_RENDER_PT_diagnostics"
     bl_space_type = 'PROPERTIES'
     bl_region_type = 'WINDOW'
     bl_context = "render"
     bl_options = {'DEFAULT_CLOSED'}
-    COMPAT_ENGINES = {'DIY_RENDER_MINIMAL'}
+    COMPAT_ENGINES = {'LUCID_RENDER_MINIMAL'}
 
     @classmethod
     def poll(cls, context):
-        diy = context.scene.diy_renderer
+        lucid = context.scene.lucid_renderer
         return (context.engine in cls.COMPAT_ENGINES and 
-                diy.enable_diagnostics)
+                lucid.enable_diagnostics)
 
     def draw(self, context):
         layout = self.layout
@@ -328,16 +328,16 @@ class DIY_RENDER_PT_diagnostics_results(bpy.types.Panel):
             layout.label(text=f"Error: {str(e)[:30]}")
 
 
-class DIY_PT_viewport_path_visualization(bpy.types.Panel):
+class LUCID_PT_viewport_path_visualization(bpy.types.Panel):
     """
     3D Viewport用のパス可視化パネル
     
     Image Editorでロックしたピクセルのパスを3D Viewportに表示します。
     """
-    bl_label = "DIY Path Visualization"
+    bl_label = "Lucid Path Visualization"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'DIY'
+    bl_category = 'Lucid'
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
@@ -383,7 +383,7 @@ class DIY_PT_viewport_path_visualization(bpy.types.Panel):
             col = box.column(align=True)
             col.scale_y = 0.8
             col.label(text="Open Image Editor →")
-            col.label(text="DIY panel →")
+            col.label(text="Lucid panel →")
             col.label(text="Start Inspection")
         elif not is_locked:
             box.label(text="No pixel locked", icon='INFO')
@@ -400,13 +400,13 @@ class DIY_PT_viewport_path_visualization(bpy.types.Panel):
             # 全選択/全解除ボタン
             if paths_count > 0:
                 row = box.row(align=True)
-                row.operator("diy_render.select_all_paths", text="All", icon='CHECKBOX_HLT')
-                row.operator("diy_render.deselect_all_paths", text="None", icon='CHECKBOX_DEHLT')
+                row.operator("lucid_render.select_all_paths", text="All", icon='CHECKBOX_HLT')
+                row.operator("lucid_render.deselect_all_paths", text="None", icon='CHECKBOX_DEHLT')
             
             # 設定
-            diy = context.scene.diy_renderer
+            lucid = context.scene.lucid_renderer
             col.separator()
-            col.prop(diy, "max_visualized_paths", text="Max Paths")
+            col.prop(lucid, "max_visualized_paths", text="Max Paths")
         
         # 使い方
         if is_active:

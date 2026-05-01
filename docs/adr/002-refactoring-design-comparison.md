@@ -20,7 +20,7 @@
 
 ```
 ┌─────────────────────────────────┐
-│  DIYRenderEngine (薄いラッパー)  │
+│  LucidRenderEngine (薄いラッパー)  │
 ├─────────────────────────────────┤
 │  RenderCoordinator (状態管理)    │
 ├─────────────────────────────────┤
@@ -32,7 +32,7 @@
 
 **ファイル構成**:
 ```
-DIYRenderer/
+LucidRenderer/
 ├── engine.py         # 薄いラッパー (50行)
 ├── coordinator.py    # 状態管理
 ├── viewport.py       # ビューポート専用
@@ -57,7 +57,7 @@ DIYRenderer/
 
 **ファイル構成**:
 ```
-DIYRenderer/
+LucidRenderer/
 ├── engine.py         # RenderEngine + ビューポート/F12 ロジック
 └── backend.py        # C++ ラッパー + シーンエクスポート
 ```
@@ -65,7 +65,7 @@ DIYRenderer/
 **コード例**:
 ```python
 # engine.py - すべての Blender 側ロジック
-class DIYRenderEngine(bpy.types.RenderEngine):
+class LucidRenderEngine(bpy.types.RenderEngine):
     def render(self, depsgraph):
         # F12 ロジック直接実装
     
@@ -102,7 +102,7 @@ class RendererBackend:
 
 **ファイル構成**:
 ```
-DIYRenderer/
+LucidRenderer/
 ├── engine.py              # エントリーポイントのみ
 ├── rendering/
 │   ├── __init__.py
@@ -137,7 +137,7 @@ DIYRenderer/
 **コード例**:
 ```python
 # engine.py
-class DIYRenderEngine(bpy.types.RenderEngine):
+class LucidRenderEngine(bpy.types.RenderEngine):
     def __init__(self):
         self._event_bus = EventBus()
         self._state = RenderState()
@@ -251,7 +251,7 @@ class RenderStateMachine:
 **コード例**:
 ```python
 # engine.py - 現在の構造を維持しつつ整理
-class DIYRenderEngine(bpy.types.RenderEngine):
+class LucidRenderEngine(bpy.types.RenderEngine):
     EDITING_TIMEOUT = 0.3
     EXPORT_THROTTLE = 0.2
     RENDER_COOLDOWN = 0.05
@@ -320,7 +320,7 @@ class DIYRenderEngine(bpy.types.RenderEngine):
 
 **推奨ファイル構成**:
 ```
-DIYRenderer/
+LucidRenderer/
 ├── engine.py         # RenderEngine + StateMachine
 ├── backend.py        # C++ ラッパー + シーンエクスポート
 ├── state.py          # データクラス（ViewportState, RenderParams等）
@@ -341,7 +341,7 @@ DIYRenderer/
 
 ### 採用するファイル構成
 ```
-DIYRenderer/
+LucidRenderer/
 ├── engine.py         # RenderEngine (薄いラッパー, ~50行)
 ├── coordinator.py    # RenderCoordinator (状態管理の中心)
 ├── viewport.py       # ViewportRenderer (ビューポート専用ロジック)

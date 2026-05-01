@@ -1,5 +1,5 @@
 """
-DIY Renderer - Custom Path Tracing Renderer for Blender
+Lucid Renderer - Custom Path Tracing Renderer for Blender
 ========================================================
 
 このアドオンは、カスタム C++ パストレーサーを Blender のレンダリングシステムに
@@ -16,7 +16,7 @@ DIY Renderer - Custom Path Tracing Renderer for Blender
 モジュール構成:
 ==============
 - __init__.py (このファイル): アドオン登録・解除
-- engine.py: レンダーエンジン本体 (DIYRenderEngine)
+- engine.py: レンダーエンジン本体 (LucidRenderEngine)
 - render_session.py: レンダリングセッション (RenderSession) - インスタンス固有
 - scene_sync.py: シーン変更検出 (SceneSync, UpdateFlags)
 - viewport.py: ビューポートレンダリング (ViewportRenderer)
@@ -37,10 +37,10 @@ DIY Renderer - Custom Path Tracing Renderer for Blender
 
 インストール:
 ============
-1. DIYRenderer フォルダを Blender のアドオンディレクトリにコピー
-2. Edit > Preferences > Add-ons で "DIY Renderer" を有効化
-3. Render Engine を "DIY Render (Minimal)" に変更
-4. pybind11 モジュール (diyrenderer) がビルドされていることを確認
+1. LucidRenderer フォルダを Blender のアドオンディレクトリにコピー
+2. Edit > Preferences > Add-ons で "Lucid Renderer" を有効化
+3. Render Engine を "Lucid Render (Minimal)" に変更
+4. pybind11 モジュール (lucidrenderer) がビルドされていることを確認
 
 Blender アドオン API:
 ====================
@@ -50,7 +50,7 @@ Blender アドオン API:
 """
 
 bl_info = {
-    "name": "DIY Renderer (Minimal Example)",
+    "name": "Lucid Renderer (Minimal Example)",
     "author": "You",
     "version": (0, 0, 2),
     "blender": (4, 5, 0),          # 必要な Blender バージョン
@@ -62,27 +62,27 @@ bl_info = {
 import bpy
 
 # 各モジュールからクラスをインポート
-from .preferences import DIYRendererPreferences, DIYRendererSettings, _get_prefs
+from .preferences import LucidRendererPreferences, LucidRendererSettings, _get_prefs
 from .panels import (
-    DIY_RENDER_PT_sampling, 
-    DIY_RENDER_PT_light_paths, 
-    DIY_RENDER_PT_debug, 
-    DIY_RENDER_PT_performance,
-    DIY_RENDER_PT_diagnostics,
-    DIY_RENDER_PT_diagnostics_results,
-    DIY_PT_viewport_path_visualization,
+    LUCID_RENDER_PT_sampling, 
+    LUCID_RENDER_PT_light_paths, 
+    LUCID_RENDER_PT_debug, 
+    LUCID_RENDER_PT_performance,
+    LUCID_RENDER_PT_diagnostics,
+    LUCID_RENDER_PT_diagnostics_results,
+    LUCID_PT_viewport_path_visualization,
 )
 from .hover_diagnostics import (
-    DIY_OT_pixel_inspector,
-    DIY_OT_toggle_path_selection,
-    DIY_OT_highlight_path,
-    DIY_OT_select_all_paths,
-    DIY_OT_deselect_all_paths,
-    DIY_OT_create_path_curves,
-    DIY_OT_clear_path_curves,
-    DIY_PT_image_editor_diagnostics,
+    LUCID_OT_pixel_inspector,
+    LUCID_OT_toggle_path_selection,
+    LUCID_OT_highlight_path,
+    LUCID_OT_select_all_paths,
+    LUCID_OT_deselect_all_paths,
+    LUCID_OT_create_path_curves,
+    LUCID_OT_clear_path_curves,
+    LUCID_PT_image_editor_diagnostics,
 )
-from .engine import DIYRenderEngine
+from .engine import LucidRenderEngine
 
 
 # =============================================================================
@@ -99,7 +99,7 @@ def _viewport_redraw_timer():
     """
     ビューポート再描画タイマーのコールバック。
     
-    DIY Renderer が選択されているビューポートを定期的に再描画します。
+    Lucid Renderer が選択されているビューポートを定期的に再描画します。
     これにより、プログレッシブレンダリングの途中結果が表示されます。
     
     Returns:
@@ -107,8 +107,8 @@ def _viewport_redraw_timer():
     """
     try:
         scene = bpy.context.scene
-        # DIY Renderer が選択されている場合のみ処理
-        if scene and scene.render.engine == 'DIY_RENDER_MINIMAL':
+        # Lucid Renderer が選択されている場合のみ処理
+        if scene and scene.render.engine == 'LUCID_RENDER_MINIMAL':
             # 全ウィンドウの 3D ビューポートを検索
             for window in bpy.context.window_manager.windows:
                 for area in window.screen.areas:
@@ -149,28 +149,28 @@ def register():
     
     # ===== クラス登録 =====
     # 順番が重要: 依存関係のあるクラスは後に登録
-    bpy.utils.register_class(DIYRendererPreferences)  # 設定画面
-    bpy.utils.register_class(DIYRendererSettings)     # シーン設定
-    bpy.utils.register_class(DIY_RENDER_PT_sampling)  # サンプリングパネル
-    bpy.utils.register_class(DIY_RENDER_PT_light_paths)  # ライトパスパネル
-    bpy.utils.register_class(DIY_RENDER_PT_debug)     # デバッグパネル
-    bpy.utils.register_class(DIY_RENDER_PT_performance)  # パフォーマンスパネル
-    bpy.utils.register_class(DIY_RENDER_PT_diagnostics)  # 診断パネル
-    bpy.utils.register_class(DIY_RENDER_PT_diagnostics_results)  # 診断結果パネル
-    bpy.utils.register_class(DIY_PT_viewport_path_visualization)  # 3D Viewport パス可視化パネル
-    bpy.utils.register_class(DIY_OT_pixel_inspector)  # ピクセルインスペクター
-    bpy.utils.register_class(DIY_OT_toggle_path_selection)  # パス選択トグル
-    bpy.utils.register_class(DIY_OT_highlight_path)  # パスハイライト
-    bpy.utils.register_class(DIY_OT_select_all_paths)  # 全パス選択
-    bpy.utils.register_class(DIY_OT_deselect_all_paths)  # 全パス選択解除
-    bpy.utils.register_class(DIY_OT_create_path_curves)  # パスCurve作成
-    bpy.utils.register_class(DIY_OT_clear_path_curves)  # パスCurve削除
-    bpy.utils.register_class(DIY_PT_image_editor_diagnostics)  # Image Editor パネル
-    bpy.utils.register_class(DIYRenderEngine)         # レンダーエンジン本体
+    bpy.utils.register_class(LucidRendererPreferences)  # 設定画面
+    bpy.utils.register_class(LucidRendererSettings)     # シーン設定
+    bpy.utils.register_class(LUCID_RENDER_PT_sampling)  # サンプリングパネル
+    bpy.utils.register_class(LUCID_RENDER_PT_light_paths)  # ライトパスパネル
+    bpy.utils.register_class(LUCID_RENDER_PT_debug)     # デバッグパネル
+    bpy.utils.register_class(LUCID_RENDER_PT_performance)  # パフォーマンスパネル
+    bpy.utils.register_class(LUCID_RENDER_PT_diagnostics)  # 診断パネル
+    bpy.utils.register_class(LUCID_RENDER_PT_diagnostics_results)  # 診断結果パネル
+    bpy.utils.register_class(LUCID_PT_viewport_path_visualization)  # 3D Viewport パス可視化パネル
+    bpy.utils.register_class(LUCID_OT_pixel_inspector)  # ピクセルインスペクター
+    bpy.utils.register_class(LUCID_OT_toggle_path_selection)  # パス選択トグル
+    bpy.utils.register_class(LUCID_OT_highlight_path)  # パスハイライト
+    bpy.utils.register_class(LUCID_OT_select_all_paths)  # 全パス選択
+    bpy.utils.register_class(LUCID_OT_deselect_all_paths)  # 全パス選択解除
+    bpy.utils.register_class(LUCID_OT_create_path_curves)  # パスCurve作成
+    bpy.utils.register_class(LUCID_OT_clear_path_curves)  # パスCurve削除
+    bpy.utils.register_class(LUCID_PT_image_editor_diagnostics)  # Image Editor パネル
+    bpy.utils.register_class(LucidRenderEngine)         # レンダーエンジン本体
     
     # ===== シーンプロパティ追加 =====
-    # scene.diy_renderer でアクセス可能に
-    bpy.types.Scene.diy_renderer = bpy.props.PointerProperty(type=DIYRendererSettings)
+    # scene.lucid_renderer でアクセス可能に
+    bpy.types.Scene.lucid_renderer = bpy.props.PointerProperty(type=LucidRendererSettings)
     
     # ===== タイマー登録 =====
     # persistent=True: ファイル読み込み後もタイマーを維持
@@ -179,7 +179,7 @@ def register():
     
     # ===== 標準パネルに互換エンジンとして追加 =====
     # これにより、マテリアル、メッシュ、ライト等の標準パネルが
-    # DIY Renderer でも表示されるようになります
+    # Lucid Renderer でも表示されるようになります
     try:
         from bl_ui import (
             properties_material,
@@ -216,9 +216,9 @@ def register():
                 
                 panel = getattr(module, panel_name, None)
                 if panel and hasattr(panel, 'COMPAT_ENGINES'):
-                    panel.COMPAT_ENGINES.add('DIY_RENDER_MINIMAL')
+                    panel.COMPAT_ENGINES.add('LUCID_RENDER_MINIMAL')
     except Exception as e:
-        print(f"[DIYRenderer] Warning: Could not register panels: {e}")
+        print(f"[LucidRenderer] Warning: Could not register panels: {e}")
 
 
 def unregister():
@@ -265,34 +265,34 @@ def unregister():
         for module in modules:
             for panel_name in dir(module):
                 panel = getattr(module, panel_name, None)
-                if panel and hasattr(panel, 'COMPAT_ENGINES') and 'DIY_RENDER_MINIMAL' in panel.COMPAT_ENGINES:
-                    panel.COMPAT_ENGINES.discard('DIY_RENDER_MINIMAL')
+                if panel and hasattr(panel, 'COMPAT_ENGINES') and 'LUCID_RENDER_MINIMAL' in panel.COMPAT_ENGINES:
+                    panel.COMPAT_ENGINES.discard('LUCID_RENDER_MINIMAL')
     except Exception as e:
-        print(f"[DIYRenderer] Warning: Could not unregister panels: {e}")
+        print(f"[LucidRenderer] Warning: Could not unregister panels: {e}")
     
     # ===== シーンプロパティ削除 =====
-    del bpy.types.Scene.diy_renderer
+    del bpy.types.Scene.lucid_renderer
     
     # ===== クラス解除 =====
     # 登録の逆順で解除（依存関係を壊さないため）
-    bpy.utils.unregister_class(DIYRenderEngine)
-    bpy.utils.unregister_class(DIY_PT_image_editor_diagnostics)  # Image Editor パネル
-    bpy.utils.unregister_class(DIY_OT_clear_path_curves)  # パスCurve削除
-    bpy.utils.unregister_class(DIY_OT_create_path_curves)  # パスCurve作成
-    bpy.utils.unregister_class(DIY_OT_deselect_all_paths)  # 全パス選択解除
-    bpy.utils.unregister_class(DIY_OT_select_all_paths)  # 全パス選択
-    bpy.utils.unregister_class(DIY_OT_highlight_path)  # パスハイライト
-    bpy.utils.unregister_class(DIY_OT_toggle_path_selection)  # パス選択トグル
-    bpy.utils.unregister_class(DIY_OT_pixel_inspector)  # ピクセルインスペクター
-    bpy.utils.unregister_class(DIY_PT_viewport_path_visualization)  # 3D Viewport パス可視化パネル
-    bpy.utils.unregister_class(DIY_RENDER_PT_diagnostics_results)  # 子パネルは先に解除
-    bpy.utils.unregister_class(DIY_RENDER_PT_diagnostics)
-    bpy.utils.unregister_class(DIY_RENDER_PT_performance)
-    bpy.utils.unregister_class(DIY_RENDER_PT_debug)
-    bpy.utils.unregister_class(DIY_RENDER_PT_light_paths)
-    bpy.utils.unregister_class(DIY_RENDER_PT_sampling)
-    bpy.utils.unregister_class(DIYRendererSettings)
-    bpy.utils.unregister_class(DIYRendererPreferences)
+    bpy.utils.unregister_class(LucidRenderEngine)
+    bpy.utils.unregister_class(LUCID_PT_image_editor_diagnostics)  # Image Editor パネル
+    bpy.utils.unregister_class(LUCID_OT_clear_path_curves)  # パスCurve削除
+    bpy.utils.unregister_class(LUCID_OT_create_path_curves)  # パスCurve作成
+    bpy.utils.unregister_class(LUCID_OT_deselect_all_paths)  # 全パス選択解除
+    bpy.utils.unregister_class(LUCID_OT_select_all_paths)  # 全パス選択
+    bpy.utils.unregister_class(LUCID_OT_highlight_path)  # パスハイライト
+    bpy.utils.unregister_class(LUCID_OT_toggle_path_selection)  # パス選択トグル
+    bpy.utils.unregister_class(LUCID_OT_pixel_inspector)  # ピクセルインスペクター
+    bpy.utils.unregister_class(LUCID_PT_viewport_path_visualization)  # 3D Viewport パス可視化パネル
+    bpy.utils.unregister_class(LUCID_RENDER_PT_diagnostics_results)  # 子パネルは先に解除
+    bpy.utils.unregister_class(LUCID_RENDER_PT_diagnostics)
+    bpy.utils.unregister_class(LUCID_RENDER_PT_performance)
+    bpy.utils.unregister_class(LUCID_RENDER_PT_debug)
+    bpy.utils.unregister_class(LUCID_RENDER_PT_light_paths)
+    bpy.utils.unregister_class(LUCID_RENDER_PT_sampling)
+    bpy.utils.unregister_class(LucidRendererSettings)
+    bpy.utils.unregister_class(LucidRendererPreferences)
 
 
 # スクリプトとして直接実行された場合

@@ -46,10 +46,10 @@ for _path in _pybind_paths:
         sys.path.insert(0, _path)
 
 try:
-    import diyrenderer
+    import lucidrenderer
     PYBIND_AVAILABLE = True
 except ImportError as e:
-    diyrenderer = None
+    lucidrenderer = None
     PYBIND_AVAILABLE = False
     print(f"[RenderSession] pybind11 module not available: {e}")
 
@@ -99,7 +99,7 @@ class RenderSession:
         
         # 初期化
         if PYBIND_AVAILABLE:
-            self._renderer = diyrenderer.Renderer()
+            self._renderer = lucidrenderer.Renderer()
             self._executor = ThreadPoolExecutor(max_workers=1)
             print(f"[RenderSession #{self._session_id}] Created with pybind11 renderer")
         else:
@@ -329,11 +329,11 @@ class RenderSession:
         
         try:
             if preset == "minimal":
-                config = diyrenderer.PathRecordingConfig.minimal()
+                config = lucidrenderer.PathRecordingConfig.minimal()
             elif preset == "detailed":
-                config = diyrenderer.PathRecordingConfig.detailed()
+                config = lucidrenderer.PathRecordingConfig.detailed()
             else:
-                config = diyrenderer.PathRecordingConfig.standard()
+                config = lucidrenderer.PathRecordingConfig.standard()
             
             self._renderer.enable_diagnostics(config)
             self._diagnostics_enabled = True

@@ -1,4 +1,4 @@
-# DIY Renderer - C++ Backend
+# Lucid Renderer - C++ Backend
 
 A physically-based renderer implemented in C++20 with type-safe units, designed as a Blender add-on backend.
 
@@ -59,7 +59,7 @@ conan install . --profile=conan_gcc15_profile --build=missing --output-folder=bu
 ### 3. Build
 
 ```bash
-cd DIYRenderer/cpp_renderer
+cd LucidRenderer/cpp_renderer
 
 # Install dependencies with Conan
 conan install . --build=missing --output-folder=build_pybind
@@ -71,7 +71,7 @@ cmake -B build_pybind --preset conan-release
 cmake --build build_pybind -j
 ```
 
-Output: `build_pybind/diyrenderer.cpython-311-darwin.so`
+Output: `build_pybind/lucidrenderer.cpython-311-darwin.so`
 
 ## Testing
 
@@ -141,10 +141,10 @@ cpp_renderer/
 The compiled module integrates with the Blender add-on:
 
 ```python
-import diyrenderer
+import lucidrenderer
 
 # Create renderer instance
-renderer = diyrenderer.PyRenderer()
+renderer = lucidrenderer.PyRenderer()
 
 # Set scene data (from Blender export)
 renderer.set_scene_json(scene_json_string)
@@ -215,4 +215,4 @@ conan install . --build=missing --output-folder=build_pybind
 
 ## License
 
-Part of the blender-diy-renderer-addon project.
+Part of the blender-lucid-renderer-addon project.

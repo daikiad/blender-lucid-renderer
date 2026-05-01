@@ -115,8 +115,8 @@ class ViewportRenderer:
         sample_offset = 0
         if mode == RenderMode.FINAL:
             # 現在の解像度でのサンプル数を取得（仮の解像度で計算）
-            diy = context.scene.diy_renderer
-            scale_factor = diy.viewport_scale_final
+            lucid = context.scene.lucid_renderer
+            scale_factor = lucid.viewport_scale_final
             render_width = max(1, width // scale_factor)
             render_height = max(1, height // scale_factor)
             # accumulated_samples は (array, count) のタプルを保持
@@ -256,28 +256,28 @@ class ViewportRenderer:
         """
         from mathutils import Vector
         
-        diy = context.scene.diy_renderer
+        lucid = context.scene.lucid_renderer
         
         # 解像度スケール
         if mode == RenderMode.EDITING:
-            scale_factor = diy.viewport_scale_editing
+            scale_factor = lucid.viewport_scale_editing
             max_bounces = RENDER_CONSTANTS.EDITING_BOUNCES
         else:
-            scale_factor = diy.viewport_scale_final
+            scale_factor = lucid.viewport_scale_final
             max_bounces = RENDER_CONSTANTS.FINAL_BOUNCES
         
         render_width = max(1, width // scale_factor)
         render_height = max(1, height // scale_factor)
         
         # デバッグモード
-        debug_mode = diy.debug_mode if diy.debug_mode != 'NONE' else None
+        debug_mode = lucid.debug_mode if lucid.debug_mode != 'NONE' else None
         
         params = RenderParams(
             width=render_width,
             height=render_height,
             samples=1,
             max_bounces=max_bounces,
-            algorithm=diy.sampling_algorithm,
+            algorithm=lucid.sampling_algorithm,
             debug_mode=debug_mode,
             sample_offset=sample_offset
         )
@@ -618,8 +618,8 @@ class ViewportRenderer:
             # 最終モード: サンプル数が足りない場合
             from .preferences import get_scene_settings
             try:
-                diy = get_scene_settings()
-                target_samples = diy.viewport_samples if diy else 64
+                lucid = get_scene_settings()
+                target_samples = lucid.viewport_samples if lucid else 64
             except Exception:
                 target_samples = 64
             
@@ -642,8 +642,8 @@ class ViewportRenderer:
         current_samples = state.get_current_sample_count(params.width, params.height)
         
         try:
-            diy = context.scene.diy_renderer
-            target_samples = diy.viewport_samples
+            lucid = context.scene.lucid_renderer
+            target_samples = lucid.viewport_samples
         except Exception:
             target_samples = 64
         
@@ -707,8 +707,8 @@ class ViewportRenderer:
         
         # ターゲットサンプル数を取得
         try:
-            diy = context.scene.diy_renderer
-            target_samples = diy.viewport_samples
+            lucid = context.scene.lucid_renderer
+            target_samples = lucid.viewport_samples
         except Exception:
             pass
         

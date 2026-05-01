@@ -49,11 +49,11 @@ for _path in _pybind_paths:
         sys.path.insert(0, _path)
 
 try:
-    import diyrenderer
+    import lucidrenderer
     PYBIND_AVAILABLE = True
-    print(f"[RendererBackend] pybind11 module loaded: version {diyrenderer.__version__}, OpenMP={diyrenderer.openmp_enabled}")
+    print(f"[RendererBackend] pybind11 module loaded: version {lucidrenderer.__version__}, OpenMP={lucidrenderer.openmp_enabled}")
 except ImportError as e:
-    diyrenderer = None
+    lucidrenderer = None
     PYBIND_AVAILABLE = False
     print(f"[RendererBackend] pybind11 module not available: {e}")
 
@@ -80,7 +80,7 @@ class RendererBackend:
         self._job_id: int = 0
         
         if PYBIND_AVAILABLE:
-            self._renderer = diyrenderer.Renderer()
+            self._renderer = lucidrenderer.Renderer()
             self._executor = ThreadPoolExecutor(max_workers=1)
             print("[RendererBackend] Initialized with pybind11 renderer")
     

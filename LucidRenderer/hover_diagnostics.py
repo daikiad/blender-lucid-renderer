@@ -7,7 +7,7 @@ Modal Operator とカスタム描画ハンドラを使用して実装されて�
 
 使い方:
 1. F12レンダリングを診断機能有効で実行
-2. Image Editor で DIY > Pixel Inspector を開く
+2. Image Editor で Lucid > Pixel Inspector を開く
 3. "Start Inspection" ボタンをクリック
 4. マウスをレンダリング結果上で動かすとピクセル情報が表示される
 5. クリックでピクセルをロック/アンロック（パス可視化に使用）
@@ -957,7 +957,7 @@ def _update_paths_data(pixel_x: int, pixel_y: int):
         # max_visualized_paths を取得
         max_paths = 20
         try:
-            settings = bpy.context.scene.diy_renderer
+            settings = bpy.context.scene.lucid_renderer
             max_paths = settings.max_visualized_paths
         except:
             pass
@@ -1002,7 +1002,7 @@ def _update_paths_data(pixel_x: int, pixel_y: int):
 # Curve オブジェクトによるパス可視化
 # =============================================================================
 
-PATHS_COLLECTION_NAME = "DIY_PathVisualization"
+PATHS_COLLECTION_NAME = "LUCID_PathVisualization"
 
 
 def _get_or_create_paths_collection():
@@ -1030,7 +1030,7 @@ def _clear_path_objects():
 
 def _create_path_material(name: str, color: tuple) -> bpy.types.Material:
     """パス用のマテリアルを作成"""
-    mat_name = f"DIY_PathMaterial_{name}"
+    mat_name = f"LUCID_PathMaterial_{name}"
     
     if mat_name in bpy.data.materials:
         mat = bpy.data.materials[mat_name]
@@ -1178,9 +1178,9 @@ def create_selected_paths_as_curves():
     return created_count
 
 
-class DIY_OT_create_path_curves(bpy.types.Operator):
+class LUCID_OT_create_path_curves(bpy.types.Operator):
     """選択したパスをCurveオブジェクトとして3Dビューポートに作成"""
-    bl_idname = "diy_render.create_path_curves"
+    bl_idname = "lucid_render.create_path_curves"
     bl_label = "Create Path Curves"
     bl_description = "Create selected paths as Curve objects in 3D viewport"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1196,9 +1196,9 @@ class DIY_OT_create_path_curves(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class DIY_OT_clear_path_curves(bpy.types.Operator):
+class LUCID_OT_clear_path_curves(bpy.types.Operator):
     """パスのCurveオブジェクトを削除"""
-    bl_idname = "diy_render.clear_path_curves"
+    bl_idname = "lucid_render.clear_path_curves"
     bl_label = "Clear Path Curves"
     bl_description = "Remove all path visualization objects"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1209,14 +1209,14 @@ class DIY_OT_clear_path_curves(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class DIY_OT_pixel_inspector(bpy.types.Operator):
+class LUCID_OT_pixel_inspector(bpy.types.Operator):
     """
     ピクセル診断インスペクター
     
     Image Editor上でマウスオーバー時にピクセルの診断情報を
     オーバーレイ表示します。
     """
-    bl_idname = "diy_render.pixel_inspector"
+    bl_idname = "lucid_render.pixel_inspector"
     bl_label = "Pixel Inspector"
     bl_description = "Inspect pixel diagnostic data on mouse hover"
     bl_options = {'REGISTER'}
@@ -1505,18 +1505,18 @@ class DIY_OT_pixel_inspector(bpy.types.Operator):
 # Image Editor パネル
 # =============================================================================
 
-class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
+class LUCID_PT_image_editor_diagnostics(bpy.types.Panel):
     """
     Image Editor の診断パネル
     """
-    bl_label = "DIY Pixel Inspector"
+    bl_label = "Lucid Pixel Inspector"
     bl_space_type = 'IMAGE_EDITOR'
     bl_region_type = 'UI'
-    bl_category = 'DIY'
+    bl_category = 'Lucid'
     
     @classmethod
     def poll(cls, context):
-        """DIY Renderer の診断データがある場合のみ表示"""
+        """Lucid Renderer の診断データがある場合のみ表示"""
         return True  # 常に表示（データがない場合は説明を表示）
     
     def draw(self, context):
@@ -1533,13 +1533,13 @@ class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
         
         # インスペクターボタン
         if _inspector_state['is_active']:
-            layout.operator("diy_render.pixel_inspector", 
+            layout.operator("lucid_render.pixel_inspector", 
                           text="Stop Inspection", 
                           icon='CANCEL')
         else:
             col = layout.column()
             col.enabled = has_data
-            col.operator("diy_render.pixel_inspector", 
+            col.operator("lucid_render.pixel_inspector", 
                         text="Start Inspection", 
                         icon='EYEDROPPER')
         
@@ -1593,8 +1593,8 @@ class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
                     
                     # 全選択/全解除ボタン
                     row = box.row(align=True)
-                    row.operator("diy_render.select_all_paths", text="All", icon='CHECKBOX_HLT')
-                    row.operator("diy_render.deselect_all_paths", text="None", icon='CHECKBOX_DEHLT')
+                    row.operator("lucid_render.select_all_paths", text="All", icon='CHECKBOX_HLT')
+                    row.operator("lucid_render.deselect_all_paths", text="None", icon='CHECKBOX_DEHLT')
                     
                     # パスリスト表示（mean値の大きい順にソート）
                     col = box.column(align=True)
@@ -1643,7 +1643,7 @@ class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
                         
                         # ハイライトボタン（目のアイコン）
                         op_hl = row.operator(
-                            "diy_render.highlight_path",
+                            "lucid_render.highlight_path",
                             text="",
                             icon='HIDE_OFF' if is_highlighted else 'HIDE_ON',
                             depress=is_highlighted
@@ -1652,7 +1652,7 @@ class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
                         
                         # 選択トグルボタン
                         op = row.operator(
-                            "diy_render.toggle_path_selection",
+                            "lucid_render.toggle_path_selection",
                             text="",
                             icon='CHECKBOX_HLT' if is_selected else 'CHECKBOX_DEHLT',
                             depress=is_selected
@@ -1669,7 +1669,7 @@ class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
                             label += f" [{strategy[:3]}]"
                         
                         op2 = row.operator(
-                            "diy_render.toggle_path_selection",
+                            "lucid_render.toggle_path_selection",
                             text=label,
                             depress=is_selected
                         )
@@ -1686,8 +1686,8 @@ class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
                         box2 = layout.box()
                         box2.label(text="3D Visualization:", icon='OUTLINER_OB_CURVE')
                         col = box2.column(align=True)
-                        col.operator("diy_render.create_path_curves", text="Create Curves", icon='CURVE_DATA')
-                        col.operator("diy_render.clear_path_curves", text="Clear Curves", icon='TRASH')
+                        col.operator("lucid_render.create_path_curves", text="Create Curves", icon='CURVE_DATA')
+                        col.operator("lucid_render.clear_path_curves", text="Clear Curves", icon='TRASH')
                 else:
                     box.label(text="No paths with geometry")
 
@@ -1696,9 +1696,9 @@ class DIY_PT_image_editor_diagnostics(bpy.types.Panel):
 # パス選択オペレーター
 # =============================================================================
 
-class DIY_OT_toggle_path_selection(bpy.types.Operator):
+class LUCID_OT_toggle_path_selection(bpy.types.Operator):
     """パスの選択をトグルする"""
-    bl_idname = "diy_render.toggle_path_selection"
+    bl_idname = "lucid_render.toggle_path_selection"
     bl_label = "Toggle Path Selection"
     bl_description = "Toggle selection of this path for 3D visualization"
     bl_options = {'INTERNAL'}
@@ -1727,9 +1727,9 @@ class DIY_OT_toggle_path_selection(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class DIY_OT_highlight_path(bpy.types.Operator):
+class LUCID_OT_highlight_path(bpy.types.Operator):
     """パスをハイライトする（トグル）"""
-    bl_idname = "diy_render.highlight_path"
+    bl_idname = "lucid_render.highlight_path"
     bl_label = "Highlight Path"
     bl_description = "Highlight this path (toggle). Highlighted path is shown brighter and thicker"
     bl_options = {'INTERNAL'}
@@ -1756,9 +1756,9 @@ class DIY_OT_highlight_path(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class DIY_OT_select_all_paths(bpy.types.Operator):
+class LUCID_OT_select_all_paths(bpy.types.Operator):
     """全パスを選択する"""
-    bl_idname = "diy_render.select_all_paths"
+    bl_idname = "lucid_render.select_all_paths"
     bl_label = "Select All Paths"
     bl_description = "Select all paths for 3D visualization"
     bl_options = {'INTERNAL'}
@@ -1774,9 +1774,9 @@ class DIY_OT_select_all_paths(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class DIY_OT_deselect_all_paths(bpy.types.Operator):
+class LUCID_OT_deselect_all_paths(bpy.types.Operator):
     """全パスの選択を解除する"""
-    bl_idname = "diy_render.deselect_all_paths"
+    bl_idname = "lucid_render.deselect_all_paths"
     bl_label = "Deselect All Paths"
     bl_description = "Deselect all paths"
     bl_options = {'INTERNAL'}
@@ -1804,14 +1804,14 @@ def _redraw_all_viewports():
 # =============================================================================
 
 classes = (
-    DIY_OT_pixel_inspector,
-    DIY_OT_toggle_path_selection,
-    DIY_OT_highlight_path,
-    DIY_OT_select_all_paths,
-    DIY_OT_deselect_all_paths,
-    DIY_OT_create_path_curves,
-    DIY_OT_clear_path_curves,
-    DIY_PT_image_editor_diagnostics,
+    LUCID_OT_pixel_inspector,
+    LUCID_OT_toggle_path_selection,
+    LUCID_OT_highlight_path,
+    LUCID_OT_select_all_paths,
+    LUCID_OT_deselect_all_paths,
+    LUCID_OT_create_path_curves,
+    LUCID_OT_clear_path_curves,
+    LUCID_PT_image_editor_diagnostics,
 )
 
 

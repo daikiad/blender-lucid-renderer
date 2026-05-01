@@ -7,8 +7,8 @@
  * Python スレッドからのキャンセル要求に即座に応答できます。
  * 
  * 使用例 (Python):
- *   import diyrenderer
- *   renderer = diyrenderer.Renderer()
+ *   import lucidrenderer
+ *   renderer = lucidrenderer.Renderer()
  *   renderer.load_scene_json(json_string)
  *   renderer.set_camera(pos, dir, up, fov)
  *   pixels = renderer.render_tile(0, 0, 800, 600, 800, 600, samples=16)

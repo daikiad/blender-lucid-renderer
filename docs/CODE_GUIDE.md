@@ -1,6 +1,6 @@
-# DIY Renderer コードガイド
+# Lucid Renderer コードガイド
 
-このドキュメントは、DIY Renderer アドオンの設計思想とコード構造を解説します。
+このドキュメントは、Lucid Renderer アドオンの設計思想とコード構造を解説します。
 
 ## 目次
 
@@ -26,7 +26,7 @@
 │         └────────────────┼────────────────────┘             │
 │                          ▼                                  │
 │              ┌───────────────────────┐                      │
-│              │   DIYRenderEngine     │                      │
+│              │   LucidRenderEngine     │                      │
 │              │   (engine.py)         │                      │
 │              └───────────┬───────────┘                      │
 └──────────────────────────┼──────────────────────────────────┘
@@ -74,7 +74,7 @@
 ### ファイル構成
 
 ```
-DIYRenderer/
+LucidRenderer/
 ├── __init__.py          # アドオン登録
 ├── engine.py            # Blender RenderEngine サブクラス
 ├── render_session.py    # レンダリングセッション管理
@@ -92,9 +92,9 @@ DIYRenderer/
 Blender の `bpy.types.RenderEngine` サブクラス。
 
 ```python
-class DIYRenderEngine(bpy.types.RenderEngine):
-    bl_idname = "DIY_RENDER_MINIMAL"
-    bl_label = "DIY Renderer (Minimal)"
+class LucidRenderEngine(bpy.types.RenderEngine):
+    bl_idname = "LUCID_RENDER_MINIMAL"
+    bl_label = "Lucid Renderer (Minimal)"
     bl_use_preview = True           # マテリアルプレビュー対応
     bl_use_shading_nodes = True     # ノードマテリアル対応
 ```
@@ -130,7 +130,7 @@ class RenderSession:
         self._session_id = RenderSession._session_counter
         
         # C++ レンダラー（セッション固有）
-        self._renderer = diyrenderer.Renderer()
+        self._renderer = lucidrenderer.Renderer()
         
         # スレッドプール（非同期レンダリング用）
         self._executor = ThreadPoolExecutor(max_workers=1)
@@ -564,7 +564,7 @@ public:
 **pybind11 モジュール定義 (pybind_module.cpp):**
 
 ```cpp
-PYBIND11_MODULE(diyrenderer, m) {
+PYBIND11_MODULE(lucidrenderer, m) {
     py::class_<PyRenderer>(m, "Renderer")
         .def(py::init<>())
         .def("cancel", &PyRenderer::cancel)
@@ -650,7 +650,7 @@ Vec3 evaluateNode(const NodeTree& tree, const std::string& nodeName,
 1. Blender が render() を呼び出し
    │
    ▼
-2. DIYRenderEngine.render() が処理開始
+2. LucidRenderEngine.render() が処理開始
    │
    ├─→ シーンをエクスポート（session_id 付き）
    │
@@ -734,17 +734,17 @@ Blender では複数のレンダリングコンテキストが同時に動作:
 Session #1 (Viewport)
 ├── _renderer: PyRenderer instance
 ├── _scene_hash: "abc123..."
-└── SceneCache: diy_scene_session_1.json
+└── SceneCache: lucid_scene_session_1.json
 
 Session #2 (Material Preview)
 ├── _renderer: PyRenderer instance
 ├── _scene_hash: "def456..."
-└── SceneCache: diy_scene_session_2.json
+└── SceneCache: lucid_scene_session_2.json
 
 Session #3 (F12 Render)
 ├── _renderer: PyRenderer instance
 ├── _scene_hash: "ghi789..."
-└── SceneCache: diy_scene_session_3.json
+└── SceneCache: lucid_scene_session_3.json
 ```
 
 **実装:**
@@ -757,7 +757,7 @@ class RenderSession:
     def __init__(self):
         RenderSession._session_counter += 1
         self._session_id = RenderSession._session_counter
-        self._renderer = diyrenderer.Renderer()  # 独自インスタンス
+        self._renderer = lucidrenderer.Renderer()  # 独自インスタンス
 
 # SceneCache
 class SceneCache:
@@ -772,7 +772,7 @@ class SceneCache:
 # エクスポート時
 def export_scene_to_file(depsgraph, session_id=0):
     cache = get_scene_cache(session_id)
-    # セッション固有のファイルパス: diy_scene_session_{id}.json
+    # セッション固有のファイルパス: lucid_scene_session_{id}.json
     return cache.get_or_export(depsgraph)
 ```
 

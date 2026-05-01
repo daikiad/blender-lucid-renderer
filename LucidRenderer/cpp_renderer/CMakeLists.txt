@@ -16,7 +16,7 @@ if(APPLE AND NOT DEFINED CMAKE_CXX_COMPILER)
     endif()
 endif()
 
-project(diyrenderer LANGUAGES CXX)
+project(lucidrenderer LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,27 +61,27 @@ find_package(pybind11 REQUIRED)
 find_package(GTest REQUIRED)
 
 # =============================================================================
-# Main Target: diyrenderer (Python module)
+# Main Target: lucidrenderer (Python module)
 # =============================================================================
-pybind11_add_module(diyrenderer
+pybind11_add_module(lucidrenderer
     src/pybind_module.cpp
     src/node_evaluator.cpp
 )
 
-target_include_directories(diyrenderer PRIVATE include)
-target_link_libraries(diyrenderer PRIVATE 
+target_include_directories(lucidrenderer PRIVATE include)
+target_link_libraries(lucidrenderer PRIVATE 
     mp-units::mp-units 
     nlohmann_json::nlohmann_json
 )
 
 if(OpenMP_CXX_FOUND)
-    target_link_libraries(diyrenderer PRIVATE OpenMP::OpenMP_CXX)
+    target_link_libraries(lucidrenderer PRIVATE OpenMP::OpenMP_CXX)
     message(STATUS "OpenMP enabled")
 endif()
 
 # Performance: -O3 + native + ffast-math + LTO for cross-file optimization
-target_compile_options(diyrenderer PRIVATE -O3 -march=native -ffast-math -flto)
-target_link_options(diyrenderer PRIVATE -flto)
+target_compile_options(lucidrenderer PRIVATE -O3 -march=native -ffast-math -flto)
+target_link_options(lucidrenderer PRIVATE -flto)
 
 # =============================================================================
 # Test Targets (Google Test)

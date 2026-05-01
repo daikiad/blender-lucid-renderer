@@ -32,7 +32,7 @@ protected:
 };
 
 TEST_F(PyDiagnosticRecorderTest, CanBeCreatedDefault) {
-    // Python interface: recorder = diyrenderer.PathDiagnosticRecorder()
+    // Python interface: recorder = lucidrenderer.PathDiagnosticRecorder()
     PathDiagnosticRecorder recorder;
     
     // Should be default constructed without crash
@@ -210,7 +210,7 @@ TEST_F(PyDiagnosticExporterTest, ExportJson) {
 class PyPathRecordingConfigTest : public ::testing::Test {};
 
 TEST_F(PyPathRecordingConfigTest, AllFieldsAccessible) {
-    // Python: config = diyrenderer.PathRecordingConfig()
+    // Python: config = lucidrenderer.PathRecordingConfig()
     PathRecordingConfig config;
     config.subsample_factor = 2;
     config.max_groups_per_pixel = 16;
@@ -228,7 +228,7 @@ TEST_F(PyPathRecordingConfigTest, AllFieldsAccessible) {
 }
 
 TEST_F(PyPathRecordingConfigTest, Presets) {
-    // Python: config = diyrenderer.PathRecordingConfig.standard()
+    // Python: config = lucidrenderer.PathRecordingConfig.standard()
     auto standard = PathRecordingConfig::standard();
     EXPECT_EQ(standard.subsample_factor, 2);
     EXPECT_EQ(standard.max_groups_per_pixel, 16);
@@ -287,7 +287,7 @@ TEST_F(PyDiagnosticSuggestionTest, AllFieldsAccessible) {
 class PyDiagnosticPathTracerTest : public ::testing::Test {};
 
 TEST_F(PyDiagnosticPathTracerTest, CanBeCreated) {
-    // Python: tracer = diyrenderer.DiagnosticPathTracer(w, h, config)
+    // Python: tracer = lucidrenderer.DiagnosticPathTracer(w, h, config)
     PathRecordingConfig config = PathRecordingConfig::standard();
     DiagnosticPathTracer tracer(8, 8, config);
     

@@ -1,7 +1,7 @@
 .vscode/
 *.pyc
-DIYRenderer/cpp_renderer/build
-DIYRenderer/cpp_renderer/build_pybind
+LucidRenderer/cpp_renderer/build
+LucidRenderer/cpp_renderer/build_pybind
 .DS_Store
 test_scenes/
 archive/

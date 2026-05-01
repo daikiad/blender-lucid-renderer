@@ -10,10 +10,10 @@ import pytest
 import sys
 import os
 
-# Add DIYRenderer to path
+# Add LucidRenderer to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from DIYRenderer.diagnostics import (
+from LucidRenderer.diagnostics import (
     DiagnosticsManager,
     DiagnosticReport,
     PathGroupInfo,
@@ -53,17 +53,17 @@ class TestDiagnosticsManagerStubMode:
     def test_is_available_without_cpp(self):
         """is_available returns False without C++ module."""
         # Save original module
-        saved = sys.modules.get('diyrenderer')
-        sys.modules['diyrenderer'] = None  # Block import
+        saved = sys.modules.get('lucidrenderer')
+        sys.modules['lucidrenderer'] = None  # Block import
         
         try:
             manager = DiagnosticsManager(100, 100, config="dummy")
             # In stub mode, tracer is None
         finally:
             if saved is not None:
-                sys.modules['diyrenderer'] = saved
+                sys.modules['lucidrenderer'] = saved
             else:
-                sys.modules.pop('diyrenderer', None)
+                sys.modules.pop('lucidrenderer', None)
     
     def test_enable_disable_safe_without_tracer(self):
         """enable/disable don't crash without tracer."""
@@ -270,10 +270,10 @@ class TestCppIntegration:
     def check_cpp_available(self):
         """Skip tests if C++ module not available."""
         try:
-            import diyrenderer
+            import lucidrenderer
             yield
         except ImportError:
-            pytest.skip("diyrenderer C++ module not available")
+            pytest.skip("lucidrenderer C++ module not available")
     
     def test_manager_is_available_with_cpp(self):
         """is_available returns True with C++ module."""
@@ -311,7 +311,7 @@ class TestCppIntegration:
     
     def test_full_workflow(self):
         """Complete workflow: record paths, get report."""
-        import diyrenderer
+        import lucidrenderer
         
         # Create manager
         manager = DiagnosticsManager.standard(64, 64)
@@ -320,9 +320,9 @@ class TestCppIntegration:
         film = manager.get_film()
         
         # Simulate recording paths using proper API
-        recorder = diyrenderer.PathDiagnosticRecorder()
+        recorder = lucidrenderer.PathDiagnosticRecorder()
         recorder.begin_path()
-        recorder.record_vertex(0, 0, diyrenderer.BsdfType.Diffuse, False, False)
+        recorder.record_vertex(0, 0, lucidrenderer.BsdfType.Diffuse, False, False)
         recorder.record_emissive_hit(1, 0)
         trace = recorder.end_path(1.5, 1.5, 1.5)
         film.record_path(10, 10, trace)
@@ -337,15 +337,15 @@ class TestCppIntegration:
     
     def test_export_binary(self):
         """Binary export produces data."""
-        import diyrenderer
+        import lucidrenderer
         
         manager = DiagnosticsManager.minimal(32, 32)
         film = manager.get_film()
         
         # Record a path
-        recorder = diyrenderer.PathDiagnosticRecorder()
+        recorder = lucidrenderer.PathDiagnosticRecorder()
         recorder.begin_path()
-        recorder.record_vertex(0, 0, diyrenderer.BsdfType.Glossy, False, False)
+        recorder.record_vertex(0, 0, lucidrenderer.BsdfType.Glossy, False, False)
         trace = recorder.end_path_lum(0.5)
         film.record_path(5, 5, trace)
         
@@ -357,15 +357,15 @@ class TestCppIntegration:
     
     def test_clear(self):
         """clear() resets diagnostic data."""
-        import diyrenderer
+        import lucidrenderer
         
         manager = DiagnosticsManager.minimal(16, 16)
         film = manager.get_film()
         
         # Record path
-        recorder = diyrenderer.PathDiagnosticRecorder()
+        recorder = lucidrenderer.PathDiagnosticRecorder()
         recorder.begin_path()
-        recorder.record_vertex(0, 0, diyrenderer.BsdfType.Diffuse, False, False)
+        recorder.record_vertex(0, 0, lucidrenderer.BsdfType.Diffuse, False, False)
         trace = recorder.end_path_lum(1.0)
         film.record_path(0, 0, trace)
         

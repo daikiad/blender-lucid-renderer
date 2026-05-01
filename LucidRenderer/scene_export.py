@@ -58,9 +58,9 @@ def _get_prefs():
     アドオン設定を取得します。
     
     Returns:
-        DIYRendererPreferences オブジェクト、または None
+        LucidRendererPreferences オブジェクト、または None
     """
-    entry = bpy.context.preferences.addons.get("DIYRenderer")
+    entry = bpy.context.preferences.addons.get("LucidRenderer")
     if entry is not None:
         return getattr(entry, 'preferences', None)
     return None
@@ -567,7 +567,7 @@ def export_scene_to_json(depsgraph):
         if export_dir and isinstance(export_dir, str) and os.path.isdir(export_dir):
             base_dir = export_dir
     
-    path = os.path.join(base_dir, "diy_scene_debug.json")
+    path = os.path.join(base_dir, "lucid_scene_debug.json")
     
     # Get scene for environment export
     scene = depsgraph.scene
@@ -615,7 +615,7 @@ def export_scene_to_json(depsgraph):
                     mesh.calc_normals_split()
                     corner_normals_data = [loop.normal[:] for loop in mesh.loops]
             except Exception as e:
-                print(f"[DIYRenderer] Warning: Could not get corner normals: {e}")
+                print(f"[LucidRenderer] Warning: Could not get corner normals: {e}")
                 use_smooth = False
         
         # Get UV layer if available
@@ -765,7 +765,7 @@ def export_scene_to_json_for_session(depsgraph, session_id: int):
     session-specific output path.
     """
     # Session-specific filename
-    path = os.path.join(tempfile.gettempdir(), f'diy_scene_session_{session_id}.json')
+    path = os.path.join(tempfile.gettempdir(), f'lucid_scene_session_{session_id}.json')
     
     # Reuse the core export logic from export_scene_to_json
     # but with a custom path
@@ -1026,7 +1026,7 @@ def export_scene_to_file(depsgraph, use_cache=True, session_id: int = 0):
             else:
                 return export_scene_to_json(depsgraph)
     except Exception as e:
-        print("[DIYRenderer] Scene export failed:", e)
+        print("[LucidRenderer] Scene export failed:", e)
         import traceback
         traceback.print_exc()
         return None

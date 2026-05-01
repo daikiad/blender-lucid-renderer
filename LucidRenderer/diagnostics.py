@@ -7,7 +7,7 @@ Used by Blender panels and render engine to collect and display
 path variance analysis results.
 
 Usage:
-    from DIYRenderer.diagnostics import DiagnosticsManager
+    from LucidRenderer.diagnostics import DiagnosticsManager
     
     # Create manager with standard preset
     manager = DiagnosticsManager.standard(width, height)
@@ -124,12 +124,12 @@ class DiagnosticsManager:
         self._enabled = False
         
         try:
-            import diyrenderer
+            import lucidrenderer
             
             if config is None:
-                config = diyrenderer.PathRecordingConfig.standard()
+                config = lucidrenderer.PathRecordingConfig.standard()
             
-            self._tracer = diyrenderer.DiagnosticPathTracer(width, height, config)
+            self._tracer = lucidrenderer.DiagnosticPathTracer(width, height, config)
             self._enabled = True
             self._config = config
         except ImportError:
@@ -140,8 +140,8 @@ class DiagnosticsManager:
     def minimal(cls, width: int, height: int) -> 'DiagnosticsManager':
         """Create manager with minimal preset (~200MB at 1080p)."""
         try:
-            import diyrenderer
-            config = diyrenderer.PathRecordingConfig.minimal()
+            import lucidrenderer
+            config = lucidrenderer.PathRecordingConfig.minimal()
             return cls(width, height, config)
         except ImportError:
             return cls(width, height, None)
@@ -150,8 +150,8 @@ class DiagnosticsManager:
     def standard(cls, width: int, height: int) -> 'DiagnosticsManager':
         """Create manager with standard preset (~800MB at 1080p)."""
         try:
-            import diyrenderer
-            config = diyrenderer.PathRecordingConfig.standard()
+            import lucidrenderer
+            config = lucidrenderer.PathRecordingConfig.standard()
             return cls(width, height, config)
         except ImportError:
             return cls(width, height, None)
@@ -160,8 +160,8 @@ class DiagnosticsManager:
     def detailed(cls, width: int, height: int) -> 'DiagnosticsManager':
         """Create manager with detailed preset (~3.2GB at 1080p)."""
         try:
-            import diyrenderer
-            config = diyrenderer.PathRecordingConfig.detailed()
+            import lucidrenderer
+            config = lucidrenderer.PathRecordingConfig.detailed()
             return cls(width, height, config)
         except ImportError:
             return cls(width, height, None)
@@ -198,7 +198,7 @@ class DiagnosticsManager:
         """Estimate memory usage in megabytes."""
         if self._config:
             try:
-                import diyrenderer
+                import lucidrenderer
                 bytes_needed = self._config.estimate_memory_bytes(self._width, self._height)
                 return bytes_needed / (1024 * 1024)
             except:
@@ -219,10 +219,10 @@ class DiagnosticsManager:
             return None
         
         try:
-            import diyrenderer
+            import lucidrenderer
             
             film = self._tracer.film()
-            exporter = diyrenderer.DiagnosticExporter(film)
+            exporter = lucidrenderer.DiagnosticExporter(film)
             
             # Get global stats
             cpp_stats = exporter.get_global_stats()
@@ -301,9 +301,9 @@ class DiagnosticsManager:
             return None
         
         try:
-            import diyrenderer
+            import lucidrenderer
             film = self._tracer.film()
-            exporter = diyrenderer.DiagnosticExporter(film)
+            exporter = lucidrenderer.DiagnosticExporter(film)
             return exporter.export_binary()
         except Exception as e:
             print(f"[Diagnostics] Error exporting binary: {e}")

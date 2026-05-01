@@ -2,7 +2,7 @@
 
 /**
  * @file test_utils.hpp
- * @brief Shared test utilities for DIY Renderer tests
+ * @brief Shared test utilities for Lucid Renderer tests
  */
 
 #include <gtest/gtest.h>

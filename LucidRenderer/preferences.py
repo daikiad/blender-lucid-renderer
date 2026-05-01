@@ -2,15 +2,15 @@
 Addon preferences and settings.
 ================================
 
-このモジュールは DIY Renderer の設定を定義しています。
+このモジュールは Lucid Renderer の設定を定義しています。
 
 2種類の設定があります:
-1. AddonPreferences（DIYRendererPreferences）
+1. AddonPreferences（LucidRendererPreferences）
    - グローバル設定（全シーン共通）
    - Edit > Preferences > Add-ons で編集
    - 例: 外部レンダラーのパス、一時ファイルディレクトリ
 
-2. PropertyGroup（DIYRendererSettings）
+2. PropertyGroup（LucidRendererSettings）
    - シーン固有の設定
    - Properties > Render パネルで編集
    - 例: サンプル数、バウンス数、デバッグモード
@@ -33,7 +33,7 @@ def _get_prefs_entry():
     Returns:
         アドオンエントリ、または未登録の場合 None
     """
-    return bpy.context.preferences.addons.get("DIYRenderer")
+    return bpy.context.preferences.addons.get("LucidRenderer")
 
 
 def _get_prefs():
@@ -47,7 +47,7 @@ def _get_prefs():
             path = prefs.external_renderer_path
     
     Returns:
-        DIYRendererPreferences オブジェクト、または None
+        LucidRendererPreferences オブジェクト、または None
     """
     entry = _get_prefs_entry()
     if entry is not None:
@@ -57,35 +57,35 @@ def _get_prefs():
 
 def get_scene_settings():
     """
-    現在のシーンの DIYRenderer 設定を取得します。
+    現在のシーンの LucidRenderer 設定を取得します。
     
     Returns:
-        DIYRendererSettings オブジェクト、または None
+        LucidRendererSettings オブジェクト、または None
     """
     try:
-        return bpy.context.scene.diy_renderer
+        return bpy.context.scene.lucid_renderer
     except Exception:
         return None
 
 
-class DIYRendererPreferences(bpy.types.AddonPreferences):
+class LucidRendererPreferences(bpy.types.AddonPreferences):
     """
     アドオン全体の設定（グローバル設定）。
     
-    Edit > Preferences > Add-ons > DIY Renderer で編集できます。
+    Edit > Preferences > Add-ons > Lucid Renderer で編集できます。
     
     Attributes:
-        external_renderer_path: C++ レンダラーバイナリ (diyrt) のパス
+        external_renderer_path: C++ レンダラーバイナリ (lucidrt) のパス
         scene_export_directory: シーンエクスポート用の一時ディレクトリ
     """
     # bl_idname はアドオンのパッケージ名と一致する必要がある
-    bl_idname = "DIYRenderer"
+    bl_idname = "LucidRenderer"
     
     # 外部レンダラーバイナリのパス
     # subtype='FILE_PATH' でファイル選択ダイアログを表示
     external_renderer_path: bpy.props.StringProperty(
         name="External Renderer Path", 
-        description="Path to compiled external C++ renderer binary (diyrt)", 
+        description="Path to compiled external C++ renderer binary (lucidrt)", 
         default="", 
         subtype='FILE_PATH'
     )
@@ -110,15 +110,15 @@ class DIYRendererPreferences(bpy.types.AddonPreferences):
         layout.prop(self, "scene_export_directory")
 
 
-class DIYRendererSettings(bpy.types.PropertyGroup):
+class LucidRendererSettings(bpy.types.PropertyGroup):
     """
     シーン固有のレンダリング設定。
     
     各シーンに紐づく設定で、Properties > Render パネルで編集できます。
-    scene.diy_renderer でアクセスできます。
+    scene.lucid_renderer でアクセスできます。
     
     例:
-        samples = bpy.context.scene.diy_renderer.samples
+        samples = bpy.context.scene.lucid_renderer.samples
     
     Attributes:
         samples: F12レンダリング時のサンプル数（品質）
