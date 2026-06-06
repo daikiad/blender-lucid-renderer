@@ -14,7 +14,7 @@ A physically-based renderer implemented in C++20 with type-safe units, designed 
 ## Requirements
 
 - **macOS** (Apple Silicon tested)
-- **GCC 15** (required for mp-units C++20 support; AppleClang has template issues)
+- **Apple Clang** (the `clang++` that ships with Xcode / Command Line Tools — Clang 17+ recommended)
 - **Conan 2.x** (package manager)
 - **CMake 3.25+**
 - **Python 3.13** (for Blender 5.1 compatibility)
@@ -24,8 +24,8 @@ A physically-based renderer implemented in C++20 with type-safe units, designed 
 ### 1. Install Prerequisites
 
 ```bash
-# Install GCC 15
-brew install gcc@15
+# Apple Clang ships with Xcode Command Line Tools
+xcode-select --install   # only if not already installed
 
 # Install Conan 2
 pip install conan
@@ -34,44 +34,87 @@ pip install conan
 uv python install 3.13
 ```
 
-### 2. Configure Conan Profile
+### 2. Build Lucid (CPU only)
 
-Create or update your Conan profile for GCC 15:
-
-```bash
-# Create default profile if it doesn't exist
-conan profile detect
-
-# Edit the profile to use GCC 15
-conan profile path default
-# Then edit the file to set:
-#   [settings]
-#   compiler=gcc
-#   compiler.version=15
-#   compiler.libcxx=libstdc++11
-```
-
-Or use the provided profile:
-```bash
-conan install . --profile=conan_gcc15_profile --build=missing --output-folder=build_pybind
-```
-
-### 3. Build
+The repository ships a Conan profile (`conan_profile`) pinned to
+Apple Clang + libc++ + C++20.
 
 ```bash
 cd LucidRenderer/cpp_renderer
 
 # Install dependencies with Conan
-conan install . --build=missing --output-folder=build_pybind
+conan install . --build=missing --output-folder=build_pybind \
+    -pr:h=./conan_profile -pr:b=./conan_profile
 
-# Configure with CMake (using Conan toolchain)
-cmake -B build_pybind --preset conan-release
+# If you want the GPU backend, build Dawn first (see Step 3) and:
+export Dawn_DIR=$HOME/.local/dawn/lib/cmake/Dawn
+
+# Configure with CMake
+cmake --preset conan-release
 
 # Build
-cmake --build build_pybind -j
+cmake --build --preset conan-release
 ```
 
-Output: `build_pybind/lucidrenderer.cpython-311-darwin.so`
+Output: `build_pybind/lucidrenderer.cpython-313-darwin.so`
+
+To skip the GPU backend entirely (CPU path tracer + diagnostics only):
+```bash
+cmake --preset conan-release -DLUCID_USE_DAWN=OFF
+```
+
+### 3. (Optional) Build Dawn for the GPU backend
+
+Lucid optionally accelerates rendering on the GPU via Google's
+[Dawn](https://dawn.googlesource.com/dawn) implementation of WebGPU.
+The CPU path tracer (with mp-units typed code and the diagnostics
+system) is unaffected and continues to work standalone.
+
+Build Dawn with Apple Clang so its C++ stdlib (libc++) matches the
+Lucid build:
+
+```bash
+git clone https://dawn.googlesource.com/dawn ~/src/dawn
+cd ~/src/dawn
+
+cmake -B out/Release \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DDAWN_BUILD_SAMPLES=OFF \
+    -DDAWN_BUILD_TESTS=OFF \
+    -DDAWN_FETCH_DEPENDENCIES=ON \
+    -DDAWN_ENABLE_INSTALL=ON \
+    -DCMAKE_INSTALL_PREFIX=$HOME/.local/dawn
+
+cmake --build out/Release --target install -j
+```
+
+Initial build is roughly 10-30 minutes and produces ~1-2 GB of artifacts.
+Subsequent builds are incremental.
+
+Before configuring Lucid:
+```bash
+export Dawn_DIR=$HOME/.local/dawn/lib/cmake/Dawn
+```
+
+#### Verify the GPU backend works
+
+After building Lucid:
+```python
+import lucidrenderer
+assert lucidrenderer.dawn_enabled
+print(lucidrenderer.gpu_adapter_info())   # e.g. "apple / Apple M4 Pro / Metal"
+
+out = lucidrenderer.gpu_run_double_test(64)
+assert out == [i * 2.0 for i in range(64)]
+```
+
+#### Loading Dawn inside Blender
+
+If the Dawn dylib is not found when Blender imports `lucidrenderer`, set:
+```bash
+export DYLD_LIBRARY_PATH=$HOME/.local/dawn/lib:$DYLD_LIBRARY_PATH
+```
+before launching Blender, or symlink the dylib next to Lucid's `.so`.
 
 ## Testing
 
@@ -190,13 +233,11 @@ float x = v.x;
 
 ## Troubleshooting
 
-### Build Errors with AppleClang
+### Build Errors with mp-units
 
-mp-units requires advanced C++20 features. Use GCC 15:
-```bash
-brew install gcc@15
-# CMakeLists.txt automatically detects and uses it
-```
+mp-units requires advanced C++20 features. Apple Clang 17+ works; older
+versions may fail on template instantiation depth. Update Xcode / Command
+Line Tools if you hit template errors in `mp-units` headers.
 
 ### Python Version Mismatch
 

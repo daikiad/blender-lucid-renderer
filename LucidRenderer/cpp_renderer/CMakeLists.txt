@@ -1,21 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-# =============================================================================
-# Compiler Setup (macOS)
-# =============================================================================
-# Use GCC 15 on macOS because AppleClang has issues with mp-units C++20 templates
-if(APPLE AND NOT DEFINED CMAKE_CXX_COMPILER)
-    find_program(GXX_15 g++-15 PATHS /opt/homebrew/bin /usr/local/bin)
-    find_program(GCC_15 gcc-15 PATHS /opt/homebrew/bin /usr/local/bin)
-    if(GXX_15 AND GCC_15)
-        set(CMAKE_CXX_COMPILER ${GXX_15})
-        set(CMAKE_C_COMPILER ${GCC_15})
-        message(STATUS "Using GCC 15: ${GXX_15}")
-    else()
-        message(WARNING "GCC 15 not found. Install with: brew install gcc@15")
-    endif()
-endif()
-
+# Compiler is selected by the Conan profile (Apple Clang on macOS, libc++).
 project(lucidrenderer LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -32,6 +17,18 @@ if(COVERAGE)
     set(COVERAGE_FLAGS "--coverage -fprofile-arcs -ftest-coverage")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COVERAGE_FLAGS}")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${COVERAGE_FLAGS}")
+endif()
+
+# =============================================================================
+# Dawn (WebGPU) GPU Backend Option
+# =============================================================================
+option(LUCID_USE_DAWN "Build with WebGPU/Dawn GPU backend" ON)
+
+if(LUCID_USE_DAWN)
+    # Dawn's exported targets reference Threads::Threads
+    find_package(Threads REQUIRED)
+    find_package(Dawn REQUIRED)
+    message(STATUS "Dawn found: WebGPU/GPU backend enabled")
 endif()
 
 # =============================================================================
@@ -63,14 +60,22 @@ find_package(GTest REQUIRED)
 # =============================================================================
 # Main Target: lucidrenderer (Python module)
 # =============================================================================
-pybind11_add_module(lucidrenderer
+set(LUCID_SOURCES
     src/pybind_module.cpp
     src/node_evaluator.cpp
 )
+if(LUCID_USE_DAWN)
+    list(APPEND LUCID_SOURCES
+        src/gpu/dawn_context.cpp
+        src/gpu/shader_module.cpp
+    )
+endif()
+
+pybind11_add_module(lucidrenderer ${LUCID_SOURCES})
 
 target_include_directories(lucidrenderer PRIVATE include)
-target_link_libraries(lucidrenderer PRIVATE 
-    mp-units::mp-units 
+target_link_libraries(lucidrenderer PRIVATE
+    mp-units::mp-units
     nlohmann_json::nlohmann_json
 )
 
@@ -82,6 +87,21 @@ endif()
 # Performance: -O3 + native + ffast-math + LTO for cross-file optimization
 target_compile_options(lucidrenderer PRIVATE -O3 -march=native -ffast-math -flto)
 target_link_options(lucidrenderer PRIVATE -flto)
+
+if(LUCID_USE_DAWN)
+    target_link_libraries(lucidrenderer PRIVATE dawn::webgpu_dawn)
+    target_compile_definitions(lucidrenderer PRIVATE
+        LUCID_HAS_DAWN=1
+        LUCID_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+    )
+    # Make the Dawn dylib loadable from inside Blender's process:
+    # @loader_path resolves relative to the .so, and Dawn_DIR/../../ is the
+    # install prefix's lib directory.
+    set_target_properties(lucidrenderer PROPERTIES
+        INSTALL_RPATH "@loader_path;${Dawn_DIR}/../../"
+        BUILD_WITH_INSTALL_RPATH TRUE
+    )
+endif()
 
 # =============================================================================
 # Test Targets (Google Test)
@@ -327,6 +347,29 @@ if(OpenMP_CXX_FOUND)
 endif()
 target_compile_options(test_path_tracer_diagnostics PRIVATE -O2)
 gtest_discover_tests(test_path_tracer_diagnostics)
+
+# =============================================================================
+# GPU Tests (only when Dawn is enabled)
+# =============================================================================
+if(LUCID_USE_DAWN)
+    add_executable(test_gpu_dawn_context
+        test/test_gpu_dawn_context.cpp
+        src/gpu/dawn_context.cpp
+        src/gpu/shader_module.cpp
+    )
+    target_include_directories(test_gpu_dawn_context PRIVATE include)
+    target_link_libraries(test_gpu_dawn_context PRIVATE
+        dawn::webgpu_dawn
+        GTest::gtest
+        GTest::gtest_main
+    )
+    target_compile_definitions(test_gpu_dawn_context PRIVATE
+        LUCID_HAS_DAWN=1
+        LUCID_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+    )
+    target_compile_options(test_gpu_dawn_context PRIVATE -O2)
+    gtest_discover_tests(test_gpu_dawn_context)
+endif()
 
 # =============================================================================
 # Coverage Target

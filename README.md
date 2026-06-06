@@ -33,7 +33,7 @@ For details, see:
 
 ## Type-safe rendering math (experimental)
 
-Most renderers carry positions, directions, radiance, BSDF values, and PDFs around as bare `Vec3f` / `float`. Lucid instead encodes them in the type system using the C++ ISO units library [mp-units](https://mpusz.github.io/mp-units/), so dimensional and semantic mistakes get caught at compile time. This is the part that's the most fun-and-painful, and it's why the build pins to GCC 15 (mp-units' templates choke on AppleClang).
+Most renderers carry positions, directions, radiance, BSDF values, and PDFs around as bare `Vec3f` / `float`. Lucid instead encodes them in the type system using the C++ ISO units library [mp-units](https://mpusz.github.io/mp-units/), so dimensional and semantic mistakes get caught at compile time. The build uses Apple Clang (the `clang++` shipped with Xcode) with libc++ — current versions (Clang 17+) handle mp-units' templates fine.
 
 What's actually typed:
 
@@ -49,20 +49,26 @@ It's not yet wired through every code path — it's an experiment in seeing how 
 
 ### 1. Build the C++ core
 
-`mp-units 2.4.0` exercises C++20 templates that AppleClang doesn't handle, so the build uses **Homebrew GCC 15**. A matching Conan profile is included in the repo.
+Build with Apple Clang + libc++ via the provided Conan profile.
 
 ```bash
-brew install gcc@15
 pip install conan      # or: uv pip install conan
 
 cd LucidRenderer/cpp_renderer
 conan install . --output-folder=build_pybind --build=missing \
-  -pr:h=./conan_gcc15_profile -pr:b=./conan_gcc15_profile
+  -pr:h=./conan_profile -pr:b=./conan_profile
+
+# Optional: build Dawn first for GPU acceleration (see cpp_renderer/README.md)
+export Dawn_DIR=$HOME/.local/dawn/lib/cmake/Dawn
+
 cmake --preset conan-release
 cmake --build --preset conan-release
 ```
 
-Output: `build_pybind/lucidrenderer.cpython-311-darwin.so`
+Output: `build_pybind/lucidrenderer.cpython-313-darwin.so`
+
+To build without the GPU backend, pass `-DLUCID_USE_DAWN=OFF` to the
+`cmake --preset` step.
 
 ### 2. Register the add-on with Blender
 
@@ -88,13 +94,14 @@ Launch Blender → Edit > Preferences > Add-ons → enable `Lucid Renderer (Mini
 |---|---|
 | Blender | 5.1 |
 | Python | 3.13 (must match Blender's bundled Python) |
-| GCC | 15 (Homebrew) |
+| Apple Clang | 17+ (Xcode Command Line Tools) |
 | Conan | 2.x |
 | CMake | 3.30+ |
 | mp-units | 2.4.0 |
 | nlohmann_json | 3.11.3 |
 | pybind11 | 2.13.6 |
 | GoogleTest | 1.15.0 |
+| Dawn (optional) | tip-of-tree |
 
 ## Status
 

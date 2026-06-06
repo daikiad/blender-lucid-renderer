@@ -28,6 +28,10 @@
 #include "diagnostics/diagnostic_integrator.hpp"
 #include "diagnostics/path_stats_config.hpp"
 
+#ifdef LUCID_HAS_DAWN
+#include "gpu/dawn_context.hpp"
+#endif
+
 namespace py = pybind11;
 using namespace render::diagnostics;
 
@@ -178,7 +182,7 @@ PYBIND11_MODULE(lucidrenderer, m) {
             auto variance_map = self.get_diagnostic_variance_map();
             // Return as NumPy array
             return py::array_t<float>(
-                {(size_t)variance_map.size()},
+                {static_cast<py::ssize_t>(variance_map.size())},
                 variance_map.data()
             );
         }, "Get per-pixel variance as 1D NumPy array (width * height)")
@@ -220,7 +224,28 @@ PYBIND11_MODULE(lucidrenderer, m) {
     #else
     m.attr("openmp_enabled") = false;
     #endif
-    
+
+    // =========================================================================
+    // GPU Backend (Dawn / WebGPU)
+    // =========================================================================
+    #ifdef LUCID_HAS_DAWN
+    m.attr("dawn_enabled") = true;
+
+    m.def("gpu_adapter_info", []() -> std::string {
+        auto ctx = lucid::gpu::DawnContext::create();
+        return ctx ? ctx->adapter_info() : std::string("<unavailable>");
+    }, "Return a string describing the GPU adapter Dawn selected "
+       "(vendor / device / backend).");
+
+    m.def("gpu_run_double_test",
+          &lucid::gpu::run_double_test,
+          py::arg("n") = 64,
+          "Phase 1a smoke test: dispatch a compute shader that doubles each "
+          "element of an n-float input buffer and return the result.");
+    #else
+    m.attr("dawn_enabled") = false;
+    #endif
+
     // =========================================================================
     // Path Variance Analyzer (Diagnostic System)
     // =========================================================================
