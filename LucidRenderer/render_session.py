@@ -337,12 +337,36 @@ class RenderSession:
             return
         self._renderer.render_stop_async()
 
+    def reset_render_async(self, width: int, height: int, max_depth: int) -> None:
+        """Signal the running worker to wipe its accumulator and pick up the
+        new camera/params. Cheap and non-blocking — does NOT join the worker
+        thread, does NOT reload the scene. Use this for camera-move events;
+        for content/resolution change, stop_render_async + start_render_async."""
+        if not self.is_available:
+            return
+        if not hasattr(self._renderer, 'render_reset_async'):
+            # Older build without the reset path — fall back to full restart.
+            self.stop_render_async()
+            self.start_render_async(width, height, max_depth)
+            return
+        self._renderer.render_reset_async(width, height, max_depth)
+
     def is_render_async_running(self) -> bool:
         if not self.is_available:
             return False
         if not hasattr(self._renderer, 'is_render_async_running'):
             return False
         return self._renderer.is_render_async_running()
+
+    def snapshot_revision_async(self) -> int:
+        """Monotonic snapshot counter from the C++ worker. Lets view_draw
+        skip the (expensive) poll path when nothing has changed since the
+        last time it polled."""
+        if not self.is_available:
+            return 0
+        if not hasattr(self._renderer, 'render_snapshot_revision_async'):
+            return 0
+        return self._renderer.render_snapshot_revision_async()
 
     # =========================================================================
     # アルゴリズム設定

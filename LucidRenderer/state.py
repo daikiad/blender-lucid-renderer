@@ -180,6 +180,10 @@ class ViewportState:
     last_async_h: int = 0
     last_async_scene_hash: Optional[str] = None
     async_target_reached: bool = False
+    # Snapshot revision we last polled. Compare against the worker's current
+    # snapshot_revision to decide whether the heavy poll path is needed; if
+    # the revision hasn't moved, the texture already shows the latest data.
+    last_async_snapshot_rev: int = 0
     
     def reset_for_scene_change(self) -> None:
         """シーン変更時のリセット（後方互換用、非推奨）"""

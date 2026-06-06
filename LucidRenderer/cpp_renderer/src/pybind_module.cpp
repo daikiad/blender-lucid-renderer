@@ -136,13 +136,43 @@ PYBIND11_MODULE(lucidrenderer, m) {
              py::arg("width"), py::arg("height"), py::arg("max_depth") = 8,
              "Start a background path-trace session that keeps adding 1-sample "
              "dispatches to an on-GPU accumulator. Stops any prior session first.")
-        .def("render_poll_async", &PyRenderer::render_poll_async,
+        .def("render_poll_async", [](PyRenderer& self) {
+                 // Run the heavy C++ work without the GIL, then convert into a
+                 // numpy array under the GIL. Avoids ~10M Python-float
+                 // allocations per frame that the default `std::vector<float>`
+                 // -> py::list converter would do (and which froze Blender
+                 // when the viewport was filled with geometry).
+                 std::pair<int, std::vector<float>> result;
+                 {
+                     py::gil_scoped_release release;
+                     result = self.render_poll_async();
+                 }
+                 if (result.second.empty()) {
+                     return py::make_tuple(result.first, py::array_t<float>{});
+                 }
+                 py::array_t<float> arr(static_cast<py::ssize_t>(result.second.size()));
+                 std::memcpy(arr.mutable_data(),
+                             result.second.data(),
+                             result.second.size() * sizeof(float));
+                 return py::make_tuple(result.first, std::move(arr));
+             },
+             "Return (samples_completed, pixels_numpy). pixels is RGBA flat "
+             "(Y-flipped, alpha=1.0, averaged over `samples`). samples==0 "
+             "means no snapshot yet.")
+        .def("render_snapshot_revision_async",
+             &PyRenderer::render_snapshot_revision_async,
              py::call_guard<py::gil_scoped_release>(),
-             "Return (samples_completed, pixels). pixels is RGBA flat (Y-flipped, "
-             "alpha=1.0, averaged over `samples`). samples==0 means no snapshot yet.")
+             "Monotonic snapshot counter; lets the viewport skip poll if "
+             "nothing has changed since last frame.")
         .def("render_stop_async", &PyRenderer::render_stop_async,
              py::call_guard<py::gil_scoped_release>(),
              "Stop the background path-trace session. No-op if not running.")
+        .def("render_reset_async", &PyRenderer::render_reset_async,
+             py::call_guard<py::gil_scoped_release>(),
+             py::arg("width"), py::arg("height"), py::arg("max_depth") = 8,
+             "Non-blocking in-place reset of the running async session "
+             "(camera-move hot path). For scene/resolution change use "
+             "stop+start instead.")
         .def("is_render_async_running", &PyRenderer::is_render_async_running,
              py::call_guard<py::gil_scoped_release>(),
              "True iff a background session is currently producing samples.")

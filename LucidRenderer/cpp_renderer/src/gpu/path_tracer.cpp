@@ -632,6 +632,10 @@ struct PathTracer::AsyncState {
 
     // ---- Session params ----
     DawnContext*          ctx = nullptr;
+    // base_params is read by the worker every dispatch (camera + render bounds
+    // live here) and replaced by reset_async on the main thread. Guarded by
+    // base_params_mu so the worker always sees a consistent set of fields.
+    mutable std::mutex    base_params_mu;
     PathTracerParamsGpu   base_params{};
     uint32_t              width  = 0;
     uint32_t              height = 0;
@@ -641,12 +645,19 @@ struct PathTracer::AsyncState {
     std::thread           worker;
     std::atomic<bool>     stop_requested{false};
     std::atomic<uint32_t> samples_completed{0};
+    // Signal flag set by reset_async; worker consumes at the top of each loop
+    // iteration. acquire-release pairs with the base_params write so the
+    // worker sees the new params once it observes the flag.
+    std::atomic<bool>     reset_pending{false};
 
     // ---- Snapshot for Blender poll ----
     mutable std::mutex    snapshot_mu;
     std::vector<float>    snapshot_pixels;        // RGBA averaged
     uint32_t              snapshot_samples = 0;
     uint32_t              snapshot_w = 0, snapshot_h = 0;
+    // Monotonic revision — bumped on each successful take_snapshot. Lets the
+    // viewport skip the heavy poll path when nothing's changed since last frame.
+    std::atomic<uint32_t> snapshot_revision{0};
 
     void worker_loop();
     bool submit_one_sample();
@@ -694,6 +705,28 @@ void PathTracer::AsyncState::worker_loop() {
     uint32_t since_last_snapshot = 0;
 
     while (!stop_requested.load(std::memory_order_relaxed)) {
+        // Check for an in-place reset signalled by reset_async. acquire so we
+        // observe the new base_params (release-stored by the main thread).
+        if (reset_pending.exchange(false, std::memory_order_acquire)) {
+            // Wipe the accumulator and reset the sample counter. base_params
+            // was already updated by the main thread before setting the flag.
+            samples_completed.store(0, std::memory_order_release);
+            {
+                wgpu::CommandEncoder enc = ctx->device().CreateCommandEncoder();
+                enc.ClearBuffer(accum_buf, 0, accum_bytes);
+                wgpu::CommandBuffer cmd = enc.Finish();
+                ctx->queue().Submit(1, &cmd);
+            }
+            // Mark the snapshot as "not yet a new frame" so poll_async returns
+            // samples=0 until the first post-reset snapshot lands. The viewport
+            // keeps drawing its previous texture during the gap.
+            {
+                std::lock_guard<std::mutex> lk(snapshot_mu);
+                snapshot_samples = 0;
+            }
+            since_last_snapshot = 0;
+        }
+
         if (!submit_one_sample()) {
             // Dispatch failed; back off briefly and retry.
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -713,9 +746,16 @@ void PathTracer::AsyncState::worker_loop() {
 bool PathTracer::AsyncState::submit_one_sample() {
     const uint32_t sample_offset = samples_completed.load(std::memory_order_relaxed);
 
+    // Snapshot base_params under the lock — reset_async may be racing to
+    // overwrite it with a new camera. Mutex is taken for the field copy only;
+    // the actual WriteBuffer and Submit run lock-free.
+    PathTracerParamsGpu p;
+    {
+        std::lock_guard<std::mutex> lk(base_params_mu);
+        p = base_params;
+    }
     // Fresh frame_seed per sample so PCG streams don't repeat across the
     // running accumulator. Mirrors the pattern from PyRenderer::render_tile_gpu.
-    PathTracerParamsGpu p = base_params;
     p.samples       = 1;
     p.sample_offset = sample_offset;
     p.frame_seed    = sample_offset * 0x9e3779b1u + 0xdeadbeefu;
@@ -744,21 +784,39 @@ bool PathTracer::AsyncState::take_snapshot() {
     wgpu::CommandBuffer cmd = encoder.Finish();
     ctx->queue().Submit(1, &cmd);
 
-    std::string map_err;
+    // Capture the error string into a heap-owned slot so a callback that
+    // fires AFTER wait_for_with_timeout returns (timeout case) doesn't write
+    // through a dangling reference. The shared_ptr keeps the slot alive as
+    // long as the callback can possibly run.
+    auto err_slot = std::make_shared<std::string>();
     wgpu::Future future = stage_buf.MapAsync(
         wgpu::MapMode::Read, 0, accum_bytes,
         wgpu::CallbackMode::WaitAnyOnly,
-        [&map_err](wgpu::MapAsyncStatus status, wgpu::StringView msg) {
+        [err_slot](wgpu::MapAsyncStatus status, wgpu::StringView msg) {
             if (status != wgpu::MapAsyncStatus::Success) {
-                map_err.assign(msg.data, msg.length);
+                err_slot->assign(msg.data, msg.length);
             }
         });
-    if (!wait_for_with_timeout(ctx->instance(), future)) {
-        std::cerr << "[PathTracer] async snapshot MapAsync timed out\n";
-        return false;
-    }
-    if (!map_err.empty()) {
-        std::cerr << "[PathTracer] async snapshot MapAsync failed: " << map_err << "\n";
+    const bool ok = wait_for_with_timeout(ctx->instance(), future);
+    if (!ok || !err_slot->empty()) {
+        if (!ok) {
+            std::cerr << "[PathTracer] async snapshot MapAsync timed out; "
+                      << "recreating stage buffer\n";
+        } else {
+            std::cerr << "[PathTracer] async snapshot MapAsync failed: "
+                      << *err_slot << "; recreating stage buffer\n";
+        }
+        // Dawn keeps the buffer in a "pending map" state until the callback
+        // resolves. On timeout we don't know when (or if) the callback fires,
+        // and any subsequent CopyBufferToBuffer/MapAsync on the same handle
+        // errors out (`already has an outstanding map pending`). Drop the
+        // handle and let Dawn release the old buffer when the pending callback
+        // eventually resolves through the shared_ptr.
+        wgpu::BufferDescriptor d{};
+        d.size  = std::max<uint64_t>(accum_bytes, kMinStorageBytes);
+        d.usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst;
+        stage_buf          = ctx->device().CreateBuffer(&d);
+        stage_buf_capacity = d.size;
         return false;
     }
 
@@ -793,7 +851,13 @@ bool PathTracer::AsyncState::take_snapshot() {
         snapshot_w       = width;
         snapshot_h       = height;
     }
+    snapshot_revision.fetch_add(1, std::memory_order_release);
     return true;
+}
+
+uint32_t PathTracer::async_snapshot_revision() const noexcept {
+    if (!async_state_) return 0;
+    return async_state_->snapshot_revision.load(std::memory_order_acquire);
 }
 
 PathTracer::~PathTracer() {
@@ -914,6 +978,28 @@ void PathTracer::stop_async() {
         async_state_->worker.join();
     }
     async_state_.reset();
+}
+
+void PathTracer::reset_async(const PathTracerParamsGpu& new_base_params) {
+    if (!async_state_) return;
+    // Dimensions / scene-content changes can't be handled in-place — they
+    // require buffer reallocation or fresh static-buffer uploads, which the
+    // worker can't do mid-stride. Caller is expected to route those through
+    // stop_async + start_async; here we just guard against the obvious case.
+    if (new_base_params.tile_w != async_state_->width
+        || new_base_params.tile_h != async_state_->height) {
+        std::cerr << "[PathTracer] reset_async called with mismatched dimensions ("
+                  << new_base_params.tile_w << "x" << new_base_params.tile_h
+                  << " vs session " << async_state_->width << "x"
+                  << async_state_->height << "); falling back to stop+start\n";
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(async_state_->base_params_mu);
+        async_state_->base_params = new_base_params;
+    }
+    // release: pairs with the worker's acquire on the same flag.
+    async_state_->reset_pending.store(true, std::memory_order_release);
 }
 
 bool PathTracer::is_async_running() const noexcept {

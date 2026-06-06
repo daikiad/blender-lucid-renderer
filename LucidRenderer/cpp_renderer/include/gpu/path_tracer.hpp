@@ -176,8 +176,22 @@ public:
     // from the destructor; in fact the destructor always calls this.
     void stop_async();
 
+    // Non-blocking reset: keep the running worker alive but on its next loop
+    // iteration apply `new_base_params`, wipe the accumulator, reset the
+    // sample counter, and resume. Intended for camera moves — the common
+    // hot path — where the alternative (stop_async + start_async) would
+    // join the worker thread (~5-30 ms, occasionally up to the MapAsync
+    // timeout) and reallocate buffers, stalling Blender's UI every frame.
+    // Caller must ensure dimensions and scene haven't changed; for those
+    // cases use stop+start.
+    void reset_async(const PathTracerParamsGpu& new_base_params);
+
     bool is_async_running() const noexcept;
     uint32_t async_samples_completed() const noexcept;
+    // Monotonic counter incremented every time the worker publishes a fresh
+    // snapshot. Cheap atomic read — Blender uses it to skip the heavy
+    // poll_async / pixel-conversion path when nothing's changed.
+    uint32_t async_snapshot_revision() const noexcept;
 
     struct AsyncSnapshot {
         uint32_t samples = 0;          // 0 if no snapshot taken yet

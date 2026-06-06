@@ -784,12 +784,64 @@ public:
 #endif
     }
 
+    /** Non-blocking reset of the in-flight async session: rebuilds params
+     *  from the current camera/scene, signals the worker to wipe the
+     *  accumulator, and returns immediately. Use this for the camera-move
+     *  hot path; for scene/resolution change call stop_async + start_async. */
+    void render_reset_async(int width, int height, int max_depth) {
+#ifdef LUCID_HAS_DAWN
+        std::lock_guard<std::mutex> lock(gpu_mutex_);
+        if (!gpu_path_tracer_ || !gpu_path_tracer_->is_async_running()) return;
+        if (!scene_loaded_ || !camera_set_) return;
+        if (!packed_pt_cache_) return;
+
+        camera_.aspect = static_cast<float>(width) / static_cast<float>(height);
+        const auto env = render::to_rgb3f(scene_.environment.color);
+        const float env_color[3] = {env.r, env.g, env.b};
+        const float env_strength = scene_.environment.strength;
+
+        const auto params = lucid::gpu::make_path_tracer_params(
+            camera_.pos, camera_.forward, camera_.right, camera_.up,
+            camera_.fovRad(), camera_.aspect,
+            0u, 0u,
+            static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+            static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+            /*samples=*/1u, /*sample_offset=*/0u,
+            static_cast<uint32_t>(std::max(1, max_depth)),
+            /*frame_seed=*/0u,
+            env_color, env_strength,
+            packed_pt_cache_->point_light_count,
+            packed_pt_cache_->bvh_node_count);
+
+        try {
+            gpu_path_tracer_->reset_async(params);
+        } catch (const std::exception& e) {
+            std::cerr << "[PyRenderer] reset_async failed: " << e.what() << "\n";
+        }
+#else
+        (void)width; (void)height; (void)max_depth;
+#endif
+    }
+
     bool is_render_async_running() {
 #ifdef LUCID_HAS_DAWN
         std::lock_guard<std::mutex> lock(gpu_mutex_);
         return gpu_path_tracer_ && gpu_path_tracer_->is_async_running();
 #else
         return false;
+#endif
+    }
+
+    /** Cheap monotonic counter — returns the same value every frame until the
+     *  worker publishes a new snapshot. Lets viewport.py skip the expensive
+     *  poll/conversion when nothing has changed. */
+    int render_snapshot_revision_async() {
+#ifdef LUCID_HAS_DAWN
+        std::lock_guard<std::mutex> lock(gpu_mutex_);
+        if (!gpu_path_tracer_) return 0;
+        return static_cast<int>(gpu_path_tracer_->async_snapshot_revision());
+#else
+        return 0;
 #endif
     }
 

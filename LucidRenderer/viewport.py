@@ -237,6 +237,19 @@ class ViewportRenderer:
         render_w = max(1, view_w // scale_factor)
         render_h = max(1, view_h // scale_factor)
 
+        # Hard cap on async render dimensions. Without this, a 4K external
+        # monitor at Final scale=1 produces ~9 MP accumulator buffers (~150 MB),
+        # which blow past Dawn's MapAsync timeout and Apple Metal's per-binding
+        # storage limit. 2048 max-edge gives ~2.4 MP / ~38 MB for 16:9 4K and
+        # is visually fine when stretched back to the viewport. 1080p/1440p
+        # are below the cap and unaffected.
+        ASYNC_RENDER_MAX_DIM = 2048
+        max_dim = max(render_w, render_h)
+        if max_dim > ASYNC_RENDER_MAX_DIM:
+            shrink = float(max_dim) / float(ASYNC_RENDER_MAX_DIM)
+            render_w = max(1, int(render_w / shrink))
+            render_h = max(1, int(render_h / shrink))
+
         resolution_changed = (state.last_async_w != render_w
                               or state.last_async_h != render_h)
         # Don't auto-restart after we've already hit the user's sample target —
@@ -247,27 +260,35 @@ class ViewportRenderer:
         needs_restart = (any_change or resolution_changed
                          or worker_idle_unexpectedly)
 
-        if needs_restart:
-            # The worker holds Dawn resources; stop before we tear scene state.
+        # Heavy restart conditions: anything that requires reuploading the
+        # scene buffers or reallocating the accumulator. Bare camera moves
+        # do NOT need a full stop+start — that path joins the worker thread
+        # (up to 30 ms) and reads the scene from disk (another ~30 ms),
+        # which is what was freezing Blender's UI during pan/zoom.
+        needs_full_restart = (content_changed or resolution_changed
+                              or backend_changed or debug_mode_changed
+                              or worker_idle_unexpectedly)
+
+        if needs_restart and needs_full_restart:
+            # Heavyweight path — used for first render, scene change, viewport
+            # resize, backend/debug switch, or after the target-sample stop.
             try:
                 session.stop_render_async()
             except Exception as e:
                 print(f"[ViewportRenderer] stop_render_async failed: {e}")
 
-            # Sync scene → renderer (re-export only when content changed; the
-            # scene cache key tracks whether the depsgraph diff actually moved).
             try:
                 scene_file = get_scene_cache(session_id).get_cached_file_fast()
                 if scene_file is None or content_changed:
                     scene_file = export_scene_to_file(depsgraph, session_id=session_id)
-                if scene_file:
+                # Skip the disk read + JSON parse when the cached file is
+                # already loaded into the renderer. ~30 ms saved per restart.
+                if scene_file and scene_file != state.last_async_scene_hash:
                     session.load_scene_file(scene_file)
                     state.last_async_scene_hash = scene_file
             except Exception as e:
                 print(f"[ViewportRenderer] async scene export failed: {e}")
 
-            # Camera goes through the standard CameraParams pipeline so the
-            # forward/right/up basis matches what the sync path computes.
             camera = self._compute_camera_only(context)
             if camera is not None:
                 try:
@@ -275,12 +296,9 @@ class ViewportRenderer:
                 except Exception as e:
                     print(f"[ViewportRenderer] set_camera failed: {e}")
 
-            # Keep the old texture across resolution changes — `draw_texture_2d`
-            # stretches it to viewport size, which looks pixelated for a frame
-            # but avoids the gray placeholder flashing every time EDITING flips
-            # to FINAL and bumps the render resolution. The next snapshot at
-            # the new resolution will overwrite it.
             if resolution_changed:
+                # Keep state.texture so draw_texture_2d stretches the previous
+                # frame for one tick instead of flashing the gray placeholder.
                 state.accumulated_samples = {}
 
             try:
@@ -288,29 +306,56 @@ class ViewportRenderer:
             except Exception as e:
                 print(f"[ViewportRenderer] start_render_async failed: {e}")
 
+            # The C++ AsyncState is freshly constructed; its snapshot_revision
+            # starts at 0. Reset our cached "last polled" so the first new
+            # snapshot of the session is picked up rather than compared against
+            # leftover state from the previous session.
+            state.last_async_snapshot_rev = 0
             state.last_async_w = render_w
             state.last_async_h = render_h
+        elif needs_restart:
+            # Camera-only hot path: signal the running worker to wipe the
+            # accumulator and pick up the new camera. No thread join, no
+            # buffer realloc, no scene reload — ~1 ms total on the main thread.
+            camera = self._compute_camera_only(context)
+            if camera is not None:
+                try:
+                    session.set_camera(camera)
+                except Exception as e:
+                    print(f"[ViewportRenderer] set_camera failed: {e}")
+            try:
+                session.reset_render_async(render_w, render_h, max_bounces)
+            except Exception as e:
+                print(f"[ViewportRenderer] reset_render_async failed: {e}")
 
-        # Poll the worker (non-blocking; returns most recent CPU-side snapshot).
-        try:
-            samples, pixels = session.poll_render_async()
-        except Exception as e:
-            print(f"[ViewportRenderer] poll_render_async failed: {e}")
-            samples, pixels = 0, []
+        # Skip the heavy poll path when the worker hasn't produced a new
+        # snapshot since last frame. The check itself is a single atomic read
+        # on the C++ side (~µs); poll_render_async is ~30-50ms when there's
+        # actual data to convert, so this is a big win at high view_draw rates.
+        cur_rev = session.snapshot_revision_async()
+        samples = 0
+        pixels = None
+        if cur_rev > state.last_async_snapshot_rev:
+            try:
+                samples, pixels = session.poll_render_async()
+                state.last_async_snapshot_rev = cur_rev
+            except Exception as e:
+                print(f"[ViewportRenderer] poll_render_async failed: {e}")
+                samples, pixels = 0, None
 
         expected_len = render_w * render_h * 4
-        if samples > 0 and len(pixels) == expected_len:
-            # Reuse the existing display-buffer plumbing: stuff the AVG into
-            # accumulated_samples so get_current_sample_count / _draw_texture
-            # keep working unchanged. C++ already normalised by sample count.
+        if (samples > 0 and pixels is not None
+                and len(pixels) == expected_len):
+            # Worker delivers a numpy float32 array of the normalised RGBA
+            # snapshot. Hand it to gpu.types.Buffer via the buffer protocol —
+            # no list() detour, no per-element conversion.
             tile_key = (render_w, render_h)
-            state.accumulated_samples[tile_key] = (
-                _array.array('f', pixels),
-                int(samples),
-            )
+            # _draw_texture / get_current_sample_count only read index [1]
+            # (the count). Storing None for the array dodges another
+            # multi-megabyte Python allocation.
+            state.accumulated_samples[tile_key] = (None, int(samples))
 
-            # Rebuild the GPU texture from the snapshot pixels.
-            buffer = _gpu.types.Buffer('FLOAT', expected_len, list(pixels))
+            buffer = _gpu.types.Buffer('FLOAT', expected_len, pixels)
             if state.texture is not None:
                 try:
                     del state.texture
