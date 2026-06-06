@@ -44,6 +44,7 @@
 #ifdef LUCID_HAS_DAWN
 #include "gpu/dawn_context.hpp"
 #include "gpu/debug_renderer.hpp"
+#include "gpu/path_tracer.hpp"
 #endif
 
 // node_evaluator.cpp で定義されている関数
@@ -516,6 +517,138 @@ public:
 #endif
     }
 
+    /**
+     * render_tile_gpu - Phase 2a path tracer on GPU
+     *
+     * Same shape as render_tile() (returns flat RGBA, Y-flipped). Internally:
+     *   - lazy-inits DawnContext + PathTracer
+     *   - applies a triangle-count soft cap (Phase 1c will lift)
+     *   - caches PackedPathScene by scene_version_
+     *   - dispatches one path tracer compute (samples × max_depth on GPU)
+     *   - applies CameraSensitivity + clamp + alpha=1.0 on host
+     * On any failure: silent CPU fallback, sticky after the first failure.
+     */
+    std::vector<float> render_tile_gpu(
+        int tile_x, int tile_y,
+        int tile_w, int tile_h,
+        int full_w, int full_h,
+        int samples,
+        int sample_offset,
+        int max_depth)
+    {
+#ifdef LUCID_HAS_DAWN
+        reset_cancel();
+        std::lock_guard<std::mutex> lock(gpu_mutex_);
+
+        if (gpu_init_failed_) {
+            return render_tile(tile_x, tile_y, tile_w, tile_h,
+                               full_w, full_h, samples, sample_offset, max_depth);
+        }
+        if (!gpu_ctx_) {
+            gpu_ctx_ = lucid::gpu::DawnContext::create();
+            if (!gpu_ctx_) {
+                gpu_init_failed_ = true;
+                std::cerr << "[PyRenderer] GPU init failed (DawnContext); CPU fallback\n";
+                return render_tile(tile_x, tile_y, tile_w, tile_h,
+                                   full_w, full_h, samples, sample_offset, max_depth);
+            }
+            std::cerr << "[PyRenderer] GPU adapter: "
+                      << gpu_ctx_->adapter_info() << "\n";
+        }
+        if (!gpu_path_tracer_) {
+            gpu_path_tracer_ = lucid::gpu::PathTracer::create(*gpu_ctx_);
+            if (!gpu_path_tracer_) {
+                gpu_init_failed_ = true;
+                std::cerr << "[PyRenderer] GPU PathTracer init failed; CPU fallback\n";
+                return render_tile(tile_x, tile_y, tile_w, tile_h,
+                                   full_w, full_h, samples, sample_offset, max_depth);
+            }
+        }
+
+        if (!scene_loaded_ || !camera_set_) {
+            return std::vector<float>(tile_w * tile_h * 4, 0.0f);
+        }
+
+        // ---- Soft cap: brute-force can't handle huge scenes without BVH ----
+        uint32_t total_tri = 0;
+        for (const auto& m : scene_.meshes) total_tri += static_cast<uint32_t>(m.triangles.size());
+        if (total_tri > 5000) {
+            static bool warned = false;
+            if (!warned) {
+                std::cerr << "[PyRenderer] scene has " << total_tri
+                          << " triangles, brute-force GPU too slow; CPU fallback (Phase 1c will lift)\n";
+                warned = true;
+            }
+            return render_tile(tile_x, tile_y, tile_w, tile_h,
+                               full_w, full_h, samples, sample_offset, max_depth);
+        }
+
+        camera_.aspect = static_cast<float>(full_w) / static_cast<float>(full_h);
+
+        // ---- Refresh packed scene cache ----
+        if (!packed_pt_cache_ || packed_pt_version_ != scene_version_) {
+            packed_pt_cache_   = lucid::gpu::pack_scene_for_path_tracer(scene_);
+            packed_pt_version_ = scene_version_;
+        }
+
+        // Environment color (multiplied by strength) read from scene_.environment
+        const auto env = render::to_rgb3f(scene_.environment.color);
+        const float env_color[3] = {env.r, env.g, env.b};
+        const float env_strength = scene_.environment.strength;
+
+        // Use a deterministic frame seed based on sample_offset so successive
+        // dispatches still get fresh random streams (CPU uses (x,y,offset+s)).
+        const uint32_t frame_seed = static_cast<uint32_t>(sample_offset) * 0x9e3779b1u
+                                    + 0xdeadbeefu;
+
+        const auto params = lucid::gpu::make_path_tracer_params(
+            camera_.pos, camera_.forward, camera_.right, camera_.up,
+            camera_.fovRad(), camera_.aspect,
+            static_cast<uint32_t>(tile_x), static_cast<uint32_t>(tile_y),
+            static_cast<uint32_t>(tile_w), static_cast<uint32_t>(tile_h),
+            static_cast<uint32_t>(full_w), static_cast<uint32_t>(full_h),
+            static_cast<uint32_t>(std::max(1, samples)),
+            static_cast<uint32_t>(std::max(0, sample_offset)),
+            static_cast<uint32_t>(std::max(1, max_depth)),
+            frame_seed,
+            env_color, env_strength,
+            packed_pt_cache_->point_light_count);
+
+        std::vector<float> raw;
+        try {
+            raw = gpu_path_tracer_->render(*gpu_ctx_, *packed_pt_cache_, params);
+        } catch (const std::exception& e) {
+            std::cerr << "[PyRenderer] GPU PathTracer dispatch failed: " << e.what()
+                      << "; CPU fallback\n";
+            return render_tile(tile_x, tile_y, tile_w, tile_h,
+                               full_w, full_h, samples, sample_offset, max_depth);
+        }
+
+        // ---- Apply camera sensitivity + clamp + alpha=1.0 ----
+        // Mirrors the CPU render_tile lines 328-338 sequence so the buffer the
+        // viewport receives matches CPU layout exactly.
+        const auto sensitivity = camera_.sensitivity();
+        const size_t pixel_count = static_cast<size_t>(tile_w) * tile_h;
+        std::vector<float> out(pixel_count * 4, 0.0f);
+        for (size_t i = 0; i < pixel_count; ++i) {
+            auto rad = render::make_radiance_rgb(raw[i * 4 + 0],
+                                                  raw[i * 4 + 1],
+                                                  raw[i * 4 + 2]);
+            auto px  = render::attenuation_clamp_min_zero(
+                          render::apply_camera_sensitivity(rad, sensitivity));
+            auto [r, g, b] = render::color_to_floats(px);
+            out[i * 4 + 0] = r;
+            out[i * 4 + 1] = g;
+            out[i * 4 + 2] = b;
+            out[i * 4 + 3] = 1.0f;
+        }
+        return out;
+#else
+        return render_tile(tile_x, tile_y, tile_w, tile_h,
+                           full_w, full_h, samples, sample_offset, max_depth);
+#endif
+    }
+
     // =========================================================================
     // 情報取得
     // =========================================================================
@@ -756,15 +889,18 @@ private:
     std::string algorithm_;
 
 #ifdef LUCID_HAS_DAWN
-    // GPU backend state — lazily initialized on first render_debug_gpu call.
+    // GPU backend state — lazily initialized on first GPU call.
     // gpu_init_failed_ is sticky: don't retry per frame once init has failed.
     std::optional<lucid::gpu::DawnContext>    gpu_ctx_;
     std::optional<lucid::gpu::DebugRenderer>  gpu_debug_;
+    std::optional<lucid::gpu::PathTracer>     gpu_path_tracer_;
     std::mutex                                gpu_mutex_;
     bool                                      gpu_init_failed_ = false;
     int                                       scene_version_   = 0;
-    std::optional<lucid::gpu::PackedScene>    packed_cache_;
-    int                                       packed_scene_version_ = -1;
+    std::optional<lucid::gpu::PackedScene>      packed_cache_;
+    int                                         packed_scene_version_ = -1;
+    std::optional<lucid::gpu::PackedPathScene>  packed_pt_cache_;
+    int                                         packed_pt_version_    = -1;
 #endif
     
     // 診断機能用メンバー

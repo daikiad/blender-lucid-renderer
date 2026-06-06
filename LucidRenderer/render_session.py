@@ -493,14 +493,23 @@ class RenderSession:
                     mode
                 )
         else:
-            # Path tracer is CPU only for now (Phase 2+ will add a GPU path tracer)
-            pixels = self._renderer.render_tile(
-                0, 0, params.width, params.height,
-                params.width, params.height,
-                samples=params.samples,
-                sample_offset=params.sample_offset,
-                max_depth=params.max_bounces
-            )
+            # Path tracer: route to GPU when backend=='gpu' (Phase 2a).
+            if params.backend == 'gpu' and hasattr(self._renderer, 'render_tile_gpu'):
+                pixels = self._renderer.render_tile_gpu(
+                    0, 0, params.width, params.height,
+                    params.width, params.height,
+                    samples=params.samples,
+                    sample_offset=params.sample_offset,
+                    max_depth=params.max_bounces
+                )
+            else:
+                pixels = self._renderer.render_tile(
+                    0, 0, params.width, params.height,
+                    params.width, params.height,
+                    samples=params.samples,
+                    sample_offset=params.sample_offset,
+                    max_depth=params.max_bounces
+                )
         
         # キャンセルチェック
         cancelled = self._renderer.is_cancelled()

@@ -118,6 +118,17 @@ PYBIND11_MODULE(lucidrenderer, m) {
              py::arg("full_w"), py::arg("full_h"),
              py::arg("mode"),
              "GPU debug visualization (Phase 1b: 'normal' only; others fall back to CPU)")
+
+        .def("render_tile_gpu", &PyRenderer::render_tile_gpu,
+             py::call_guard<py::gil_scoped_release>(),
+             py::arg("tile_x"), py::arg("tile_y"),
+             py::arg("tile_w"), py::arg("tile_h"),
+             py::arg("full_w"), py::arg("full_h"),
+             py::arg("samples") = 1,
+             py::arg("sample_offset") = 0,
+             py::arg("max_depth") = 8,
+             "GPU path tracer (Phase 2a: BSDF-sampling only, no NEE/MIS, diffuse + emissive). "
+             "Falls back to CPU on init failure, dispatch exception, or triangle_count > 5000.")
         
         // =====================================================================
         // NumPy 配列を直接返すバージョン（オプション）
