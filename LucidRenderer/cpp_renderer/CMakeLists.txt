@@ -68,6 +68,7 @@ if(LUCID_USE_DAWN)
     list(APPEND LUCID_SOURCES
         src/gpu/dawn_context.cpp
         src/gpu/shader_module.cpp
+        src/gpu/debug_renderer.cpp
     )
 endif()
 
@@ -369,6 +370,29 @@ if(LUCID_USE_DAWN)
     )
     target_compile_options(test_gpu_dawn_context PRIVATE -O2)
     gtest_discover_tests(test_gpu_dawn_context)
+
+    # GPU debug renderer (normal visualization, brute-force)
+    add_executable(test_gpu_debug_renderer
+        test/test_gpu_debug_renderer.cpp
+        src/gpu/dawn_context.cpp
+        src/gpu/shader_module.cpp
+        src/gpu/debug_renderer.cpp
+        src/node_evaluator.cpp
+    )
+    target_include_directories(test_gpu_debug_renderer PRIVATE include test)
+    target_link_libraries(test_gpu_debug_renderer PRIVATE
+        dawn::webgpu_dawn
+        mp-units::mp-units
+        nlohmann_json::nlohmann_json
+        GTest::gtest
+        GTest::gtest_main
+    )
+    target_compile_definitions(test_gpu_debug_renderer PRIVATE
+        LUCID_HAS_DAWN=1
+        LUCID_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+    )
+    target_compile_options(test_gpu_debug_renderer PRIVATE -O2)
+    gtest_discover_tests(test_gpu_debug_renderer)
 endif()
 
 # =============================================================================

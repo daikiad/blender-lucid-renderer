@@ -208,13 +208,12 @@ class LucidRendererSettings(bpy.types.PropertyGroup):
     )
     
     # レンダリングバックエンド
-    # Phase 2 で WebGPU を追加予定
     backend: bpy.props.EnumProperty(
         name="Backend",
         description="Rendering backend",
         items=[
             ('cpu', "CPU", "Multi-threaded CPU rendering (OpenMP)"),
-            # ('webgpu', "WebGPU", "GPU rendering via Dawn (experimental)"),  # Phase 2
+            ('gpu', "GPU", "GPU rendering via Dawn / WebGPU (Phase 1b: normal debug only)"),
         ],
         default='cpu'
     )

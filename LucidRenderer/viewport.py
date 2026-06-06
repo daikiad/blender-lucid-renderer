@@ -279,7 +279,8 @@ class ViewportRenderer:
             max_bounces=max_bounces,
             algorithm=lucid.sampling_algorithm,
             debug_mode=debug_mode,
-            sample_offset=sample_offset
+            sample_offset=sample_offset,
+            backend=lucid.backend,
         )
         
         # カメラパラメータ
@@ -492,7 +493,8 @@ class ViewportRenderer:
                     sample_offset=data.get('sample_offset', 0),
                     max_bounces=data['max_bounces'],
                     algorithm=data['algorithm'],
-                    debug_mode=data['debug_mode']
+                    debug_mode=data['debug_mode'],
+                    backend=data.get('backend', 'cpu'),
                 )
                 
                 future = session.render_tile_async(params, scene_file, camera)
@@ -551,6 +553,7 @@ class ViewportRenderer:
                     'max_bounces': params.max_bounces,
                     'algorithm': params.algorithm,
                     'debug_mode': params.debug_mode,
+                    'backend': params.backend,
                     'is_editing': (mode == RenderMode.EDITING),
                 }
                 

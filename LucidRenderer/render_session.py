@@ -479,12 +479,21 @@ class RenderSession:
         if params.debug_mode:
             debug_map = {'NORMAL': 'normal', 'ALBEDO': 'albedo', 'EMISSION': 'emission'}
             mode = debug_map.get(params.debug_mode, 'normal')
-            pixels = self._renderer.render_debug(
-                0, 0, params.width, params.height,
-                params.width, params.height,
-                mode
-            )
+            if params.backend == 'gpu' and hasattr(self._renderer, 'render_debug_gpu'):
+                # GPU path (Phase 1b: only 'normal' is real GPU; others fall back internally)
+                pixels = self._renderer.render_debug_gpu(
+                    0, 0, params.width, params.height,
+                    params.width, params.height,
+                    mode
+                )
+            else:
+                pixels = self._renderer.render_debug(
+                    0, 0, params.width, params.height,
+                    params.width, params.height,
+                    mode
+                )
         else:
+            # Path tracer is CPU only for now (Phase 2+ will add a GPU path tracer)
             pixels = self._renderer.render_tile(
                 0, 0, params.width, params.height,
                 params.width, params.height,

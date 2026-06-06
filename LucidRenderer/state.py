@@ -74,7 +74,7 @@ class CameraParams:
 @dataclass(frozen=True)
 class RenderParams:
     """レンダリングパラメータ（イミュータブル）
-    
+
     Attributes:
         width: レンダリング幅
         height: レンダリング高さ
@@ -83,6 +83,7 @@ class RenderParams:
         algorithm: アルゴリズム名 ('simple', 'nee', 'mis')
         debug_mode: デバッグモード ('normal', 'albedo', 'emission', None)
         sample_offset: サンプルオフセット（累積用）
+        backend: 'cpu' または 'gpu' (Phase 1b: GPU は normal debug のみ)
     """
     width: int
     height: int
@@ -91,6 +92,7 @@ class RenderParams:
     algorithm: str = 'nee'
     debug_mode: Optional[str] = None
     sample_offset: int = 0
+    backend: str = 'cpu'
 
 
 # =============================================================================

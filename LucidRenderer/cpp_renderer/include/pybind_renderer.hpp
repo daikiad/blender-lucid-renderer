@@ -23,6 +23,8 @@
 #pragma once
 
 #include <atomic>
+#include <mutex>
+#include <optional>
 #include <vector>
 #include <string>
 #include <cmath>
@@ -37,6 +39,11 @@
 
 #ifdef _OPENMP
 #include <omp.h>
+#endif
+
+#ifdef LUCID_HAS_DAWN
+#include "gpu/dawn_context.hpp"
+#include "gpu/debug_renderer.hpp"
 #endif
 
 // node_evaluator.cpp で定義されている関数
@@ -103,7 +110,10 @@ public:
         try {
             scene_ = loadSceneFromJsonString(json_str);
             scene_loaded_ = true;
-            std::cerr << "[PyRenderer] Scene loaded: " 
+#ifdef LUCID_HAS_DAWN
+            ++scene_version_;  // invalidates the GPU PackedScene cache
+#endif
+            std::cerr << "[PyRenderer] Scene loaded: "
                       << scene_.meshes.size() << " meshes\n";
             return true;
         } catch (const std::exception& e) {
@@ -416,8 +426,87 @@ public:
                 pixels[flipped_idx * 4 + 3] = 1.0f;
             }
         }
-        
+
         return pixels;
+    }
+
+    /**
+     * render_debug_gpu - GPU 経由のデバッグレンダリング (Phase 1b)
+     *
+     * Same shape as render_debug (returns flat RGBA, Y-flipped, tile_w*tile_h*4).
+     * For mode == "normal" the work is dispatched to Dawn/WebGPU via the cached
+     * DebugRenderer. Any other mode (or GPU init failure) silently falls back
+     * to the CPU render_debug path to keep viewport UX stable.
+     */
+    std::vector<float> render_debug_gpu(
+        int tile_x, int tile_y,
+        int tile_w, int tile_h,
+        int full_w, int full_h,
+        const std::string& mode)
+    {
+#ifdef LUCID_HAS_DAWN
+        // Phase 1b only supports normal mode on the GPU.
+        if (mode != "normal") {
+            return render_debug(tile_x, tile_y, tile_w, tile_h, full_w, full_h, mode);
+        }
+
+        std::lock_guard<std::mutex> lock(gpu_mutex_);
+
+        // Lazy: DawnContext on first call.
+        if (!gpu_init_failed_ && !gpu_ctx_) {
+            gpu_ctx_ = lucid::gpu::DawnContext::create();
+            if (!gpu_ctx_) {
+                gpu_init_failed_ = true;
+                std::cerr << "[PyRenderer] GPU init failed (DawnContext); CPU fallback for debug renders\n";
+            } else {
+                std::cerr << "[PyRenderer] GPU adapter: "
+                          << gpu_ctx_->adapter_info() << "\n";
+            }
+        }
+        if (gpu_init_failed_ || !gpu_ctx_) {
+            return render_debug(tile_x, tile_y, tile_w, tile_h, full_w, full_h, mode);
+        }
+
+        // Lazy: DebugRenderer on first call.
+        if (!gpu_debug_) {
+            gpu_debug_ = lucid::gpu::DebugRenderer::create(*gpu_ctx_);
+            if (!gpu_debug_) {
+                gpu_init_failed_ = true;
+                std::cerr << "[PyRenderer] GPU DebugRenderer init failed; CPU fallback\n";
+                return render_debug(tile_x, tile_y, tile_w, tile_h, full_w, full_h, mode);
+            }
+        }
+
+        if (!scene_loaded_ || !camera_set_) {
+            return std::vector<float>(tile_w * tile_h * 4, 0.0f);
+        }
+
+        camera_.aspect = static_cast<float>(full_w) / static_cast<float>(full_h);
+
+        // Refresh PackedScene if the scene has been reloaded.
+        if (!packed_cache_ || packed_scene_version_ != scene_version_) {
+            packed_cache_         = lucid::gpu::pack_scene_for_debug(scene_);
+            packed_scene_version_ = scene_version_;
+        }
+
+        const auto cam_params = lucid::gpu::make_camera_params(
+            camera_.pos, camera_.forward, camera_.right, camera_.up,
+            camera_.fovRad(), camera_.aspect,
+            static_cast<uint32_t>(tile_x), static_cast<uint32_t>(tile_y),
+            static_cast<uint32_t>(tile_w), static_cast<uint32_t>(tile_h),
+            static_cast<uint32_t>(full_w), static_cast<uint32_t>(full_h));
+
+        try {
+            return gpu_debug_->render_normal(*gpu_ctx_, *packed_cache_, cam_params);
+        } catch (const std::exception& e) {
+            std::cerr << "[PyRenderer] GPU render_normal failed: " << e.what()
+                      << "; CPU fallback\n";
+            return render_debug(tile_x, tile_y, tile_w, tile_h, full_w, full_h, mode);
+        }
+#else
+        // No Dawn build: always CPU.
+        return render_debug(tile_x, tile_y, tile_w, tile_h, full_w, full_h, mode);
+#endif
     }
 
     // =========================================================================
@@ -658,6 +747,18 @@ private:
     bool scene_loaded_;
     bool camera_set_;
     std::string algorithm_;
+
+#ifdef LUCID_HAS_DAWN
+    // GPU backend state — lazily initialized on first render_debug_gpu call.
+    // gpu_init_failed_ is sticky: don't retry per frame once init has failed.
+    std::optional<lucid::gpu::DawnContext>    gpu_ctx_;
+    std::optional<lucid::gpu::DebugRenderer>  gpu_debug_;
+    std::mutex                                gpu_mutex_;
+    bool                                      gpu_init_failed_ = false;
+    int                                       scene_version_   = 0;
+    std::optional<lucid::gpu::PackedScene>    packed_cache_;
+    int                                       packed_scene_version_ = -1;
+#endif
     
     // 診断機能用メンバー
     bool diagnostics_enabled_ = false;

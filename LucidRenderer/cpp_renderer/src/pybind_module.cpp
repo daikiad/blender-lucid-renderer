@@ -110,6 +110,14 @@ PYBIND11_MODULE(lucidrenderer, m) {
              py::arg("full_w"), py::arg("full_h"),
              py::arg("mode"),
              "Render debug visualization: 'normal', 'albedo', or 'emission'")
+
+        .def("render_debug_gpu", &PyRenderer::render_debug_gpu,
+             py::call_guard<py::gil_scoped_release>(),
+             py::arg("tile_x"), py::arg("tile_y"),
+             py::arg("tile_w"), py::arg("tile_h"),
+             py::arg("full_w"), py::arg("full_h"),
+             py::arg("mode"),
+             "GPU debug visualization (Phase 1b: 'normal' only; others fall back to CPU)")
         
         // =====================================================================
         // NumPy 配列を直接返すバージョン（オプション）

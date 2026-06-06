@@ -426,7 +426,8 @@ class LucidRenderEngine(bpy.types.RenderEngine):
                 samples=iteration_samples,
                 sample_offset=total_samples,
                 max_bounces=lucid.max_bounces,
-                algorithm=lucid.sampling_algorithm
+                algorithm=lucid.sampling_algorithm,
+                backend=lucid.backend,
             )
             result = session.render_tile(params)
             
