@@ -89,14 +89,26 @@ class ViewportRenderer:
         
         # 1. カメラ変更をチェック（ビューポート操作用）
         camera_changed = self._check_camera_changed(context, state)
-        
+
         # 2. シーン変更フラグを処理（engine.view_update から）
         content_changed = state.scene_update_pending
         if content_changed:
             state.scene_update_pending = False
-        
+
+        # 2b. バックエンド / デバッグモード切り替えも変更として扱う
+        # (Blender は EnumProperty 変更で view_update を呼んでくれないので、
+        #  ここでポーリングして変化を検知し、累積をリセットして再 render させる)
+        lucid = context.scene.lucid_renderer
+        backend_changed = (state.last_backend is not None
+                           and state.last_backend != lucid.backend)
+        debug_mode_changed = (state.last_debug_mode is not None
+                              and state.last_debug_mode != lucid.debug_mode)
+        state.last_backend = lucid.backend
+        state.last_debug_mode = lucid.debug_mode
+
         # 3. 何か変更があった場合の処理
-        any_change = camera_changed or content_changed
+        any_change = (camera_changed or content_changed
+                      or backend_changed or debug_mode_changed)
         was_in_final_mode = (current_time - state.last_change_time) >= RENDER_CONSTANTS.EDITING_TIMEOUT
         if any_change:
             # 累積サンプルをリセット、時間を更新

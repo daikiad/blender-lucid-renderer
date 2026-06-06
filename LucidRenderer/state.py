@@ -148,11 +148,15 @@ class ViewportState:
     # --- 解像度追跡 ---
     last_render_width: int = 0
     last_render_height: int = 0
-    
+
     # --- カメラ追跡 ---
     last_camera_matrix: Any = None  # mathutils.Matrix
     last_view_perspective: Optional[str] = None
     last_view_distance: Optional[float] = None
+
+    # --- バックエンド追跡 (切り替えで強制再 render) ---
+    last_backend: Optional[str] = None
+    last_debug_mode: Optional[str] = None
     
     # --- フラグ ---
     scene_update_pending: bool = False
