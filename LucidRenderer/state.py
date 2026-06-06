@@ -168,6 +168,14 @@ class ViewportState:
     
     # --- ジョブ管理 ---
     job_id: int = 0
+
+    # --- GPU async (worker-driven) accumulator session ---
+    # last_async_w/h: resolution the worker is currently producing; if the
+    # viewport resolution changes we have to stop+restart the session.
+    # last_async_scene_hash: detect content changes that need a fresh session.
+    last_async_w: int = 0
+    last_async_h: int = 0
+    last_async_scene_hash: Optional[str] = None
     
     def reset_for_scene_change(self) -> None:
         """シーン変更時のリセット（後方互換用、非推奨）"""

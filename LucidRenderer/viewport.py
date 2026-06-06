@@ -64,24 +64,39 @@ class ViewportRenderer:
         session: Union['RenderSession', 'RendererBackend']
     ) -> Tuple[int, int]:
         """ビューポートをレンダリング
-        
+
         view_draw から呼び出されるメインメソッド。
-        
+
         Args:
             context: Blender コンテキスト
             depsgraph: 依存関係グラフ
             state: ビューポート状態
             session: レンダリングセッション（または後方互換の RendererBackend）
-        
+
         Returns:
             (current_samples, target_samples) のタプル
         """
         import gpu
         from gpu_extras.presets import draw_texture_2d
-        
+
         # セッションIDを取得（セッション分離用）
         session_id = getattr(session, 'session_id', 0)
-        
+
+        # GPU backend + non-debug → use the C++ async accumulator path. The
+        # worker thread keeps firing 1-sample dispatches; we just poll the
+        # snapshot from view_draw and draw it. Decouples GPU progress from
+        # Blender's redraw cadence so the viewport feels continuous.
+        try:
+            lucid = context.scene.lucid_renderer
+            use_async = (lucid.backend == 'gpu'
+                         and lucid.debug_mode == 'NONE'
+                         and getattr(session, 'is_available', False)
+                         and hasattr(session, 'start_render_async'))
+        except Exception:
+            use_async = False
+        if use_async:
+            return self._render_via_gpu_async(context, depsgraph, state, session, session_id)
+
         region = context.region
         width = region.width
         height = region.height
@@ -165,9 +180,184 @@ class ViewportRenderer:
         return current_samples, target_samples
     
     # =========================================================================
+    # GPU async accumulator path (the "background worker + poll" model)
+    # =========================================================================
+
+    def _render_via_gpu_async(
+        self,
+        context: Any,
+        depsgraph: Any,
+        state: 'ViewportState',
+        session: Union['RenderSession', 'RendererBackend'],
+        session_id: int
+    ) -> Tuple[int, int]:
+        """GPU バックエンド + デバッグ無し時の async accumulator パス
+
+        C++ 側 worker が 1 sample ずつ accumulator に積むのを poll するだけ。
+        scene/camera が変わったら stop → 再 export → 再 load → start_async し直す。
+        """
+        import array as _array
+        import gpu as _gpu
+
+        region = context.region
+        view_w = region.width
+        view_h = region.height
+        current_time = time.time()
+
+        # Resolution scale & bounce count come from the props the user sets.
+        # We pick scale_factor based on whether we're "actively interacting"
+        # (use editing scale → lower-res, snappier) or settled (use final).
+        lucid = context.scene.lucid_renderer
+        camera_changed = self._check_camera_changed(context, state)
+        content_changed = state.scene_update_pending
+        if content_changed:
+            state.scene_update_pending = False
+
+        backend_changed = (state.last_backend is not None
+                           and state.last_backend != lucid.backend)
+        debug_mode_changed = (state.last_debug_mode is not None
+                              and state.last_debug_mode != lucid.debug_mode)
+        state.last_backend = lucid.backend
+        state.last_debug_mode = lucid.debug_mode
+
+        any_change = (camera_changed or content_changed
+                      or backend_changed or debug_mode_changed)
+        if any_change:
+            state.last_change_time = current_time
+
+        time_since_change = current_time - state.last_change_time
+        if any_change or time_since_change < RENDER_CONSTANTS.EDITING_TIMEOUT:
+            scale_factor = lucid.viewport_scale_editing
+            max_bounces  = RENDER_CONSTANTS.EDITING_BOUNCES
+        else:
+            scale_factor = lucid.viewport_scale_final
+            max_bounces  = RENDER_CONSTANTS.FINAL_BOUNCES
+
+        render_w = max(1, view_w // scale_factor)
+        render_h = max(1, view_h // scale_factor)
+
+        resolution_changed = (state.last_async_w != render_w
+                              or state.last_async_h != render_h)
+        needs_restart = (any_change or resolution_changed
+                         or not session.is_render_async_running())
+
+        if needs_restart:
+            # The worker holds Dawn resources; stop before we tear scene state.
+            try:
+                session.stop_render_async()
+            except Exception as e:
+                print(f"[ViewportRenderer] stop_render_async failed: {e}")
+
+            # Sync scene → renderer (re-export only when content changed; the
+            # scene cache key tracks whether the depsgraph diff actually moved).
+            try:
+                scene_file = get_scene_cache(session_id).get_cached_file_fast()
+                if scene_file is None or content_changed:
+                    scene_file = export_scene_to_file(depsgraph, session_id=session_id)
+                if scene_file:
+                    session.load_scene_file(scene_file)
+                    state.last_async_scene_hash = scene_file
+            except Exception as e:
+                print(f"[ViewportRenderer] async scene export failed: {e}")
+
+            # Camera goes through the standard CameraParams pipeline so the
+            # forward/right/up basis matches what the sync path computes.
+            camera = self._compute_camera_only(context)
+            if camera is not None:
+                try:
+                    session.set_camera(camera)
+                except Exception as e:
+                    print(f"[ViewportRenderer] set_camera failed: {e}")
+
+            # Drop the old texture; the next snapshot will repaint at the new
+            # resolution. Skipping this would draw stretched stale pixels.
+            if (resolution_changed and state.texture is not None):
+                try:
+                    del state.texture
+                except Exception:
+                    pass
+                state.texture = None
+                state.accumulated_samples = {}
+
+            try:
+                session.start_render_async(render_w, render_h, max_bounces)
+            except Exception as e:
+                print(f"[ViewportRenderer] start_render_async failed: {e}")
+
+            state.last_async_w = render_w
+            state.last_async_h = render_h
+
+        # Poll the worker (non-blocking; returns most recent CPU-side snapshot).
+        try:
+            samples, pixels = session.poll_render_async()
+        except Exception as e:
+            print(f"[ViewportRenderer] poll_render_async failed: {e}")
+            samples, pixels = 0, []
+
+        expected_len = render_w * render_h * 4
+        if samples > 0 and len(pixels) == expected_len:
+            # Reuse the existing display-buffer plumbing: stuff the AVG into
+            # accumulated_samples so get_current_sample_count / _draw_texture
+            # keep working unchanged. C++ already normalised by sample count.
+            tile_key = (render_w, render_h)
+            state.accumulated_samples[tile_key] = (
+                _array.array('f', pixels),
+                int(samples),
+            )
+
+            # Rebuild the GPU texture from the snapshot pixels.
+            buffer = _gpu.types.Buffer('FLOAT', expected_len, list(pixels))
+            if state.texture is not None:
+                try:
+                    del state.texture
+                except Exception:
+                    pass
+            state.texture = _gpu.types.GPUTexture(
+                (render_w, render_h), format='RGBA16F', data=buffer
+            )
+            state.texture_width  = render_w
+            state.texture_height = render_h
+
+        # Keep polling until the user-configured target is reached.
+        try:
+            target_samples = lucid.viewport_samples
+        except Exception:
+            target_samples = 64
+
+        if samples < target_samples or session.is_render_async_running():
+            for area in context.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+
+        # Draw the texture to the viewport. _draw_texture also reads the sample
+        # count back out of accumulated_samples for the header readout.
+        current_samples, _ = self._draw_texture(context, state, view_w, view_h)
+        return current_samples, target_samples
+
+    def _compute_camera_only(self, context: Any) -> Optional[CameraParams]:
+        """View-matrix → CameraParams, no other render params. Mirrors the
+        camera block of `_compute_params` so the async path produces an
+        identical basis."""
+        from mathutils import Vector
+        region_data = context.region_data
+        if region_data is None:
+            return None
+        view_matrix_inv = region_data.view_matrix.inverted()
+        cam_pos = view_matrix_inv.translation
+        cam_dir = (view_matrix_inv.to_3x3() @ Vector((0, 0, -1))).normalized()
+        cam_up  = (view_matrix_inv.to_3x3() @ Vector((0, 1, 0))).normalized()
+        fov = self._compute_fov(context, region_data)
+        return CameraParams(
+            pos=(cam_pos.x, cam_pos.y, cam_pos.z),
+            dir=(cam_dir.x, cam_dir.y, cam_dir.z),
+            up=(cam_up.x, cam_up.y, cam_up.z),
+            fov=fov,
+        )
+
+    # =========================================================================
     # カメラ変更検出
     # =========================================================================
-    
+
     def _check_camera_changed(
         self,
         context: Any,

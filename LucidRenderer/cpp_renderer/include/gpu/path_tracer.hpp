@@ -20,6 +20,7 @@
 
 #include <webgpu/webgpu_cpp.h>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -148,17 +149,63 @@ public:
     // tile_w * tile_h * 4, Y-flipped to match the CPU pybind output. Each
     // RGB value is the path-traced pixel color (Radiance × CameraSensitivity);
     // alpha is always 1.0. Throws std::runtime_error on dispatch failure.
+    //
+    // The sync render() and async start/poll/stop API are mutually exclusive;
+    // do not interleave calls.
     std::vector<float> render(DawnContext& ctx,
                               const PackedPathScene& scene,
                               const PathTracerParamsGpu& params);
 
-    PathTracer(PathTracer&&) noexcept = default;
-    PathTracer& operator=(PathTracer&&) noexcept = default;
+    // ----- Async accumulator API ----------------------------------------------
+    //
+    // Begins (or restarts) a background path-trace session that keeps firing
+    // 1-sample dispatches into an on-GPU accumulator. The Blender viewport
+    // calls `poll_async` from the draw thread to fetch the latest snapshot;
+    // the GPU work continues independently of the polling rate.
+    //
+    // Lifetime: the caller owns `scene` for the duration of the async session
+    // and must `stop_async()` before invalidating it. `start_async` blocks
+    // briefly (uploads buffers, kicks worker) but returns once the session
+    // is live. Calling start_async() while a session is running silently
+    // stops the old one first.
+    void start_async(DawnContext& ctx,
+                     const PackedPathScene& scene,
+                     const PathTracerParamsGpu& base_params);
+
+    // Stops the worker, joins the thread. No-op if not running. Safe to call
+    // from the destructor; in fact the destructor always calls this.
+    void stop_async();
+
+    bool is_async_running() const noexcept;
+    uint32_t async_samples_completed() const noexcept;
+
+    struct AsyncSnapshot {
+        uint32_t samples = 0;          // 0 if no snapshot taken yet
+        uint32_t width   = 0;
+        uint32_t height  = 0;
+        // RGBA, row-major, Y-flipped (same as render()), already divided by
+        // `samples`. Empty when samples == 0.
+        std::vector<float> pixels;
+    };
+    // Non-blocking. Returns the latest CPU-side snapshot the worker has
+    // produced. If samples == 0, no snapshot exists yet; the caller should
+    // keep its existing texture.
+    AsyncSnapshot poll_async() const;
+    // ---------------------------------------------------------------------------
+
+    // Defined in the .cpp where AsyncState is complete (unique_ptr<AsyncState>
+    // needs the destructor in scope to generate ops).
+    ~PathTracer();
+    PathTracer(PathTracer&&) noexcept;
+    PathTracer& operator=(PathTracer&&) noexcept;
     PathTracer(const PathTracer&) = delete;
     PathTracer& operator=(const PathTracer&) = delete;
 
 private:
     PathTracer(wgpu::ShaderModule, wgpu::ComputePipeline, wgpu::BindGroupLayout);
+
+    struct AsyncState;
+    std::unique_ptr<AsyncState> async_state_;   // Heap-stable; worker captures it.
 
     wgpu::ShaderModule    shader_;
     wgpu::ComputePipeline pipeline_;

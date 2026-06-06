@@ -658,6 +658,142 @@ public:
     }
 
     // =========================================================================
+    // Async accumulator API for the Blender viewport
+    // =========================================================================
+    //
+    // Producer-consumer pattern: render_start_async spawns a C++ worker that
+    // keeps firing 1-sample GPU dispatches into an on-GPU accumulator buffer.
+    // Blender's draw thread polls with render_poll_async to get the current
+    // CPU-side snapshot (already normalised to per-sample average + alpha=1.0,
+    // same shape as render_tile_gpu).
+    //
+    // Lifecycle from Python:
+    //   on scene/camera change:  render_stop_async() then render_start_async()
+    //   on view_draw:            samples, pixels = render_poll_async()
+    //   on shutdown / scene unload: render_stop_async()
+
+    /**
+     * Begins a fresh async accumulator render. Stops any prior session first.
+     * Falls back silently if Dawn / PathTracer aren't available; in that case
+     * subsequent poll() returns samples=0 and the caller should fall back to
+     * the sync `render_tile_gpu` / `render_tile` path.
+     */
+    void render_start_async(int width, int height, int max_depth) {
+#ifdef LUCID_HAS_DAWN
+        reset_cancel();
+        std::lock_guard<std::mutex> lock(gpu_mutex_);
+        if (gpu_init_failed_) return;
+        if (!gpu_ctx_) {
+            auto ctx = lucid::gpu::DawnContext::create();
+            if (!ctx) {
+                gpu_init_failed_ = true;
+                return;
+            }
+            gpu_ctx_ = std::move(ctx);
+        }
+        if (!gpu_path_tracer_) {
+            auto pt = lucid::gpu::PathTracer::create(*gpu_ctx_);
+            if (!pt) {
+                gpu_init_failed_ = true;
+                return;
+            }
+            gpu_path_tracer_ = std::move(pt);
+        }
+        if (!scene_loaded_ || !camera_set_) return;
+
+        uint32_t total_tri = 0;
+        for (const auto& m : scene_.meshes) total_tri += static_cast<uint32_t>(m.triangles.size());
+        if (total_tri > 500000) {
+            std::cerr << "[PyRenderer] async: scene has " << total_tri
+                      << " tris, exceeds GPU BVH soft cap; staying idle\n";
+            return;
+        }
+        if (!packed_pt_cache_ || packed_pt_version_ != scene_version_) {
+            packed_pt_cache_   = lucid::gpu::pack_scene_for_path_tracer(scene_);
+            packed_pt_version_ = scene_version_;
+        }
+
+        camera_.aspect = static_cast<float>(width) / static_cast<float>(height);
+        const auto env = render::to_rgb3f(scene_.environment.color);
+        const float env_color[3] = {env.r, env.g, env.b};
+        const float env_strength = scene_.environment.strength;
+
+        const auto params = lucid::gpu::make_path_tracer_params(
+            camera_.pos, camera_.forward, camera_.right, camera_.up,
+            camera_.fovRad(), camera_.aspect,
+            0u, 0u,
+            static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+            static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+            /*samples=*/1u, /*sample_offset=*/0u,
+            static_cast<uint32_t>(std::max(1, max_depth)),
+            /*frame_seed=*/0u,
+            env_color, env_strength,
+            packed_pt_cache_->point_light_count,
+            packed_pt_cache_->bvh_node_count);
+
+        try {
+            gpu_path_tracer_->start_async(*gpu_ctx_, *packed_pt_cache_, params);
+        } catch (const std::exception& e) {
+            std::cerr << "[PyRenderer] start_async failed: " << e.what() << "\n";
+        }
+#else
+        (void)width; (void)height; (void)max_depth;
+#endif
+    }
+
+    /** Returns (samples_completed, pixels_RGBA_flat). samples == 0 means
+     *  "no snapshot yet" — caller should keep its current texture. */
+    std::pair<int, std::vector<float>> render_poll_async() {
+#ifdef LUCID_HAS_DAWN
+        std::lock_guard<std::mutex> lock(gpu_mutex_);
+        if (!gpu_path_tracer_ || !gpu_path_tracer_->is_async_running()) {
+            return {0, {}};
+        }
+        auto snap = gpu_path_tracer_->poll_async();
+        if (snap.samples == 0) {
+            return {0, {}};
+        }
+        // Apply camera sensitivity + clamp, mirroring sync render_tile_gpu.
+        const auto sensitivity = camera_.sensitivity();
+        const size_t pixel_count = static_cast<size_t>(snap.width) * snap.height;
+        std::vector<float> out(pixel_count * 4, 0.0f);
+        for (size_t i = 0; i < pixel_count; ++i) {
+            auto rad = render::make_radiance_rgb(snap.pixels[i * 4 + 0],
+                                                  snap.pixels[i * 4 + 1],
+                                                  snap.pixels[i * 4 + 2]);
+            auto px  = render::attenuation_clamp_min_zero(
+                          render::apply_camera_sensitivity(rad, sensitivity));
+            auto [r, g, b] = render::color_to_floats(px);
+            out[i * 4 + 0] = r;
+            out[i * 4 + 1] = g;
+            out[i * 4 + 2] = b;
+            out[i * 4 + 3] = 1.0f;
+        }
+        return {static_cast<int>(snap.samples), std::move(out)};
+#else
+        return {0, {}};
+#endif
+    }
+
+    void render_stop_async() {
+#ifdef LUCID_HAS_DAWN
+        std::lock_guard<std::mutex> lock(gpu_mutex_);
+        if (gpu_path_tracer_) {
+            gpu_path_tracer_->stop_async();
+        }
+#endif
+    }
+
+    bool is_render_async_running() {
+#ifdef LUCID_HAS_DAWN
+        std::lock_guard<std::mutex> lock(gpu_mutex_);
+        return gpu_path_tracer_ && gpu_path_tracer_->is_async_running();
+#else
+        return false;
+#endif
+    }
+
+    // =========================================================================
     // 情報取得
     // =========================================================================
 

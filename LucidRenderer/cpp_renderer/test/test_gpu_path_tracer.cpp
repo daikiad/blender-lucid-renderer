@@ -10,8 +10,10 @@
 #include "light/light.hpp"
 
 #include <gtest/gtest.h>
+#include <chrono>
 #include <cmath>
 #include <numbers>
+#include <thread>
 
 using lucid::gpu::DawnContext;
 using lucid::gpu::PathTracer;
@@ -155,7 +157,10 @@ TEST(PathTracerTest, SingleEmissiveTriangle) {
     EXPECT_LT(r, 3.0f * static_cast<float>(samples)) << "shouldn't blow up";
     EXPECT_NEAR(out[idx + 1], 0.0f, 1e-5f);
     EXPECT_NEAR(out[idx + 2], 0.0f, 1e-5f);
-    EXPECT_NEAR(out[idx + 3], 1.0f, 1e-5f);
+    // The .w channel now carries the sample count for the additive shader
+    // (single-dispatch sync render still adds `samples` once because the
+    // buffer is wiped beforehand).
+    EXPECT_NEAR(out[idx + 3], static_cast<float>(samples), 1e-5f);
 }
 
 TEST(PathTracerTest, SingleEmissiveTriangle_NoNaN) {
@@ -339,6 +344,57 @@ TEST(PathTracerTest, MaterialParity_PointLightFluxConservation) {
     // ±50% envelope absorbs MC noise + small GGX specular contribution.
     EXPECT_GT(r, expected_sum * 0.5f) << "GPU POINT light contribution looks too dim";
     EXPECT_LT(r, expected_sum * 1.5f) << "GPU POINT light contribution looks too bright";
+}
+
+// ============================================================================
+// Async accumulator smoke test
+// ============================================================================
+
+TEST(PathTracerTest, AsyncAccumulator_SmokeTest) {
+    auto ctx = DawnContext::create();
+    ASSERT_TRUE(ctx.has_value());
+    auto pt = PathTracer::create(*ctx);
+    ASSERT_TRUE(pt.has_value());
+
+    Scene scene;
+    scene.meshes.push_back(make_emissive_z_triangle(1.0f, 1.0f, 1.0f));
+    auto packed = pack_scene_for_path_tracer(scene);
+
+    const uint32_t W = 32, H = 32;
+    auto params = default_camera_params(W, H, /*samples=*/1, /*offset=*/0, /*max_bounces=*/4);
+    params.bvh_node_count = packed.bvh_node_count;
+
+    EXPECT_FALSE(pt->is_async_running());
+    pt->start_async(*ctx, packed, params);
+    EXPECT_TRUE(pt->is_async_running());
+
+    // Give the worker a chance to accumulate some samples.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    const uint32_t samples_after_200ms = pt->async_samples_completed();
+    EXPECT_GT(samples_after_200ms, 0u) << "worker should have produced at least some samples";
+
+    auto snap = pt->poll_async();
+    // Snapshot might be 0 if no full 16-sample chunk hit yet — give it a bit more time.
+    if (snap.samples == 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        snap = pt->poll_async();
+    }
+    EXPECT_GT(snap.samples, 0u);
+    ASSERT_EQ(snap.pixels.size(), static_cast<size_t>(W) * H * 4);
+    EXPECT_EQ(snap.width, W);
+    EXPECT_EQ(snap.height, H);
+
+    // Center pixel ray should hit the emissive triangle; averaged radiance > 0.
+    const size_t idx = ((H / 2) * W + W / 2) * 4;
+    EXPECT_GT(snap.pixels[idx + 0], 0.5f) << "averaged center R should reflect emission";
+    EXPECT_NEAR(snap.pixels[idx + 3], 1.0f, 1e-5f) << "alpha should be 1.0 (normalised)";
+    for (size_t i = 0; i < snap.pixels.size(); ++i) {
+        EXPECT_TRUE(std::isfinite(snap.pixels[i])) << "non-finite at " << i;
+    }
+
+    pt->stop_async();
+    EXPECT_FALSE(pt->is_async_running());
 }
 
 #else  // LUCID_HAS_DAWN

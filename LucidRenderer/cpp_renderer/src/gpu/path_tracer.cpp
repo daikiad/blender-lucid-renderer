@@ -14,10 +14,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
 
 // Forward decls — implementations live in src/node_evaluator.cpp. Mirror the
 // CPU `getMaterialParams()` semantics so all six material sockets are
@@ -503,10 +506,15 @@ std::vector<float> PathTracer::render(DawnContext& ctx,
     last_scene_cache_id_ = scene.cache_id;
 
     // ---- Output storage (grow on demand) ----
+    // `CopyDst` lets us ClearBuffer this before each dispatch — the shader is
+    // now additive (mirrors the async accumulator path), so the sync API has
+    // to wipe the previous contribution to keep its "render N samples in one
+    // call" contract.
     if (out_bytes > out_buf_capacity_ || !out_buf_) {
         wgpu::BufferDescriptor d{};
         d.size  = std::max(out_bytes, kMinStorageBytes);
-        d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc;
+        d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc
+                | wgpu::BufferUsage::CopyDst;
         out_buf_          = ctx.device().CreateBuffer(&d);
         out_buf_capacity_ = d.size;
     }
@@ -551,6 +559,9 @@ std::vector<float> PathTracer::render(DawnContext& ctx,
 
     // ---- Dispatch ----
     wgpu::CommandEncoder encoder = ctx.device().CreateCommandEncoder();
+    // Zero out_buf_ first — shader is additive, so without a wipe each render()
+    // call would keep adding on top of whatever the last call left behind.
+    encoder.ClearBuffer(out_buf_, 0, out_bytes);
     {
         wgpu::ComputePassEncoder pass = encoder.BeginComputePass();
         pass.SetPipeline(pipeline_);
@@ -589,6 +600,340 @@ std::vector<float> PathTracer::render(DawnContext& ctx,
     std::vector<float> result(mapped, mapped + pixel_count * 4);
     stage_buf_.Unmap();
     return result;
+}
+
+// ============================================================================
+// Async accumulator session
+// ============================================================================
+//
+// A worker thread continuously submits 1-sample dispatches into a persistent
+// on-GPU accumulator buffer. Periodically it reads back the accumulator and
+// normalises (sum / sample_count) into a CPU-side snapshot, protected by a
+// mutex. The Blender viewport polls this snapshot with `poll_async` from the
+// draw thread; the GPU work continues independently of the polling rate.
+//
+// Lifetime: AsyncState is heap-allocated and owned by `PathTracer::async_state_`
+// via unique_ptr — its address is stable even if PathTracer is moved during
+// create()→optional. The worker captures `this` (the AsyncState pointer).
+
+struct PathTracer::AsyncState {
+    // ---- Refcount-copied handles from PathTracer at start_async time ----
+    wgpu::ComputePipeline pipeline;
+    wgpu::BindGroupLayout layout;
+    wgpu::Buffer          params_buf;
+    wgpu::Buffer          tri_buf;          uint64_t tri_buf_size = 0;
+    wgpu::Buffer          point_lights_buf; uint64_t point_lights_buf_size = 0;
+    wgpu::Buffer          bvh_buf;          uint64_t bvh_buf_size = 0;
+
+    // ---- Owned by this session ----
+    wgpu::Buffer          accum_buf;        uint64_t accum_buf_capacity = 0;
+    wgpu::Buffer          stage_buf;        uint64_t stage_buf_capacity = 0;
+    wgpu::BindGroup       bind_group;       // cached, references the above
+
+    // ---- Session params ----
+    DawnContext*          ctx = nullptr;
+    PathTracerParamsGpu   base_params{};
+    uint32_t              width  = 0;
+    uint32_t              height = 0;
+    uint64_t              accum_bytes = 0;  // width*height*4*sizeof(float)
+
+    // ---- Worker thread / synchronisation ----
+    std::thread           worker;
+    std::atomic<bool>     stop_requested{false};
+    std::atomic<uint32_t> samples_completed{0};
+
+    // ---- Snapshot for Blender poll ----
+    mutable std::mutex    snapshot_mu;
+    std::vector<float>    snapshot_pixels;        // RGBA averaged
+    uint32_t              snapshot_samples = 0;
+    uint32_t              snapshot_w = 0, snapshot_h = 0;
+
+    void worker_loop();
+    bool submit_one_sample();
+    bool take_snapshot();
+};
+
+void PathTracer::AsyncState::worker_loop() {
+    // Build the bind group once — it references buffers that don't change.
+    {
+        wgpu::BindGroupLayoutEntry dummy{};
+        (void)dummy;
+        wgpu::BindGroupEntry bg_entries[5] = {};
+        bg_entries[0].binding = 0;
+        bg_entries[0].buffer  = params_buf;
+        bg_entries[0].offset  = 0;
+        bg_entries[0].size    = sizeof(PathTracerParamsGpu);
+        bg_entries[1].binding = 1;
+        bg_entries[1].buffer  = tri_buf;
+        bg_entries[1].offset  = 0;
+        bg_entries[1].size    = tri_buf_size;
+        bg_entries[2].binding = 2;
+        bg_entries[2].buffer  = accum_buf;
+        bg_entries[2].offset  = 0;
+        bg_entries[2].size    = accum_bytes;
+        bg_entries[3].binding = 3;
+        bg_entries[3].buffer  = point_lights_buf;
+        bg_entries[3].offset  = 0;
+        bg_entries[3].size    = point_lights_buf_size;
+        bg_entries[4].binding = 4;
+        bg_entries[4].buffer  = bvh_buf;
+        bg_entries[4].offset  = 0;
+        bg_entries[4].size    = bvh_buf_size;
+
+        wgpu::BindGroupDescriptor bg{};
+        bg.layout     = layout;
+        bg.entryCount = 5;
+        bg.entries    = bg_entries;
+        bind_group    = ctx->device().CreateBindGroup(&bg);
+    }
+
+    // Throttle parameter: snapshot every K dispatches. With ~300 samples/sec
+    // on a 1000-tri scene, K=16 gives ~20Hz snapshot updates — plenty for
+    // the viewport's redraw cadence.
+    constexpr uint32_t kSnapshotEveryNSamples = 16;
+    uint32_t since_last_snapshot = 0;
+
+    while (!stop_requested.load(std::memory_order_relaxed)) {
+        if (!submit_one_sample()) {
+            // Dispatch failed; back off briefly and retry.
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+        ++since_last_snapshot;
+        if (since_last_snapshot >= kSnapshotEveryNSamples) {
+            take_snapshot();
+            since_last_snapshot = 0;
+        }
+    }
+
+    // Final snapshot on shutdown — gives the caller one last consistent state.
+    take_snapshot();
+}
+
+bool PathTracer::AsyncState::submit_one_sample() {
+    const uint32_t sample_offset = samples_completed.load(std::memory_order_relaxed);
+
+    // Fresh frame_seed per sample so PCG streams don't repeat across the
+    // running accumulator. Mirrors the pattern from PyRenderer::render_tile_gpu.
+    PathTracerParamsGpu p = base_params;
+    p.samples       = 1;
+    p.sample_offset = sample_offset;
+    p.frame_seed    = sample_offset * 0x9e3779b1u + 0xdeadbeefu;
+    ctx->queue().WriteBuffer(params_buf, 0, &p, sizeof(p));
+
+    wgpu::CommandEncoder encoder = ctx->device().CreateCommandEncoder();
+    {
+        wgpu::ComputePassEncoder pass = encoder.BeginComputePass();
+        pass.SetPipeline(pipeline);
+        pass.SetBindGroup(0, bind_group);
+        const uint32_t wg_x = (width  + 7) / 8;
+        const uint32_t wg_y = (height + 7) / 8;
+        pass.DispatchWorkgroups(wg_x, wg_y, 1);
+        pass.End();
+    }
+    wgpu::CommandBuffer cmd = encoder.Finish();
+    ctx->queue().Submit(1, &cmd);
+    samples_completed.fetch_add(1, std::memory_order_release);
+    return true;
+}
+
+bool PathTracer::AsyncState::take_snapshot() {
+    // Copy accumulator → stage, map, copy out, normalise.
+    wgpu::CommandEncoder encoder = ctx->device().CreateCommandEncoder();
+    encoder.CopyBufferToBuffer(accum_buf, 0, stage_buf, 0, accum_bytes);
+    wgpu::CommandBuffer cmd = encoder.Finish();
+    ctx->queue().Submit(1, &cmd);
+
+    std::string map_err;
+    wgpu::Future future = stage_buf.MapAsync(
+        wgpu::MapMode::Read, 0, accum_bytes,
+        wgpu::CallbackMode::WaitAnyOnly,
+        [&map_err](wgpu::MapAsyncStatus status, wgpu::StringView msg) {
+            if (status != wgpu::MapAsyncStatus::Success) {
+                map_err.assign(msg.data, msg.length);
+            }
+        });
+    if (!wait_for_with_timeout(ctx->instance(), future)) {
+        std::cerr << "[PathTracer] async snapshot MapAsync timed out\n";
+        return false;
+    }
+    if (!map_err.empty()) {
+        std::cerr << "[PathTracer] async snapshot MapAsync failed: " << map_err << "\n";
+        return false;
+    }
+
+    const float* mapped = static_cast<const float*>(
+        stage_buf.GetConstMappedRange(0, accum_bytes));
+    if (!mapped) {
+        std::cerr << "[PathTracer] async snapshot GetConstMappedRange returned null\n";
+        return false;
+    }
+
+    const uint32_t s = samples_completed.load(std::memory_order_acquire);
+    std::vector<float> pix(static_cast<size_t>(width) * height * 4);
+    if (s == 0) {
+        // No samples yet → return zeros.
+        std::fill(pix.begin(), pix.end(), 0.0f);
+    } else {
+        const float inv_s = 1.0f / static_cast<float>(s);
+        const size_t n_pixels = static_cast<size_t>(width) * height;
+        for (size_t i = 0; i < n_pixels; ++i) {
+            pix[i * 4 + 0] = mapped[i * 4 + 0] * inv_s;
+            pix[i * 4 + 1] = mapped[i * 4 + 1] * inv_s;
+            pix[i * 4 + 2] = mapped[i * 4 + 2] * inv_s;
+            pix[i * 4 + 3] = 1.0f;
+        }
+    }
+    stage_buf.Unmap();
+
+    {
+        std::lock_guard<std::mutex> lk(snapshot_mu);
+        snapshot_pixels  = std::move(pix);
+        snapshot_samples = s;
+        snapshot_w       = width;
+        snapshot_h       = height;
+    }
+    return true;
+}
+
+PathTracer::~PathTracer() {
+    stop_async();
+}
+
+// Move ctor/assign live here (not in the header) because they require the full
+// definition of AsyncState for the unique_ptr deleter.
+PathTracer::PathTracer(PathTracer&&) noexcept = default;
+PathTracer& PathTracer::operator=(PathTracer&&) noexcept = default;
+
+void PathTracer::start_async(DawnContext& ctx,
+                             const PackedPathScene& scene,
+                             const PathTracerParamsGpu& base_params) {
+    stop_async();
+
+    // Sync render() shares params_buf_ / tri_buf_ / etc. — make sure those are
+    // sized + uploaded for the new scene. Reuse the existing render() upload
+    // path but skip the dispatch by allocating-and-writing only.
+    if (!params_buf_) {
+        wgpu::BufferDescriptor d{};
+        d.size  = sizeof(PathTracerParamsGpu);
+        d.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+        params_buf_ = ctx.device().CreateBuffer(&d);
+    }
+    const uint64_t tri_bytes = static_cast<uint64_t>(scene.triangles.size())
+                               * sizeof(float);
+    const uint64_t tri_alloc = std::max(tri_bytes, kMinStorageBytes);
+    if (tri_alloc > tri_buf_capacity_ || !tri_buf_) {
+        wgpu::BufferDescriptor d{};
+        d.size  = tri_alloc;
+        d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+        tri_buf_          = ctx.device().CreateBuffer(&d);
+        tri_buf_capacity_ = tri_alloc;
+    }
+    if (tri_bytes > 0) {
+        ctx.queue().WriteBuffer(tri_buf_, 0, scene.triangles.data(), tri_bytes);
+    }
+    const uint64_t pl_bytes = static_cast<uint64_t>(scene.point_lights.size())
+                              * sizeof(float);
+    const uint64_t pl_alloc = std::max(pl_bytes, kMinStorageBytes);
+    if (pl_alloc > point_lights_buf_capacity_ || !point_lights_buf_) {
+        wgpu::BufferDescriptor d{};
+        d.size  = pl_alloc;
+        d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+        point_lights_buf_          = ctx.device().CreateBuffer(&d);
+        point_lights_buf_capacity_ = pl_alloc;
+    }
+    if (pl_bytes > 0) {
+        ctx.queue().WriteBuffer(point_lights_buf_, 0,
+                                scene.point_lights.data(), pl_bytes);
+    }
+    const uint64_t bvh_bytes = static_cast<uint64_t>(scene.bvh_nodes.size())
+                               * sizeof(GpuBvhNode);
+    const uint64_t bvh_alloc = std::max(bvh_bytes, kMinStorageBytes);
+    if (bvh_alloc > bvh_buf_capacity_ || !bvh_buf_) {
+        wgpu::BufferDescriptor d{};
+        d.size  = bvh_alloc;
+        d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+        bvh_buf_          = ctx.device().CreateBuffer(&d);
+        bvh_buf_capacity_ = bvh_alloc;
+    }
+    if (bvh_bytes > 0) {
+        ctx.queue().WriteBuffer(bvh_buf_, 0, scene.bvh_nodes.data(), bvh_bytes);
+    }
+    last_scene_cache_id_ = scene.cache_id;
+
+    auto st = std::make_unique<AsyncState>();
+    st->ctx              = &ctx;
+    st->pipeline         = pipeline_;
+    st->layout           = layout_;
+    st->params_buf       = params_buf_;
+    st->tri_buf          = tri_buf_;
+    st->tri_buf_size     = tri_buf_capacity_;
+    st->point_lights_buf = point_lights_buf_;
+    st->point_lights_buf_size = point_lights_buf_capacity_;
+    st->bvh_buf          = bvh_buf_;
+    st->bvh_buf_size     = bvh_buf_capacity_;
+    st->base_params      = base_params;
+    st->width            = base_params.tile_w;
+    st->height           = base_params.tile_h;
+    st->accum_bytes      = uint64_t{st->width} * st->height * 4 * sizeof(float);
+
+    // Allocate session-owned buffers.
+    {
+        wgpu::BufferDescriptor d{};
+        d.size  = std::max<uint64_t>(st->accum_bytes, kMinStorageBytes);
+        d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc
+                | wgpu::BufferUsage::CopyDst;
+        st->accum_buf          = ctx.device().CreateBuffer(&d);
+        st->accum_buf_capacity = d.size;
+    }
+    {
+        wgpu::BufferDescriptor d{};
+        d.size  = std::max<uint64_t>(st->accum_bytes, kMinStorageBytes);
+        d.usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst;
+        st->stage_buf          = ctx.device().CreateBuffer(&d);
+        st->stage_buf_capacity = d.size;
+    }
+
+    // Zero the accumulator before the worker starts.
+    {
+        wgpu::CommandEncoder enc = ctx.device().CreateCommandEncoder();
+        enc.ClearBuffer(st->accum_buf, 0, st->accum_bytes);
+        wgpu::CommandBuffer cmd = enc.Finish();
+        ctx.queue().Submit(1, &cmd);
+    }
+
+    AsyncState* raw = st.get();
+    async_state_ = std::move(st);
+    async_state_->worker = std::thread([raw]() { raw->worker_loop(); });
+}
+
+void PathTracer::stop_async() {
+    if (!async_state_) return;
+    async_state_->stop_requested.store(true, std::memory_order_relaxed);
+    if (async_state_->worker.joinable()) {
+        async_state_->worker.join();
+    }
+    async_state_.reset();
+}
+
+bool PathTracer::is_async_running() const noexcept {
+    return async_state_ != nullptr;
+}
+
+uint32_t PathTracer::async_samples_completed() const noexcept {
+    if (!async_state_) return 0;
+    return async_state_->samples_completed.load(std::memory_order_acquire);
+}
+
+PathTracer::AsyncSnapshot PathTracer::poll_async() const {
+    AsyncSnapshot s{};
+    if (!async_state_) return s;
+    std::lock_guard<std::mutex> lk(async_state_->snapshot_mu);
+    s.samples = async_state_->snapshot_samples;
+    s.width   = async_state_->snapshot_w;
+    s.height  = async_state_->snapshot_h;
+    s.pixels  = async_state_->snapshot_pixels;
+    return s;
 }
 
 }  // namespace lucid::gpu

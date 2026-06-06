@@ -128,8 +128,14 @@ class RenderSession:
     def shutdown(self) -> None:
         """シャットダウン処理"""
         print(f"[RenderSession #{self._session_id}] Shutting down...")
-        
+
         if self._renderer is not None:
+            # Make sure the C++ async worker is joined before the renderer goes
+            # away — otherwise the worker can keep touching freed Dawn resources.
+            try:
+                self._renderer.render_stop_async()
+            except AttributeError:
+                pass  # Older build without async API
             self._renderer.cancel()
         
         if self._executor is not None:
@@ -297,9 +303,51 @@ class RenderSession:
         )
     
     # =========================================================================
+    # Async (GPU accumulator) API
+    # =========================================================================
+    #
+    # The C++ side owns a worker thread that fires 1-sample dispatches into an
+    # on-GPU accumulator. The viewport polls the worker's snapshot from
+    # view_draw and updates the texture. See cpp_renderer/include/gpu/path_tracer.hpp.
+
+    def start_render_async(self, width: int, height: int, max_depth: int) -> bool:
+        """Spawn the background path-trace worker. Stops any prior session
+        first. Returns True if the worker is now running."""
+        if not self.is_available:
+            return False
+        if not hasattr(self._renderer, 'render_start_async'):
+            return False
+        self._renderer.render_start_async(width, height, max_depth)
+        return self._renderer.is_render_async_running()
+
+    def poll_render_async(self):
+        """Return (samples_completed, pixels). samples=0 means no snapshot
+        yet — caller should keep its current texture."""
+        if not self.is_available:
+            return 0, []
+        if not hasattr(self._renderer, 'render_poll_async'):
+            return 0, []
+        return self._renderer.render_poll_async()
+
+    def stop_render_async(self) -> None:
+        """Stop the background worker. No-op if not running."""
+        if not self.is_available:
+            return
+        if not hasattr(self._renderer, 'render_stop_async'):
+            return
+        self._renderer.render_stop_async()
+
+    def is_render_async_running(self) -> bool:
+        if not self.is_available:
+            return False
+        if not hasattr(self._renderer, 'is_render_async_running'):
+            return False
+        return self._renderer.is_render_async_running()
+
+    # =========================================================================
     # アルゴリズム設定
     # =========================================================================
-    
+
     def set_algorithm(self, algorithm: str) -> None:
         """アルゴリズムを設定
         

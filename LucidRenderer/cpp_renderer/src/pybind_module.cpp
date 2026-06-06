@@ -129,6 +129,23 @@ PYBIND11_MODULE(lucidrenderer, m) {
              py::arg("max_depth") = 8,
              "GPU path tracer (Phase 2a: BSDF-sampling only, no NEE/MIS, diffuse + emissive). "
              "Falls back to CPU on init failure, dispatch exception, or triangle_count > 5000.")
+
+        // -- Async accumulator API for the Blender viewport ----------------
+        .def("render_start_async", &PyRenderer::render_start_async,
+             py::call_guard<py::gil_scoped_release>(),
+             py::arg("width"), py::arg("height"), py::arg("max_depth") = 8,
+             "Start a background path-trace session that keeps adding 1-sample "
+             "dispatches to an on-GPU accumulator. Stops any prior session first.")
+        .def("render_poll_async", &PyRenderer::render_poll_async,
+             py::call_guard<py::gil_scoped_release>(),
+             "Return (samples_completed, pixels). pixels is RGBA flat (Y-flipped, "
+             "alpha=1.0, averaged over `samples`). samples==0 means no snapshot yet.")
+        .def("render_stop_async", &PyRenderer::render_stop_async,
+             py::call_guard<py::gil_scoped_release>(),
+             "Stop the background path-trace session. No-op if not running.")
+        .def("is_render_async_running", &PyRenderer::is_render_async_running,
+             py::call_guard<py::gil_scoped_release>(),
+             "True iff a background session is currently producing samples.")
         
         // =====================================================================
         // NumPy 配列を直接返すバージョン（オプション）

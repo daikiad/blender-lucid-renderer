@@ -893,8 +893,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         radiance_sum = radiance_sum + radiance;
     }
 
-    // Y-flip on store — same convention as debug_normal.wgsl.
+    // Y-flip on store — same convention as debug_normal.wgsl. Additive so the
+    // same shader serves both the sync single-dispatch model (caller clears
+    // out_pixels before submitting) and the async accumulator model (caller
+    // clears once, then submits many 1-sample dispatches in a worker thread).
+    // The .w channel carries the running sample count contributed by this
+    // pixel, used to normalise on readback in the async path. The sync path
+    // ignores .w and rewrites it to 1.0 on the CPU side ([pybind_renderer.hpp]).
     let out_y = params.tile_h - 1u - gid.y;
     let idx   = out_y * params.tile_w + gid.x;
-    out_pixels[idx] = vec4<f32>(radiance_sum, 1.0);
+    let prev  = out_pixels[idx];
+    out_pixels[idx] = vec4<f32>(prev.xyz + radiance_sum, prev.w + f32(params.samples));
 }
