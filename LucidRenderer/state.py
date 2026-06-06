@@ -173,9 +173,13 @@ class ViewportState:
     # last_async_w/h: resolution the worker is currently producing; if the
     # viewport resolution changes we have to stop+restart the session.
     # last_async_scene_hash: detect content changes that need a fresh session.
+    # async_target_reached: once the snapshot hits viewport_samples we stop
+    # the worker; without this flag the next view_draw would observe
+    # is_render_async_running() == False and immediately restart it.
     last_async_w: int = 0
     last_async_h: int = 0
     last_async_scene_hash: Optional[str] = None
+    async_target_reached: bool = False
     
     def reset_for_scene_change(self) -> None:
         """シーン変更時のリセット（後方互換用、非推奨）"""

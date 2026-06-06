@@ -224,6 +224,7 @@ class ViewportRenderer:
                       or backend_changed or debug_mode_changed)
         if any_change:
             state.last_change_time = current_time
+            state.async_target_reached = False
 
         time_since_change = current_time - state.last_change_time
         if any_change or time_since_change < RENDER_CONSTANTS.EDITING_TIMEOUT:
@@ -238,8 +239,13 @@ class ViewportRenderer:
 
         resolution_changed = (state.last_async_w != render_w
                               or state.last_async_h != render_h)
+        # Don't auto-restart after we've already hit the user's sample target —
+        # the worker was stopped on purpose; restarting would burn power
+        # forever on already-converged pixels.
+        worker_idle_unexpectedly = (not session.is_render_async_running()
+                                    and not state.async_target_reached)
         needs_restart = (any_change or resolution_changed
-                         or not session.is_render_async_running())
+                         or worker_idle_unexpectedly)
 
         if needs_restart:
             # The worker holds Dawn resources; stop before we tear scene state.
@@ -269,14 +275,12 @@ class ViewportRenderer:
                 except Exception as e:
                     print(f"[ViewportRenderer] set_camera failed: {e}")
 
-            # Drop the old texture; the next snapshot will repaint at the new
-            # resolution. Skipping this would draw stretched stale pixels.
-            if (resolution_changed and state.texture is not None):
-                try:
-                    del state.texture
-                except Exception:
-                    pass
-                state.texture = None
+            # Keep the old texture across resolution changes — `draw_texture_2d`
+            # stretches it to viewport size, which looks pixelated for a frame
+            # but avoids the gray placeholder flashing every time EDITING flips
+            # to FINAL and bumps the render resolution. The next snapshot at
+            # the new resolution will overwrite it.
+            if resolution_changed:
                 state.accumulated_samples = {}
 
             try:
@@ -318,13 +322,22 @@ class ViewportRenderer:
             state.texture_width  = render_w
             state.texture_height = render_h
 
-        # Keep polling until the user-configured target is reached.
+        # User-configured cap (defaults to 64). Once the worker has caught up
+        # to the target we stop it so the GPU goes idle — saves power and
+        # avoids burning compute on already-converged pixels.
         try:
             target_samples = lucid.viewport_samples
         except Exception:
             target_samples = 64
 
-        if samples < target_samples or session.is_render_async_running():
+        if samples >= target_samples and session.is_render_async_running():
+            try:
+                session.stop_render_async()
+                state.async_target_reached = True
+            except Exception as e:
+                print(f"[ViewportRenderer] stop at target failed: {e}")
+
+        if samples < target_samples and session.is_render_async_running():
             for area in context.screen.areas:
                 if area.type == 'VIEW_3D':
                     area.tag_redraw()

@@ -100,7 +100,26 @@ std::optional<DawnContext> DawnContext::create() {
     }
 
     // ---- 3. Device ----
+    // Bump storage-buffer / overall buffer limits to the adapter's hardware
+    // ceiling. The defaults are 128 MB / 256 MB, which is fine for tiny tile
+    // renders but blows up the async accumulator at Retina viewport sizes:
+    // a 4K-class accumulator is 1920×1080 × 16 B × (Retina 2x scale)² ≈ 130 MB
+    // per binding, and we have an accumulator + a stage buffer, so we hit
+    // the default limit immediately. Apple Metal exposes 4 GB ceilings, so
+    // just take whatever the adapter actually supports.
+    wgpu::Limits supported_limits{};
+    if (adapter.GetLimits(&supported_limits) != wgpu::Status::Success) {
+        // Defensive fallback: a 1 GB ceiling covers any reasonable viewport.
+        supported_limits.maxStorageBufferBindingSize = 1u << 30;
+        supported_limits.maxBufferSize               = 1ull << 30;
+    }
+
+    wgpu::Limits required_limits{};
+    required_limits.maxStorageBufferBindingSize = supported_limits.maxStorageBufferBindingSize;
+    required_limits.maxBufferSize               = supported_limits.maxBufferSize;
+
     wgpu::DeviceDescriptor dev_desc{};
+    dev_desc.requiredLimits = &required_limits;
     dev_desc.SetUncapturedErrorCallback(on_uncaptured_error);
 
     wgpu::Device device;

@@ -164,7 +164,7 @@ class LucidRendererSettings(bpy.types.PropertyGroup):
     viewport_scale_final: bpy.props.IntProperty(
         name="Final Scale",
         description="Resolution divisor for final preview (lower = higher quality)",
-        default=2,
+        default=1,
         min=1,
         max=8
     )
