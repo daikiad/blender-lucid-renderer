@@ -19,13 +19,22 @@
 #include <iostream>
 #include <stdexcept>
 
-// Forward decls — implementations live in src/node_evaluator.cpp. We mirror the
-// CPU `getEmission()` / albedo handling so Blender materials using an Emission
-// node (typical Cornell box ceiling) actually emit on the GPU side too.
+// Forward decls — implementations live in src/node_evaluator.cpp. Mirror the
+// CPU `getMaterialParams()` semantics so all six material sockets are
+// constant-folded at uv=(0,0). UV-driven node-tree eval (procedural textures)
+// remains out of scope on GPU; matches Phase 2a's albedo+emission pattern.
 extern render::AttenuationRGB getAlbedoFromNodeTree(const NodeTree& tree,
                                                     const render::Vec2f& uv);
 extern render::RGB3f          getEmissionFromNodeTree(const NodeTree& tree,
                                                        const render::Vec2f& uv);
+extern float                  getMetallicFromNodeTree(const NodeTree& tree,
+                                                       const render::Vec2f& uv);
+extern float                  getRoughnessFromNodeTree(const NodeTree& tree,
+                                                        const render::Vec2f& uv);
+extern float                  getTransmissionFromNodeTree(const NodeTree& tree,
+                                                           const render::Vec2f& uv);
+extern float                  getIORFromNodeTree(const NodeTree& tree,
+                                                  const render::Vec2f& uv);
 
 namespace lucid::gpu {
 
@@ -159,58 +168,87 @@ PackedPathScene pack_scene_for_path_tracer(const Scene& scene) {
         total += static_cast<uint32_t>(m.triangles.size());
     }
     out.triangle_count = total;
-    out.triangles.reserve(static_cast<size_t>(total) * 32);
+    out.triangles.reserve(static_cast<size_t>(total) * 40);
 
     // ---- Point lights (NEE) ----
-    // Pack only LightType::POINT into a flat buffer of 8 floats per light:
-    //   pos.xyz, _pad, color.xyz, intensity
-    // intensity = Blender Light.energy (W). color comes from light.emission per
-    // channel (un-normalized; shader divides by d² and multiplies by intensity).
+    // Pack each POINT light as 12 floats / 48 B (std430):
+    //   pos.xyz,      radius      (vec4)
+    //   emission.xyz, area        (vec4)
+    //   _pad, _pad, _pad, _pad    (vec4, reserved for future light_kind)
+    //
+    // emission is already premultiplied on the CPU side ([pybind_renderer.hpp:1278-1296]):
+    //   radius > 0 (sphere): color * energy / (π * area)   — Lambertian sphere radiance
+    //   radius = 0 (delta):  color * energy / (4π)         — point intensity I [W/sr]
+    // The shader does NOT need raw `energy`; it branches on radius and applies
+    // the correct measure-conversion (sphere area-pdf vs delta 1/d²).
     for (const auto& light : scene.nativeLights) {
         if (light.type != LightType::POINT) continue;
         const auto p = position_to_vec3(light.position);
+        const float radius = light.radius.numerical_value_in(mp_units::si::metre);
+        const float area   = light.area.numerical_value_in(
+            mp_units::square(mp_units::si::metre));
         out.point_lights.push_back(p.x);
         out.point_lights.push_back(p.y);
         out.point_lights.push_back(p.z);
-        out.point_lights.push_back(0.0f);
+        out.point_lights.push_back(radius);
         const float er = light.emission.r.numerical_value_in(render::radiance_unit);
         const float eg = light.emission.g.numerical_value_in(render::radiance_unit);
         const float eb = light.emission.b.numerical_value_in(render::radiance_unit);
-        const float energy = light.energy.numerical_value_in(mp_units::si::watt);
         out.point_lights.push_back(er);
         out.point_lights.push_back(eg);
         out.point_lights.push_back(eb);
-        out.point_lights.push_back(energy);
+        out.point_lights.push_back(area);
+        out.point_lights.push_back(0.0f);
+        out.point_lights.push_back(0.0f);
+        out.point_lights.push_back(0.0f);
+        out.point_lights.push_back(0.0f);
         ++out.point_light_count;
     }
 
     // Pack into a temp buffer first; BVH build below picks an ordering and we
     // then copy into out.triangles in that order.
-    std::vector<float>   tmp_triangles;       // 32 floats per tri (unordered)
+    std::vector<float>   tmp_triangles;       // 40 floats per tri (unordered)
     std::vector<TriAabb> tri_aabbs;
-    tmp_triangles.reserve(static_cast<size_t>(total) * 32);
+    tmp_triangles.reserve(static_cast<size_t>(total) * 40);
     tri_aabbs.reserve(total);
 
+    // Mirrors CPU `bsdf::MIN_ROUGHNESS` ([bsdf/ggx.hpp:24]). Clamped at pack
+    // time so the shader can assume `roughness >= MIN_ROUGHNESS` everywhere.
+    constexpr float kMinRoughness = 0.01f;
+
     for (const auto& mesh : scene.meshes) {
-        // Evaluate albedo + emission once per mesh. If the material uses a node
-        // tree (Blender's typical Cornell-box "Emission" node setup), evaluate
-        // it at uv=(0,0) to get a flat constant. CPU `getMaterialParams()` /
-        // `getEmission()` do the same. Phase 2a doesn't support per-fragment
-        // UV-driven textures, just per-mesh constants from the node graph.
+        // Evaluate all six Principled BSDF sockets once per mesh, mirroring
+        // CPU `getMaterialParams()` ([integrator/path_tracer.hpp:43-63]) but
+        // at uv=(0,0). Per-fragment UV-driven node-tree evaluation (procedural
+        // textures) is out of scope; the same uv=(0,0) contract already used
+        // for albedo+emission in Phase 2a is extended to the other four.
         render::AttenuationRGB albedo;
         render::RGB3f          emission_rgb;
+        float                  metallic;
+        float                  roughness;
+        float                  transmission;
+        float                  ior;
         const bool use_nodes = mesh.material.useNodes && mesh.material.nodeTree.valid;
         if (use_nodes) {
-            albedo       = getAlbedoFromNodeTree(mesh.material.nodeTree,
-                                                  render::Vec2f{0.0f, 0.0f});
-            emission_rgb = getEmissionFromNodeTree(mesh.material.nodeTree,
-                                                    render::Vec2f{0.0f, 0.0f});
+            const render::Vec2f uv{0.0f, 0.0f};
+            albedo       = getAlbedoFromNodeTree(mesh.material.nodeTree, uv);
+            emission_rgb = getEmissionFromNodeTree(mesh.material.nodeTree, uv);
+            metallic     = getMetallicFromNodeTree(mesh.material.nodeTree, uv);
+            roughness    = getRoughnessFromNodeTree(mesh.material.nodeTree, uv);
+            transmission = getTransmissionFromNodeTree(mesh.material.nodeTree, uv);
+            ior          = getIORFromNodeTree(mesh.material.nodeTree, uv);
         } else {
             albedo = mesh.material.albedo;
             emission_rgb.r = mesh.material.emission.r.numerical_value_in(render::radiance_unit);
             emission_rgb.g = mesh.material.emission.g.numerical_value_in(render::radiance_unit);
             emission_rgb.b = mesh.material.emission.b.numerical_value_in(render::radiance_unit);
+            metallic     = mesh.material.metallic;
+            roughness    = mesh.material.roughness;
+            transmission = mesh.material.transmission;
+            ior          = mesh.material.ior;
         }
+        roughness = std::max(roughness, kMinRoughness);
+
         const float albedo_r   = albedo.r;
         const float albedo_g   = albedo.g;
         const float albedo_b   = albedo.b;
@@ -232,13 +270,25 @@ PackedPathScene pack_scene_for_path_tracer(const Scene& scene) {
             pack_vec3(tmp_triangles, tri.n1.vec(), 0.0f);
             pack_vec3(tmp_triangles, tri.n2.vec(), smooth_flag);
 
+            // Material packed into 3 vec4s + 1 reserved vec4 (12+4 = 16 floats).
+            // Layout: (albedo.rgb, metallic), (emission.rgb, roughness),
+            //         (transmission, ior, _, _), (_, _, _, _ reserved).
             tmp_triangles.push_back(albedo_r);
             tmp_triangles.push_back(albedo_g);
             tmp_triangles.push_back(albedo_b);
-            tmp_triangles.push_back(0.0f);
+            tmp_triangles.push_back(metallic);
             tmp_triangles.push_back(emission_r);
             tmp_triangles.push_back(emission_g);
             tmp_triangles.push_back(emission_b);
+            tmp_triangles.push_back(roughness);
+            tmp_triangles.push_back(transmission);
+            tmp_triangles.push_back(ior);
+            tmp_triangles.push_back(0.0f);
+            tmp_triangles.push_back(0.0f);
+            // Reserved vec4 (e.g. future per-fragment UV data, normal-map tangent).
+            tmp_triangles.push_back(0.0f);
+            tmp_triangles.push_back(0.0f);
+            tmp_triangles.push_back(0.0f);
             tmp_triangles.push_back(0.0f);
 
             TriAabb a;
@@ -263,9 +313,9 @@ PackedPathScene pack_scene_for_path_tracer(const Scene& scene) {
     out.triangles.resize(tmp_triangles.size());
     for (size_t new_idx = 0; new_idx < tri_order.size(); ++new_idx) {
         const size_t old_idx = static_cast<size_t>(tri_order[new_idx]);
-        std::memcpy(&out.triangles[new_idx * 32],
-                    &tmp_triangles[old_idx * 32],
-                    32 * sizeof(float));
+        std::memcpy(&out.triangles[new_idx * 40],
+                    &tmp_triangles[old_idx * 40],
+                    40 * sizeof(float));
     }
     return out;
 }

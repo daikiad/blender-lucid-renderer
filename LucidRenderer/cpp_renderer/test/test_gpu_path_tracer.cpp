@@ -67,6 +67,35 @@ Mesh make_emissive_z_triangle(float emission_r, float emission_g, float emission
     return m;
 }
 
+// Helper: a +Z quad at z = z_plane with given Principled material params,
+// large enough to cover the center pixel of a default 32x32 render.
+Mesh make_principled_quad(float z_plane,
+                          float albedo_r, float albedo_g, float albedo_b,
+                          float metallic, float roughness,
+                          float transmission, float ior) {
+    Mesh m;
+    m.vertices = {
+        render::make_position(-1.5f, -1.5f, z_plane),
+        render::make_position(+1.5f, -1.5f, z_plane),
+        render::make_position(+1.5f, +1.5f, z_plane),
+        render::make_position(-1.5f, +1.5f, z_plane),
+    };
+    const auto n = render::normal_from_unit_vector({0.0f, 0.0f, 1.0f});
+    Triangle t1, t2;
+    t1.i0 = 0; t1.i1 = 1; t1.i2 = 2;
+    t2.i0 = 0; t2.i1 = 2; t2.i2 = 3;
+    t1.faceNormal = n; t1.n0 = n; t1.n1 = n; t1.n2 = n; t1.smooth = false; t1.hasUV = false;
+    t2.faceNormal = n; t2.n0 = n; t2.n1 = n; t2.n2 = n; t2.smooth = false; t2.hasUV = false;
+    m.triangles = {t1, t2};
+    m.material.albedo       = render::make_attenuation_rgb(albedo_r, albedo_g, albedo_b);
+    m.material.emission     = render::make_radiance_rgb(0.0f, 0.0f, 0.0f);
+    m.material.metallic     = metallic;
+    m.material.roughness    = roughness;
+    m.material.transmission = transmission;
+    m.material.ior          = ior;
+    return m;
+}
+
 }  // namespace
 
 TEST(PathTracerTest, EmptyScene_EnvOnly) {
@@ -107,7 +136,7 @@ TEST(PathTracerTest, SingleEmissiveTriangle) {
     scene.meshes.push_back(make_emissive_z_triangle(2.0f, 0.0f, 0.0f));
     auto packed = pack_scene_for_path_tracer(scene);
     ASSERT_EQ(packed.triangle_count, 1u);
-    ASSERT_EQ(packed.triangles.size(), 32u);
+    ASSERT_EQ(packed.triangles.size(), 40u);
 
     const uint32_t W = 32, H = 32;
     const uint32_t samples = 4;
@@ -151,6 +180,165 @@ TEST(PathTracerTest, SingleEmissiveTriangle_NoNaN) {
         EXPECT_TRUE(std::isfinite(out[i])) << "non-finite at index " << i;
         EXPECT_GE(out[i], 0.0f) << "negative value at index " << i;
     }
+}
+
+// ============================================================================
+// Material parity tests — Phase 2-Mat (Principled BSDF + correct POINT lights)
+// ============================================================================
+
+TEST(PathTracerTest, MaterialParity_TriangleStride) {
+    // Stride bump 32 → 40 floats per tri must be reflected in the packed
+    // buffer; 1 triangle should occupy exactly 40 floats.
+    Scene scene;
+    scene.meshes.push_back(make_emissive_z_triangle(1.0f, 0.0f, 0.0f));
+    auto packed = pack_scene_for_path_tracer(scene);
+    ASSERT_EQ(packed.triangle_count, 1u);
+    EXPECT_EQ(packed.triangles.size(), 40u);
+}
+
+TEST(PathTracerTest, MaterialParity_PointLightStride) {
+    // Each POINT light occupies 12 floats (3 vec4s: pos/radius, emission/area,
+    // reserved).
+    Scene scene;
+    Light l;
+    l.type = LightType::POINT;
+    l.position = render::make_position(0.0f, 1.0f, 0.0f);
+    l.emission = render::make_radiance_rgb(1.0f, 1.0f, 1.0f);
+    l.energy   = 5.0f * mp_units::si::watt;
+    l.radius   = 0.0f * mp_units::si::metre;
+    l.area     = 1.0f * mp_units::square(mp_units::si::metre);
+    scene.nativeLights.push_back(l);
+    auto packed = pack_scene_for_path_tracer(scene);
+    ASSERT_EQ(packed.point_light_count, 1u);
+    EXPECT_EQ(packed.point_lights.size(), 12u);
+}
+
+TEST(PathTracerTest, MaterialParity_GlassNoNaN) {
+    auto ctx = DawnContext::create();
+    ASSERT_TRUE(ctx.has_value());
+    auto pt = PathTracer::create(*ctx);
+    ASSERT_TRUE(pt.has_value());
+
+    // Glass quad in front of an emissive triangle.
+    Scene scene;
+    scene.meshes.push_back(make_principled_quad(
+        /*z=*/-1.5f,
+        /*albedo=*/0.9f, 0.9f, 0.9f,
+        /*metallic=*/0.0f, /*roughness=*/0.05f,
+        /*transmission=*/1.0f, /*ior=*/1.45f));
+    scene.meshes.push_back(make_emissive_z_triangle(2.0f, 2.0f, 2.0f));
+    auto packed = pack_scene_for_path_tracer(scene);
+
+    const uint32_t W = 32, H = 32;
+    auto params = default_camera_params(W, H,
+                                        /*samples=*/16, /*offset=*/0, /*max_bounces=*/8);
+    params.bvh_node_count = packed.bvh_node_count;
+    auto out = pt->render(*ctx, packed, params);
+    ASSERT_EQ(out.size(), static_cast<size_t>(W) * H * 4);
+
+    for (size_t i = 0; i < out.size(); ++i) {
+        EXPECT_TRUE(std::isfinite(out[i])) << "non-finite at " << i;
+        EXPECT_GE(out[i], 0.0f) << "negative at " << i;
+    }
+}
+
+TEST(PathTracerTest, MaterialParity_MetallicNoNaN) {
+    auto ctx = DawnContext::create();
+    ASSERT_TRUE(ctx.has_value());
+    auto pt = PathTracer::create(*ctx);
+    ASSERT_TRUE(pt.has_value());
+
+    // Gold-like metallic quad lit by an emissive triangle behind the camera.
+    Scene scene;
+    scene.meshes.push_back(make_principled_quad(
+        /*z=*/-1.5f,
+        /*albedo=*/0.95f, 0.78f, 0.5f,
+        /*metallic=*/1.0f, /*roughness=*/0.1f,
+        /*transmission=*/0.0f, /*ior=*/1.45f));
+    scene.meshes.push_back(make_emissive_z_triangle(3.0f, 3.0f, 3.0f));
+    auto packed = pack_scene_for_path_tracer(scene);
+
+    const uint32_t W = 32, H = 32;
+    auto params = default_camera_params(W, H,
+                                        /*samples=*/16, /*offset=*/0, /*max_bounces=*/8);
+    params.bvh_node_count = packed.bvh_node_count;
+    auto out = pt->render(*ctx, packed, params);
+    ASSERT_EQ(out.size(), static_cast<size_t>(W) * H * 4);
+
+    for (size_t i = 0; i < out.size(); ++i) {
+        EXPECT_TRUE(std::isfinite(out[i])) << "non-finite at " << i;
+        EXPECT_GE(out[i], 0.0f) << "negative at " << i;
+    }
+}
+
+TEST(PathTracerTest, MaterialParity_PointLightFluxConservation) {
+    // Lambert quad at z=-1 lit by a delta POINT light directly above it (1m
+    // away). Camera at z=5 looks along -Z; the center pixel ray hits the quad
+    // at (0,0,-1).
+    //
+    // Per-sample contribution (Lambert, normal incidence):
+    //   f       = albedo · (1 - F_dielectric(1, 0.04)) / π
+    //           ≈ 0.7 · 0.96 / π  ≈ 0.214
+    //   L       = light.emission / d²
+    //           = (energy / 4π) / 1.0  ≈ 0.796
+    //   cos_θ   = 1
+    //   per_sample = f · L · cos_θ  ≈ 0.170
+    //   sum     = per_sample · samples = 0.170 · 64 ≈ 10.9
+    //
+    // The shader still adds a tiny GGX specular contribution on top (roughness=1
+    // gives a wide, near-uniform lobe at F0=0.04) so the actual value lands a
+    // few % above this floor. Tolerance is wide enough to absorb MC noise at
+    // samples=64.
+    auto ctx = DawnContext::create();
+    ASSERT_TRUE(ctx.has_value());
+    auto pt = PathTracer::create(*ctx);
+    ASSERT_TRUE(pt.has_value());
+
+    Scene scene;
+    scene.meshes.push_back(make_principled_quad(
+        /*z=*/-1.0f,
+        /*albedo=*/0.7f, 0.7f, 0.7f,
+        /*metallic=*/0.0f, /*roughness=*/1.0f,
+        /*transmission=*/0.0f, /*ior=*/1.45f));
+    Light l;
+    l.type = LightType::POINT;
+    // 1m directly above the quad center along +Z (between camera and quad).
+    l.position = render::make_position(0.0f, 0.0f, 0.0f);
+    // CPU-side premultiplication: emission = color * energy / (4π).
+    const float energy = 10.0f;
+    const float intensity_per_ch = 1.0f * energy / (4.0f * kPi);   // ≈ 0.796
+    l.emission = render::make_radiance_rgb(intensity_per_ch,
+                                            intensity_per_ch,
+                                            intensity_per_ch);
+    l.energy   = energy * mp_units::si::watt;
+    l.radius   = 0.0f * mp_units::si::metre;
+    l.area     = 1.0f * mp_units::square(mp_units::si::metre);
+    scene.nativeLights.push_back(l);
+    auto packed = pack_scene_for_path_tracer(scene);
+
+    const uint32_t W = 32, H = 32;
+    const uint32_t samples = 64;
+    auto params = default_camera_params(W, H, samples, /*offset=*/0, /*max_bounces=*/3);
+    params.bvh_node_count    = packed.bvh_node_count;
+    params.point_light_count = packed.point_light_count;
+    auto out = pt->render(*ctx, packed, params);
+    ASSERT_EQ(out.size(), static_cast<size_t>(W) * H * 4);
+
+    const uint32_t cx = W / 2;
+    const uint32_t cy = H / 2;
+    const size_t   idx = (cy * W + cx) * 4;
+    const float    r = out[idx + 0];
+    EXPECT_TRUE(std::isfinite(r));
+    EXPECT_GT(r, 0.0f);
+    // Closed-form expectation with full BSDF eval (Lambert · (1-F_dielectric)).
+    const float albedo   = 0.7f;
+    const float F0       = 0.04f;
+    const float f_lambert= albedo * (1.0f - F0) / kPi;            // ≈ 0.214
+    const float d2       = 1.0f;
+    const float expected_sum = f_lambert * intensity_per_ch * static_cast<float>(samples) / d2;
+    // ±50% envelope absorbs MC noise + small GGX specular contribution.
+    EXPECT_GT(r, expected_sum * 0.5f) << "GPU POINT light contribution looks too dim";
+    EXPECT_LT(r, expected_sum * 1.5f) << "GPU POINT light contribution looks too bright";
 }
 
 #else  // LUCID_HAS_DAWN

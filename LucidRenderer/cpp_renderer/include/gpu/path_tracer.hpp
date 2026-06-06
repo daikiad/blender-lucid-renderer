@@ -35,22 +35,27 @@ class DawnContext;
 // ----------------------------------------------------------------------------
 // PackedPathScene - flat triangle buffer with per-triangle material
 // ----------------------------------------------------------------------------
-// Layout per triangle (32 floats / 128 bytes, std430-aligned):
-//   v0.xyz, _pad         (vec4)
-//   v1.xyz, _pad         (vec4)
-//   v2.xyz, _pad         (vec4)
-//   n0.xyz, _pad         (vec4)
-//   n1.xyz, _pad         (vec4)
-//   n2.xyz, smooth_flag  (vec4)   // 1.0 if smooth normals, else 0.0
-//   albedo.rgb,   _pad   (vec4)
-//   emission.rgb, _pad   (vec4)
-// `triangles.size() == triangle_count * 32`.
+// Layout per triangle (40 floats / 160 bytes, std430-aligned):
+//   v0.xyz, _pad                (vec4)
+//   v1.xyz, _pad                (vec4)
+//   v2.xyz, _pad                (vec4)
+//   n0.xyz, _pad                (vec4)
+//   n1.xyz, _pad                (vec4)
+//   n2.xyz, smooth_flag         (vec4)   // 1.0 if smooth normals, else 0.0
+//   albedo.rgb,    metallic     (vec4)
+//   emission.rgb,  roughness    (vec4)   // roughness clamped to MIN_ROUGHNESS
+//   transmission, ior, _, _     (vec4)
+//   _pad, _pad, _pad, _pad      (vec4)   // reserved (future per-fragment UV)
+// `triangles.size() == triangle_count * 40`.
 //
 // Environment color / strength live in PathTracerParamsGpu, not here.
 //
-// `point_lights` is 8 floats per light (std430 alignment):
-//   pos.xyz,   _pad      (vec4)
-//   color.xyz, intensity (vec4)   // intensity ≈ Blender Light.energy in W
+// `point_lights` is 12 floats per light (std430 alignment):
+//   pos.xyz,      radius        (vec4)
+//   emission.xyz, area          (vec4)   // emission already premultiplied on
+//                                        // C++ side: radius>0 ⇒ color*energy/(π·area),
+//                                        // radius=0 ⇒ color*energy/(4π).
+//   _pad, _pad, _pad, _pad      (vec4)   // reserved (future light_kind)
 //
 // BVH (Phase 1c): single global BVH over the flat triangle list. Each node is
 // 32 bytes / 2 vec4s (std430). The convention mirrors the CPU BVH: `triCount > 0`
