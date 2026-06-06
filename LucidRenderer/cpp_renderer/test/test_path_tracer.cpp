@@ -67,8 +67,8 @@ protected:
                 case 1: radiance = traceNEE(scene, *lights, ray, kMaxDepth); break;
                 case 2: radiance = traceMIS(scene, *lights, ray, kMaxDepth); break;
             }
-            // Convert to color for luminance calculation
-            render::AttenuationRGB sample = render::apply_camera_sensitivity(radiance, render::kDefaultCameraSensitivity);
+            // Convert to pixel value for luminance calculation
+            render::PixelRGB sample = render::apply_camera_sensitivity(radiance, render::kDefaultCameraSensitivity);
             // Luminance
             auto [sr, sg, sb] = render::color_to_floats(sample);
             float lum = sr * 0.2126f + sg * 0.7152f + sb * 0.0722f;
@@ -96,7 +96,7 @@ protected:
     }
     
     // Legacy helpers for simple tests (uses default camera sensitivity)
-    render::AttenuationRGB renderPixelSimple(const Scene& scene, const Ray& ray, int samples) {
+    render::PixelRGB renderPixelSimple(const Scene& scene, const Ray& ray, int samples) {
         render::RadianceRGB result = render::zero_radiance_rgb();
         for (int i = 0; i < samples; ++i) {
             render::RadianceRGB sample = traceSimple(scene, ray, kMaxDepth);
@@ -106,7 +106,7 @@ protected:
         return render::apply_camera_sensitivity(result, render::kDefaultCameraSensitivity) / static_cast<float>(samples);
     }
     
-    render::AttenuationRGB renderPixelNEE(const Scene& scene, const SceneLights& lights, const Ray& ray, int samples) {
+    render::PixelRGB renderPixelNEE(const Scene& scene, const SceneLights& lights, const Ray& ray, int samples) {
         render::RadianceRGB result = render::zero_radiance_rgb();
         for (int i = 0; i < samples; ++i) {
             render::RadianceRGB sample = traceNEE(scene, lights, ray, kMaxDepth);
@@ -115,7 +115,7 @@ protected:
         return render::apply_camera_sensitivity(result, render::kDefaultCameraSensitivity) / static_cast<float>(samples);
     }
     
-    render::AttenuationRGB renderPixelMIS(const Scene& scene, const SceneLights& lights, const Ray& ray, int samples) {
+    render::PixelRGB renderPixelMIS(const Scene& scene, const SceneLights& lights, const Ray& ray, int samples) {
         render::RadianceRGB result = render::zero_radiance_rgb();
         for (int i = 0; i < samples; ++i) {
             render::RadianceRGB sample = traceMIS(scene, lights, ray, kMaxDepth);
@@ -140,14 +140,15 @@ TEST_F(PathTracerTest, EmptySceneReturnsEnvironment) {
     Ray ray(render::make_position(0.0f, 0.0f, 0.0f),
             render::direction_from_unit_vector(render::Vec3f(0.0f, 0.0f, -1.0f)));
     
-    render::AttenuationRGB resultSimple = render::apply_camera_sensitivity(traceSimple(scene, ray, kMaxDepth), render::kDefaultCameraSensitivity);
-    render::AttenuationRGB resultNEE = render::apply_camera_sensitivity(traceNEE(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
-    render::AttenuationRGB resultMIS = render::apply_camera_sensitivity(traceMIS(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+    render::PixelRGB resultSimple = render::apply_camera_sensitivity(traceSimple(scene, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+    render::PixelRGB resultNEE = render::apply_camera_sensitivity(traceNEE(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+    render::PixelRGB resultMIS = render::apply_camera_sensitivity(traceMIS(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
     
-    // All should return environment color
-    EXPECT_TRUE(attenuationApproxEqual(resultSimple, scene.environment.color, 0.01f));
-    EXPECT_TRUE(attenuationApproxEqual(resultNEE, scene.environment.color, 0.01f));
-    EXPECT_TRUE(attenuationApproxEqual(resultMIS, scene.environment.color, 0.01f));
+    // All should return environment color (compare raw RGB3f triples since types differ)
+    auto envRgb = render::to_rgb3f(scene.environment.color);
+    EXPECT_TRUE(rgb3fApproxEqual(render::to_rgb3f(resultSimple), envRgb, 0.01f));
+    EXPECT_TRUE(rgb3fApproxEqual(render::to_rgb3f(resultNEE),    envRgb, 0.01f));
+    EXPECT_TRUE(rgb3fApproxEqual(render::to_rgb3f(resultMIS),    envRgb, 0.01f));
 }
 
 TEST_F(PathTracerTest, DirectLightHit) {
@@ -175,9 +176,9 @@ TEST_F(PathTracerTest, DirectLightHit) {
     Ray ray(render::make_position(0.0f, 0.5f, 0.0f),
             render::direction_from_unit_vector(render::Vec3f(0.0f, 0.0f, -1.0f)));
     
-    render::RGB3f resultSimple = render::apply_camera_sensitivity(traceSimple(scene, ray, kMaxDepth), render::kDefaultCameraSensitivity);
-    render::RGB3f resultNEE = render::apply_camera_sensitivity(traceNEE(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
-    render::RGB3f resultMIS = render::apply_camera_sensitivity(traceMIS(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+    render::PixelRGB resultSimple = render::apply_camera_sensitivity(traceSimple(scene, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+    render::PixelRGB resultNEE = render::apply_camera_sensitivity(traceNEE(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+    render::PixelRGB resultMIS = render::apply_camera_sensitivity(traceMIS(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
     
     // All should see the emissive surface
     EXPECT_GT(resultSimple.r, 1.0f);
@@ -298,11 +299,11 @@ TEST_F(PathTracerTest, OutputIsNonNegative) {
         Ray ray(render::make_position(0.0f, 1.0f, 0.5f),
                 render::direction_from_unit_vector(dir));
         
-        render::RGB3f result = render::apply_camera_sensitivity(traceMIS(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
-        
+        render::PixelRGB result = render::apply_camera_sensitivity(traceMIS(scene, lights, ray, kMaxDepth), render::kDefaultCameraSensitivity);
+
         // Use is_valid for NaN/Inf checking
-        EXPECT_TRUE(render::is_valid(result)) << "Invalid color at sample " << i;
-        
+        EXPECT_TRUE(render::throughput_is_valid(result)) << "Invalid color at sample " << i;
+
         auto [rr, rg, rb] = render::to_floats(result);
         EXPECT_GE(rr, 0.0f) << "Negative red at sample " << i;
         EXPECT_GE(rg, 0.0f) << "Negative green at sample " << i;
@@ -351,7 +352,7 @@ TEST_F(PathTracerTest, WhiteFurnaceTest) {
             render::direction_from_unit_vector(render::Vec3f(0.0f, 0.0f, -1.0f)));
     
     // Need many samples for white furnace convergence
-    render::RGB3f result = renderPixelMIS(scene, lights, ray, 256);
+    render::PixelRGB result = renderPixelMIS(scene, lights, ray, 256);
     
     // Should converge to albedo (0.5) within tolerance
     // Note: with only 8 bounces, won't fully converge, so use loose tolerance

@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 #include <cmath>
+#include <numbers>
 
 using namespace render;
 using namespace mp_units;
@@ -420,4 +421,54 @@ TEST(RadianceRGBTest, Hadamard) {
     EXPECT_NEAR(result.r.numerical_value_in(W / (sr * m2)), 50.0f, kEps);
     EXPECT_NEAR(result.g.numerical_value_in(W / (sr * m2)), 100.0f, kEps);
     EXPECT_NEAR(result.b.numerical_value_in(W / (sr * m2)), 150.0f, kEps);
+}
+
+// ============================================================================
+// UDL Literals and zero<Q>() Tests
+// ============================================================================
+
+TEST(LiteralsTest, LengthLiteral) {
+    using namespace render::literals;
+    Length one_metre = 1.0_m;
+    EXPECT_NEAR(one_metre.numerical_value_in(si::metre), 1.0f, kEps);
+
+    Length one_mm = 1.0_mm;
+    EXPECT_NEAR(one_mm.numerical_value_in(si::metre), 1e-3f, kEps);
+}
+
+TEST(LiteralsTest, AngleLiteral) {
+    using namespace render::literals;
+    Angle right_angle = 90.0_deg;
+    EXPECT_NEAR(right_angle.numerical_value_in(si::radian),
+                std::numbers::pi_v<float> / 2.0f, kEps);
+
+    Angle one_rad = 1.0_rad;
+    EXPECT_NEAR(one_rad.numerical_value_in(si::radian), 1.0f, kEps);
+}
+
+TEST(LiteralsTest, PdfLiterals) {
+    using namespace render::literals;
+    PdfW p = 2.5_per_sr;
+    EXPECT_NEAR(p.numerical_value_in(per_sr), 2.5f, kEps);
+
+    PdfA a = 1.0_per_m2;
+    EXPECT_NEAR(a.numerical_value_in(per_m2), 1.0f, kEps);
+
+    // Same-type arithmetic preserved
+    PdfW sum = 1.5_per_sr + 0.5_per_sr;
+    EXPECT_NEAR(sum.numerical_value_in(per_sr), 2.0f, kEps);
+}
+
+TEST(ZeroQTest, AllSupportedTypes) {
+    EXPECT_NEAR(zero<Length>().numerical_value_in(si::metre), 0.0f, kEps);
+    EXPECT_NEAR(zero<Area>().numerical_value_in(mp_units::square(si::metre)), 0.0f, kEps);
+    EXPECT_NEAR(zero<Volume>().numerical_value_in(mp_units::cubic(si::metre)), 0.0f, kEps);
+    EXPECT_NEAR(zero<PdfW>().numerical_value_in(per_sr), 0.0f, kEps);
+    EXPECT_NEAR(zero<PdfA>().numerical_value_in(per_m2), 0.0f, kEps);
+    EXPECT_NEAR(zero<Angle>().numerical_value_in(si::radian), 0.0f, kEps);
+    EXPECT_NEAR(zero<SolidAngle>().numerical_value_in(si::steradian), 0.0f, kEps);
+}
+
+TEST(ZeroQTest, MatchesExistingZeroHelpers) {
+    EXPECT_EQ(zero<PdfW>(), zero_pdf_w());
 }

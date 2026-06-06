@@ -223,7 +223,7 @@ inline LightSample sampleLightTyped(const Light& light, const render::Position& 
                 sample.emission = light.emission * render::inverse_square_factor(sample.distance);
                 sample.pdf = 1.0f * render::per_sr;
             } else {
-                float cosLight = render::dot(sample.normal.vec(), sample.direction.vec() * -1.0f);
+                float cosLight = render::dot(sample.normal, -sample.direction);
                 if (cosLight < LIGHT_EPSILON) {
                     sample.pdf = render::zero_pdf_w();
                 } else {
@@ -257,7 +257,7 @@ inline LightSample sampleLightTyped(const Light& light, const render::Position& 
             // Inverse square law using typed helper
             sample.emission = light.emission * render::inverse_square_factor(sample.distance);
             
-            float cosAngle = render::dot(light.normal.vec(), sample.direction.vec() * -1.0f);
+            float cosAngle = render::dot(light.normal, -sample.direction);
             // Use render::cos() helper for typed Angle
             float cosCone = render::cos(light.spotAngle * 0.5f);
             
@@ -301,7 +301,7 @@ inline LightSample sampleLightTyped(const Light& light, const render::Position& 
             sample.distance = dist;
             sample.direction = dir;
             
-            float cosLight = render::dot(sample.normal.vec(), sample.direction.vec() * -1.0f);
+            float cosLight = render::dot(sample.normal, -sample.direction);
             if (cosLight < LIGHT_EPSILON) {
                 sample.pdf = render::zero_pdf_w();
             } else {
@@ -321,7 +321,7 @@ inline LightSample sampleLightTyped(const Light& light, const render::Position& 
             sample.distance = dist2;
             sample.direction = dir2;
             
-            float cosLight = std::abs(render::dot(sample.normal.vec(), sample.direction.vec() * -1.0f));
+            float cosLight = std::abs(render::dot(sample.normal, -sample.direction));
             if (cosLight < LIGHT_EPSILON) {
                 sample.pdf = render::zero_pdf_w();
             } else {
@@ -348,7 +348,7 @@ inline render::PdfW pdfLightSampleTyped(const Light& light,
     // Get both direction and distance in one extraction
     auto toLight = lightPoint - shadingPoint;
     auto [dir, dist] = render::normalize_with_length(toLight);
-    float cosLight = std::abs(render::dot(lightNormal.vec(), dir.vec() * -1.0f));
+    float cosLight = std::abs(render::dot(lightNormal, -dir));
     
     if (cosLight < LIGHT_EPSILON || light.area < render::MIN_AREA) {
         return render::zero_pdf_w();

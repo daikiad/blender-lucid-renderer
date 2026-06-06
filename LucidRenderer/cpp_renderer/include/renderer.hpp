@@ -47,7 +47,7 @@
 // Note: evaluateNode returns AttenuationRGB for color values from material nodes
 render::AttenuationRGB evaluateNode(const NodeTree &tree, const std::string &nodeName, const std::string &socketName, const render::Vec2f &uv);
 render::AttenuationRGB getAlbedoFromNodeTree(const NodeTree &tree, const render::Vec2f &uv);
-render::AttenuationRGB getEmissionFromNodeTree(const NodeTree &tree, const render::Vec2f &uv);
+render::RGB3f getEmissionFromNodeTree(const NodeTree &tree, const render::Vec2f &uv);
 float getTransmissionFromNodeTree(const NodeTree &tree, const render::Vec2f &uv);
 float getIORFromNodeTree(const NodeTree &tree, const render::Vec2f &uv);
 float getMetallicFromNodeTree(const NodeTree &tree, const render::Vec2f &uv);
@@ -77,13 +77,17 @@ inline render::AttenuationRGB traceAlbedo(const Scene &scene, const Ray &ray, bo
 }
 
 // Debug mode: return emission from material (converted from radiance for display)
+// Returns AttenuationRGB for use in the debug visualization buffer (untyped pixel grid).
 inline render::AttenuationRGB traceEmission(const Scene &scene, const Ray &ray, bool useAABB = true) {
     Hit hit = intersectScene(scene, ray, render::metres(0.0f), geometry::RAY_T_MAX_TYPED, useAABB);
     if (hit.hit) {
         if (hit.material->useNodes && hit.material->nodeTree.valid) {
-            return getEmissionFromNodeTree(hit.material->nodeTree, hit.uv);
+            // Node-evaluated emission color comes back as untagged RGB3f
+            return render::as_attenuation(getEmissionFromNodeTree(hit.material->nodeTree, hit.uv));
         }
-        return render::apply_camera_sensitivity(hit.material->emission, render::kDefaultCameraSensitivity);
+        // Camera-sensitivity result is PixelRGB; re-tag for debug-buffer use
+        return render::as_attenuation(render::to_rgb3f(
+            render::apply_camera_sensitivity(hit.material->emission, render::kDefaultCameraSensitivity)));
     }
     return render::make_attenuation_rgb(0, 0, 0);
 }

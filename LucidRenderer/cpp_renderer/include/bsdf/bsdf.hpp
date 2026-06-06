@@ -17,6 +17,8 @@
 #include "fresnel.hpp"
 #include "ggx.hpp"
 
+#include <variant>
+
 // ========== Material Parameters ==========
 
 struct MaterialParams {
@@ -37,35 +39,84 @@ struct MaterialParams {
 // ========== BSDF Sample Result ==========
 
 /**
- * BSDFSample - Result of sampling a direction from BSDF (unit-safe)
- * 
- * - f: BSDF value [1/sr]
- * - pdf: probability density [1/sr]
- * - weight: f × |cosθ| / pdf (ThroughputRGB, range [0,∞))
+ * Evaluated BSDF: explicit f and pdf, throughput weight computed as f × |cosθ| / pdf.
+ */
+struct EvaluatedBSDF {
+    render::BSDFRGB f;     // BSDF value [1/sr]
+    render::PdfW    pdf;   // Probability density [1/sr]
+};
+
+/**
+ * Precomputed weight: f × |cosθ| / pdf already absorbed (e.g. GGX VNDF transmission,
+ * near-delta specular). MIS treats this as a delta-like sample (light-sampling PDF
+ * is unreliable), so the next-bounce MIS weight is forced to 1.0.
+ */
+struct PrecomputedWeight {
+    render::ThroughputRGB weight;  // Direct throughput = f × |NdotL| / pdf
+};
+
+/**
+ * BSDFSample - Result of sampling a direction from BSDF (unit-safe).
+ *
+ * The variant alternative encodes how the sample contributes to throughput:
+ *   - EvaluatedBSDF: standard f/pdf path, MIS uses real pdf.
+ *   - PrecomputedWeight: delta-like, MIS uses 0 pdf (weight = 1.0 against light sampling).
  */
 struct BSDFSample {
-    render::Direction wi;             // Sampled direction (normalized)
-    render::BSDFRGB f;                // BSDF value [1/sr]
-    render::PdfW pdf;                 // Probability density [1/sr]
-    render::ThroughputRGB weight;     // Direct throughput = f × |NdotL| / pdf
-    bool useWeight;                   // If true, use weight directly
-    bool isDelta;                     // Is this a delta distribution?
-    
+    render::Direction wi;                                    // Sampled direction
+    std::variant<EvaluatedBSDF, PrecomputedWeight> result;   // Throughput contribution
+    bool isDelta;                                            // True for pure delta distributions
+
     enum Type { DIFFUSE, SPECULAR, TRANSMISSION } type;
-    
-    BSDFSample() 
+
+    BSDFSample()
         : wi(render::direction_from_unit_vector(render::Vec3f(0.0f, 0.0f, 1.0f)))
-        , f(render::zero_bsdf_rgb())
-        , pdf(0.0f * render::per_sr)
-        , weight(render::unit_throughput_rgb())
-        , useWeight(false)
+        , result(EvaluatedBSDF{render::zero_bsdf_rgb(), render::zero_pdf_w()})
         , isDelta(false)
         , type(DIFFUSE) {}
-    
-    bool isValid() const {
-        return pdf > render::MIN_PDF || useWeight;
+
+    [[nodiscard]] bool isValid() const {
+        return std::visit([](auto const& r) {
+            using R = std::decay_t<decltype(r)>;
+            if constexpr (std::is_same_v<R, PrecomputedWeight>) return true;
+            else return r.pdf > render::MIN_PDF;
+        }, result);
+    }
+
+    [[nodiscard]] bool hasPrecomputedWeight() const {
+        return std::holds_alternative<PrecomputedWeight>(result);
     }
 };
+
+// Compute throughput delta for a sample; returns nullopt to terminate the path.
+inline std::optional<render::ThroughputRGB>
+compute_throughput_update(const BSDFSample& s, render::Direction sampleNormal) {
+    return std::visit([&](auto const& r) -> std::optional<render::ThroughputRGB> {
+        using R = std::decay_t<decltype(r)>;
+        if constexpr (std::is_same_v<R, PrecomputedWeight>) {
+            return r.weight;
+        } else {
+            float c = std::abs(render::dot(sampleNormal, s.wi));
+            if (c <= 1e-6f || r.pdf < render::MIN_PDF) return std::nullopt;
+            return render::bsdf_sample_weight(r.f, c, r.pdf);
+        }
+    }, s.result);
+}
+
+// PDF value to store as lastBsdfPdf for next-bounce MIS.
+// PrecomputedWeight is delta-like: returning 0 makes the next MIS weight = 1.0.
+inline render::PdfW mis_pdf_for_next_bounce(const BSDFSample& s) {
+    if (auto* eval = std::get_if<EvaluatedBSDF>(&s.result)) {
+        return eval->pdf;
+    }
+    return render::zero_pdf_w();
+}
+
+// Compact layout, trivially destructible — variant<2 alternatives> codegen check.
+static_assert(sizeof(BSDFSample) <= 48,
+              "BSDFSample should fit in a single cache line section");
+static_assert(std::is_trivially_destructible_v<BSDFSample>,
+              "BSDFSample must be trivially destructible to keep hot path cheap");
 
 // ========== BSDF Evaluation ==========
 
@@ -85,12 +136,11 @@ inline render::BSDFRGB evalSpecular(const MaterialParams& mat, const render::Dir
                                 const render::Direction& wi, const render::Direction& n, 
                                 float NdotL, float NdotV) {
     if (NdotL <= 0.0f || NdotV <= 0.0f) return render::zero_bsdf_rgb();
-    
-    auto h_vec = render::normalize(wo.vec() + wi.vec());
-    auto h = render::make_direction_or_default(h_vec);
-    float NdotH = std::max(render::dot(n.vec(), h.vec()), 0.0f);
-    float VdotH = std::max(render::dot(wo.vec(), h.vec()), 0.0f);
-    
+
+    auto h = render::half_vector_or_default(wo, wi);
+    float NdotH = std::max(render::dot(n, h), 0.0f);
+    float VdotH = std::max(render::dot(wo, h), 0.0f);
+
     float roughness = std::max(mat.roughness, MIN_ROUGHNESS);
     float D = ggxD(NdotH, roughness);
     
@@ -100,8 +150,9 @@ inline render::BSDFRGB evalSpecular(const MaterialParams& mat, const render::Dir
     float lambdaV = ggx_safe_sqrt(a2 + (1.0f - a2) * NdotV * NdotV);
     float G2_over_denom = 0.5f / (NdotV * lambdaL + NdotL * lambdaV + GGX_EPSILON);
     
-    // Compute F0 using RGB3f (plain floats)
-    render::RGB3f f0 = mat.albedo * mat.metallic + render::RGB3f{0.04f, 0.04f, 0.04f} * (1.0f - mat.metallic);
+    // Compute F0 using RGB3f (plain floats) — boundary into Fresnel math
+    render::RGB3f f0 = render::to_rgb3f(mat.albedo) * mat.metallic +
+                       render::RGB3f{0.04f, 0.04f, 0.04f} * (1.0f - mat.metallic);
     render::RGB3f F = fresnelSchlickColor(VdotH, f0);
     
     float spec = D * G2_over_denom;
@@ -114,16 +165,15 @@ inline render::BSDFRGB evalSpecular(const MaterialParams& mat, const render::Dir
  */
 inline render::BSDFRGB evalBSDF(const MaterialParams& mat, const render::Direction& wo, 
                             const render::Direction& wi, const render::Direction& n) {
-    float NdotL = render::dot(n.vec(), wi.vec());
-    float NdotV = render::dot(n.vec(), wo.vec());
-    
+    float NdotL = render::dot(n, wi);
+    float NdotV = render::dot(n, wo);
+
     if (NdotL <= 0.0f || NdotV <= 0.0f) return render::zero_bsdf_rgb();
-    
+
     render::BSDFRGB specular = evalSpecular(mat, wo, wi, n, NdotL, NdotV);
-    
-    auto h_vec = render::normalize(wo.vec() + wi.vec());
-    auto h = render::make_direction_or_default(h_vec);
-    float VdotH = std::max(render::dot(wo.vec(), h.vec()), 0.0f);
+
+    auto h = render::half_vector_or_default(wo, wi);
+    float VdotH = std::max(render::dot(wo, h), 0.0f);
     
     // Use RGB3f for Fresnel calculation (plain floats)
     render::RGB3f f0{0.04f, 0.04f, 0.04f};
@@ -153,40 +203,37 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const render::Direction&
     
     // Handle glass/transmission
     if (mat.transmission > 0.0f && u3 < mat.transmission) {
-        float wo_dot_n = render::dot(wo.vec(), n.vec());
+        float wo_dot_n = render::dot(wo, n);
         bool frontFace = wo_dot_n > 0.0f;
         render::Direction faceNormal = frontFace ? n : -n;
         float eta = frontFace ? (1.0f / mat.ior) : mat.ior;
-        
+
         // Sample microfacet normal using VNDF
         render::Direction t, b;
         buildOrthonormalBasis(faceNormal, t, b);
         render::Direction h = sampleGGXVNDF(wo, roughness, u1, u2, faceNormal, t, b);
-        
-        float cosThetaI = std::abs(render::dot(wo.vec(), h.vec()));
+
+        float cosThetaI = std::abs(render::dot(wo, h));
         float F = fresnelDielectric(cosThetaI, eta);
-        
+
         render::Direction incident = -wo;
-        
+
         if (randf() < F) {
             // Fresnel reflection
             sample.wi = render::reflect(incident, h.as_normal());
-            
-            float NdotL = render::dot(faceNormal.vec(), sample.wi.vec());
-            float NdotV = render::dot(faceNormal.vec(), wo.vec());
+
+            float NdotL = render::dot(faceNormal, sample.wi);
+            float NdotV = render::dot(faceNormal, wo);
             if (NdotL <= 0.0f || NdotV <= 0.0f) {
-                sample.pdf = render::PdfW::zero();
-                sample.f = render::zero_bsdf_rgb();
+                sample.result = EvaluatedBSDF{render::zero_bsdf_rgb(), render::zero_pdf_w()};
                 return sample;
             }
-            
+
             float G2 = ggxG2(NdotL, NdotV, roughness);
             float G1 = ggxG1(NdotV, roughness);
             float w = G2 / (G1 + GGX_EPSILON);
-            
-            sample.useWeight = true;
-            sample.weight = render::make_throughput_rgb(w, w, w);
-            sample.pdf = 1.0f * render::per_sr;
+
+            sample.result = PrecomputedWeight{render::make_throughput_rgb(w, w, w)};
             sample.isDelta = false;
             sample.type = BSDFSample::SPECULAR;
         } else {
@@ -195,37 +242,32 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const render::Direction&
             if (!refracted_opt) {
                 // Total internal reflection
                 sample.wi = render::reflect(incident, h.as_normal());
-                
-                float NdotL = render::dot(faceNormal.vec(), sample.wi.vec());
-                float NdotV = render::dot(faceNormal.vec(), wo.vec());
+
+                float NdotL = render::dot(faceNormal, sample.wi);
+                float NdotV = render::dot(faceNormal, wo);
                 if (NdotL <= 0.0f || NdotV <= 0.0f) {
-                    sample.pdf = render::PdfW::zero();
-                    sample.f = render::zero_bsdf_rgb();
+                    sample.result = EvaluatedBSDF{render::zero_bsdf_rgb(), render::zero_pdf_w()};
                     return sample;
                 }
-                
+
                 float G2 = ggxG2(NdotL, NdotV, roughness);
                 float G1 = ggxG1(NdotV, roughness);
                 float w = G2 / (G1 + GGX_EPSILON);
-                
-                sample.useWeight = true;
-                sample.weight = render::make_throughput_rgb(w, w, w);
-                sample.pdf = 1.0f * render::per_sr;
+
+                sample.result = PrecomputedWeight{render::make_throughput_rgb(w, w, w)};
                 sample.isDelta = false;
                 sample.type = BSDFSample::SPECULAR;
             } else {
                 sample.wi = *refracted_opt;
-                
-                float NdotL = std::abs(render::dot(sample.wi.vec(), faceNormal.vec()));
-                float NdotV = std::abs(render::dot(wo.vec(), faceNormal.vec()));
-                
+
+                float NdotL = std::abs(render::dot(sample.wi, faceNormal));
+                float NdotV = std::abs(render::dot(wo, faceNormal));
+
                 float G2 = ggxG2(NdotL, NdotV, roughness);
                 float G1 = ggxG1(NdotV, roughness);
                 float w = G2 / (G1 + GGX_EPSILON);
-                
-                sample.useWeight = true;
-                sample.weight = render::make_throughput_rgb(w, w, w);
-                sample.pdf = 1.0f * render::per_sr;
+
+                sample.result = PrecomputedWeight{render::make_throughput_rgb(w, w, w)};
                 sample.isDelta = false;
                 sample.type = BSDFSample::TRANSMISSION;
             }
@@ -244,36 +286,34 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const render::Direction&
     
     render::Direction t, b;
     buildOrthonormalBasis(n, t, b);
-    float NdotV = std::max(render::dot(n.vec(), wo.vec()), GGX_EPSILON);
-    
+    float NdotV = std::max(render::dot(n, wo), GGX_EPSILON);
+
     if (u1 < specProb) {
         // Specular sampling using GGX VNDF
         render::Direction h = sampleGGXVNDF(wo, roughness, u1 / specProb, u2, n, t, b);
         sample.wi = render::reflect(-wo, h.as_normal());
-        
-        float NdotL = render::dot(n.vec(), sample.wi.vec());
+
+        float NdotL = render::dot(n, sample.wi);
         if (NdotL <= 0.0f) {
-            sample.pdf = render::PdfW::zero();
-            sample.f = render::zero_bsdf_rgb();
+            sample.result = EvaluatedBSDF{render::zero_bsdf_rgb(), render::zero_pdf_w()};
             return sample;
         }
-        
-        sample.f = evalBSDF(mat, wo, sample.wi, n);
-        
+
+        render::BSDFRGB f = evalBSDF(mat, wo, sample.wi, n);
+
         float pdfSpec = pdfGGXVNDF(wo, h, roughness, n);
         float pdfDiff = pdfCosineHemisphere(NdotL);
         float pdf_raw = (specProb * pdfSpec + (1.0f - specProb) * pdfDiff) * (1.0f - mat.transmission);
-        sample.pdf = pdf_raw * render::per_sr;
-        
-        // For near-delta specular (very low roughness), use weight-based sampling
+        render::PdfW pdf = pdf_raw * render::per_sr;
+
+        // For near-delta specular (very low roughness), use weight-based sampling.
         // This ensures MIS weight = 1.0 because light sampling cannot efficiently
-        // sample the narrow specular lobe, so BSDF sampling should get full weight
+        // sample the narrow specular lobe.
         constexpr float DELTA_ROUGHNESS_THRESHOLD = 0.05f;
         if (roughness < DELTA_ROUGHNESS_THRESHOLD && mat.metallic > 0.5f) {
-            sample.weight = render::bsdf_sample_weight(sample.f, NdotL, sample.pdf);
-            sample.useWeight = true;
+            sample.result = PrecomputedWeight{render::bsdf_sample_weight(f, NdotL, pdf)};
         } else {
-            sample.useWeight = false;
+            sample.result = EvaluatedBSDF{f, pdf};
         }
         sample.isDelta = false;
         sample.type = BSDFSample::SPECULAR;
@@ -281,28 +321,26 @@ inline BSDFSample sampleBSDF(const MaterialParams& mat, const render::Direction&
         // Diffuse sampling
         float u1Adj = (u1 - specProb) / (1.0f - specProb);
         sample.wi = sampleCosineHemisphere(u1Adj, u2, n);
-        
-        float NdotL = render::dot(n.vec(), sample.wi.vec());
+
+        float NdotL = render::dot(n, sample.wi);
         if (NdotL <= 0.0f) {
-            sample.pdf = render::PdfW::zero();
-            sample.f = render::zero_bsdf_rgb();
+            sample.result = EvaluatedBSDF{render::zero_bsdf_rgb(), render::zero_pdf_w()};
             return sample;
         }
-        
-        sample.f = evalBSDF(mat, wo, sample.wi, n);
-        
-        auto h_vec = render::normalize(wo.vec() + sample.wi.vec());
-        auto h = render::make_direction_or_default(h_vec);
+
+        render::BSDFRGB f = evalBSDF(mat, wo, sample.wi, n);
+
+        auto h = render::half_vector_or_default(wo, sample.wi);
         float pdfSpec = pdfGGXVNDF(wo, h, roughness, n);
         float pdfDiff = pdfCosineHemisphere(NdotL);
         float pdf_raw = (specProb * pdfSpec + (1.0f - specProb) * pdfDiff) * (1.0f - mat.transmission);
-        sample.pdf = pdf_raw * render::per_sr;
-        
-        sample.useWeight = false;
+        render::PdfW pdf = pdf_raw * render::per_sr;
+
+        sample.result = EvaluatedBSDF{f, pdf};
         sample.isDelta = false;
         sample.type = BSDFSample::DIFFUSE;
     }
-    
+
     return sample;
 }
 
@@ -315,9 +353,9 @@ inline render::PdfW pdfBSDF(const MaterialParams& mat,
                             const render::Direction& wo, 
                             const render::Direction& wi, 
                             const render::Direction& n) {
-    float NdotL = render::dot(n.vec(), wi.vec());
+    float NdotL = render::dot(n, wi);
     if (NdotL <= 0.0f) return render::PdfW::zero();
-    
+
     float specProb;
     if (mat.metallic > 0.99f) {
         specProb = 1.0f;
@@ -325,12 +363,11 @@ inline render::PdfW pdfBSDF(const MaterialParams& mat,
         specProb = 0.5f * (1.0f + mat.metallic) * (1.0f - mat.roughness * 0.5f);
         specProb = std::clamp(specProb, 0.1f, 0.9f);
     }
-    
+
     float roughness = std::max(mat.roughness, MIN_ROUGHNESS);
-    
-    auto h_vec = render::normalize(wo.vec() + wi.vec());
-    auto h = render::make_direction_or_default(h_vec);
-    
+
+    auto h = render::half_vector_or_default(wo, wi);
+
     float pdfSpec = pdfGGXVNDF(wo, h, roughness, n);
     float pdfDiff = pdfCosineHemisphere(NdotL);
     

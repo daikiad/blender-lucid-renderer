@@ -31,7 +31,7 @@
 #include <cmath>
 
 // Forward declarations for node evaluators
-render::RGB3f getAlbedoFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
+render::AttenuationRGB getAlbedoFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
 render::RGB3f getEmissionFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
 float getTransmissionFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
 float getIORFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
@@ -106,7 +106,7 @@ inline render::RadianceRGB traceSimple(const Scene& scene, const Ray& ray, int m
         // Setup normals
         render::Direction n = hit.normal.as_direction();
         render::Direction wo = -currentRay.direction;
-        bool frontFace = render::dot(wo.vec(), n.vec()) > 0;
+        bool frontFace = render::dot(wo, n) > 0;
         
         render::Direction shadingNormal = n;
         if (mat.transmission < 0.5f && !frontFace) {
@@ -117,25 +117,14 @@ inline render::RadianceRGB traceSimple(const Scene& scene, const Ray& ray, int m
         render::Direction sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
         BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
         
-        if (bsdfSample.pdf < render::MIN_PDF && !bsdfSample.useWeight) {
+        if (!bsdfSample.isValid()) {
             break;
         }
-        
-        // Update throughput
-        if (bsdfSample.useWeight) {
-            throughput = throughput * bsdfSample.weight;
-        } else {
-            float absNdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
-            if (absNdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
-                render::ThroughputRGB weight = render::bsdf_sample_weight(bsdfSample.f, absNdotL, bsdfSample.pdf);
-                
-                // Note: We no longer clamp throughput weights - that would bias the estimator.
-                // The ThroughputRGB type makes this intent clear.
-                throughput = throughput * weight;
-            } else {
-                break;
-            }
-        }
+
+        // Update throughput via variant-aware helper
+        auto weightOpt = compute_throughput_update(bsdfSample, sampleNormal);
+        if (!weightOpt) break;
+        throughput = throughput * *weightOpt;
         
         // Russian Roulette
         if (depth >= 3) {
@@ -192,7 +181,7 @@ inline render::RadianceRGB traceNEE(const Scene& scene, const SceneLights& scene
         // Setup normals
         render::Direction n = hit.normal.as_direction();
         render::Direction wo = -currentRay.direction;
-        bool frontFace = render::dot(wo.vec(), n.vec()) > 0;
+        bool frontFace = render::dot(wo, n) > 0;
         
         render::Direction shadingNormal = n;
         if (mat.transmission < 0.5f && !frontFace) {
@@ -217,7 +206,7 @@ inline render::RadianceRGB traceNEE(const Scene& scene, const SceneLights& scene
                 LightSample ls = sampleLight(light, hit.point, randf(), randf());
                 
                 if (ls.pdf > render::MIN_PDF) {
-                    float NdotL = render::dot(shadingNormal.vec(), ls.direction.vec());
+                    float NdotL = render::dot(shadingNormal, ls.direction);
                     
                     if (NdotL > 1e-6f) {
                         Ray shadowRay(hit.point, ls.direction);
@@ -243,22 +232,14 @@ inline render::RadianceRGB traceNEE(const Scene& scene, const SceneLights& scene
         render::Direction sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
         BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
         
-        if (bsdfSample.pdf < render::MIN_PDF && !bsdfSample.useWeight) {
+        if (!bsdfSample.isValid()) {
             break;
         }
-        
-        // Update throughput
-        if (bsdfSample.useWeight) {
-            throughput = throughput * bsdfSample.weight;
-        } else {
-            float NdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
-            if (NdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
-                render::ThroughputRGB weight = render::bsdf_sample_weight(bsdfSample.f, NdotL, bsdfSample.pdf);
-                throughput = throughput * weight;
-            } else {
-                break;
-            }
-        }
+
+        // Update throughput via variant-aware helper
+        auto weightOpt = compute_throughput_update(bsdfSample, sampleNormal);
+        if (!weightOpt) break;
+        throughput = throughput * *weightOpt;
         
         // Russian Roulette
         if (depth >= 3) {
@@ -346,7 +327,7 @@ inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& scene
         // Setup normals
         render::Direction n = hit.normal.as_direction();
         render::Direction wo = -currentRay.direction;
-        bool frontFace = render::dot(wo.vec(), n.vec()) > 0;
+        bool frontFace = render::dot(wo, n) > 0;
         
         render::Direction shadingNormal = n;
         if (mat.transmission < 0.5f && !frontFace) {
@@ -387,7 +368,7 @@ inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& scene
                 LightSample ls = sampleLight(light, hit.point, randf(), randf());
                 
                 if (ls.pdf > render::MIN_PDF) {
-                    float NdotL = render::dot(shadingNormal.vec(), ls.direction.vec());
+                    float NdotL = render::dot(shadingNormal, ls.direction);
                     
                     if (NdotL > 1e-6f) {
                         Ray shadowRay(hit.point, ls.direction);
@@ -418,31 +399,18 @@ inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& scene
         render::Direction sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
         BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
         
-        if (bsdfSample.pdf < render::MIN_PDF && !bsdfSample.useWeight) {
+        if (!bsdfSample.isValid()) {
             break;
         }
+
+        // Update throughput via variant-aware helper
+        auto weightOpt = compute_throughput_update(bsdfSample, sampleNormal);
+        if (!weightOpt) break;
+        throughput = throughput * *weightOpt;
         
-        // Update throughput
-        if (bsdfSample.useWeight) {
-            throughput = throughput * bsdfSample.weight;
-        } else {
-            float NdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
-            if (NdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
-                render::ThroughputRGB weight = render::bsdf_sample_weight(bsdfSample.f, NdotL, bsdfSample.pdf);
-                throughput = throughput * weight;
-            } else {
-                break;
-            }
-        }
-        
-        // Store PDF for next bounce MIS
-        // For useWeight paths (specular/transmission with pre-computed weight), we don't have
-        // a proper PDF value. Treat them as pseudo-delta: set PDF to 0 so MIS weight becomes 1.0.
-        // This is correct because:
-        // 1. For true delta distributions (perfect mirrors), light sampling PDF = 0, so BSDF wins
-        // 2. For GGX transmission with complex Jacobians, using weight directly avoids instability
-        // 3. The path contribution is already correct via the pre-computed weight
-        lastBsdfPdf = bsdfSample.useWeight ? render::zero_pdf_w() : bsdfSample.pdf;
+        // Store PDF for next bounce MIS — PrecomputedWeight samples return zero
+        // (delta-like, light-sampling PDF unreliable), making next-bounce MIS weight = 1.0.
+        lastBsdfPdf = mis_pdf_for_next_bounce(bsdfSample);
         
         // Russian Roulette
         if (depth >= 3) {
@@ -621,7 +589,7 @@ inline render::RadianceRGB traceSimpleWithDiagnostics(
         // Setup normals
         render::Direction n = hit.normal.as_direction();
         render::Direction wo = -currentRay.direction;
-        bool frontFace = render::dot(wo.vec(), n.vec()) > 0;
+        bool frontFace = render::dot(wo, n) > 0;
         
         render::Direction shadingNormal = n;
         if (mat.transmission < 0.5f && !frontFace) {
@@ -632,22 +600,14 @@ inline render::RadianceRGB traceSimpleWithDiagnostics(
         render::Direction sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
         BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
         
-        if (bsdfSample.pdf < render::MIN_PDF && !bsdfSample.useWeight) {
+        if (!bsdfSample.isValid()) {
             break;
         }
-        
-        // Update throughput
-        if (bsdfSample.useWeight) {
-            throughput = throughput * bsdfSample.weight;
-        } else {
-            float absNdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
-            if (absNdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
-                render::ThroughputRGB weight = render::bsdf_sample_weight(bsdfSample.f, absNdotL, bsdfSample.pdf);
-                throughput = throughput * weight;
-            } else {
-                break;
-            }
-        }
+
+        // Update throughput via variant-aware helper
+        auto weightOpt = compute_throughput_update(bsdfSample, sampleNormal);
+        if (!weightOpt) break;
+        throughput = throughput * *weightOpt;
         
         // Russian Roulette
         if (depth >= 3) {
@@ -762,7 +722,7 @@ inline render::RadianceRGB traceNEEWithDiagnostics(
         // Setup normals
         render::Direction n = hit.normal.as_direction();
         render::Direction wo = -currentRay.direction;
-        bool frontFace = render::dot(wo.vec(), n.vec()) > 0;
+        bool frontFace = render::dot(wo, n) > 0;
         
         render::Direction shadingNormal = n;
         if (mat.transmission < 0.5f && !frontFace) {
@@ -808,7 +768,7 @@ inline render::RadianceRGB traceNEEWithDiagnostics(
                     LightSample ls = sampleLight(light, hit.point, randf(), randf());
                     
                     if (ls.pdf > render::MIN_PDF) {
-                        float NdotL = render::dot(shadingNormal.vec(), ls.direction.vec());
+                        float NdotL = render::dot(shadingNormal, ls.direction);
                         
                         if (NdotL > 1e-6f) {
                             Ray shadowRay(hit.point, ls.direction);
@@ -859,22 +819,14 @@ inline render::RadianceRGB traceNEEWithDiagnostics(
         render::Direction sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
         BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
         
-        if (bsdfSample.pdf < render::MIN_PDF && !bsdfSample.useWeight) {
+        if (!bsdfSample.isValid()) {
             break;
         }
-        
-        // Update throughput
-        if (bsdfSample.useWeight) {
-            throughput = throughput * bsdfSample.weight;
-        } else {
-            float NdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
-            if (NdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
-                render::ThroughputRGB weight = render::bsdf_sample_weight(bsdfSample.f, NdotL, bsdfSample.pdf);
-                throughput = throughput * weight;
-            } else {
-                break;
-            }
-        }
+
+        // Update throughput via variant-aware helper
+        auto weightOpt = compute_throughput_update(bsdfSample, sampleNormal);
+        if (!weightOpt) break;
+        throughput = throughput * *weightOpt;
         
         // Russian Roulette
         if (depth >= 3) {
@@ -1012,7 +964,7 @@ inline render::RadianceRGB traceMISWithDiagnostics(
         // Setup normals
         render::Direction n = hit.normal.as_direction();
         render::Direction wo = -currentRay.direction;
-        bool frontFace = render::dot(wo.vec(), n.vec()) > 0;
+        bool frontFace = render::dot(wo, n) > 0;
         
         render::Direction shadingNormal = n;
         if (mat.transmission < 0.5f && !frontFace) {
@@ -1076,7 +1028,7 @@ inline render::RadianceRGB traceMISWithDiagnostics(
                     LightSample ls = sampleLight(light, hit.point, randf(), randf());
                     
                     if (ls.pdf > render::MIN_PDF) {
-                        float NdotL = render::dot(shadingNormal.vec(), ls.direction.vec());
+                        float NdotL = render::dot(shadingNormal, ls.direction);
                         
                         if (NdotL > 1e-6f) {
                             Ray shadowRay(hit.point, ls.direction);
@@ -1130,25 +1082,17 @@ inline render::RadianceRGB traceMISWithDiagnostics(
         render::Direction sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
         BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
         
-        if (bsdfSample.pdf < render::MIN_PDF && !bsdfSample.useWeight) {
+        if (!bsdfSample.isValid()) {
             break;
         }
-        
-        // Update throughput
-        if (bsdfSample.useWeight) {
-            throughput = throughput * bsdfSample.weight;
-        } else {
-            float NdotL = std::abs(render::dot(sampleNormal.vec(), bsdfSample.wi.vec()));
-            if (NdotL > 1e-6f && bsdfSample.pdf > render::MIN_PDF) {
-                render::ThroughputRGB weight = render::bsdf_sample_weight(bsdfSample.f, NdotL, bsdfSample.pdf);
-                throughput = throughput * weight;
-            } else {
-                break;
-            }
-        }
+
+        // Update throughput via variant-aware helper
+        auto weightOpt = compute_throughput_update(bsdfSample, sampleNormal);
+        if (!weightOpt) break;
+        throughput = throughput * *weightOpt;
         
         // Store PDF for next bounce MIS
-        lastBsdfPdf = bsdfSample.useWeight ? render::zero_pdf_w() : bsdfSample.pdf;
+        lastBsdfPdf = mis_pdf_for_next_bounce(bsdfSample);
         
         // Russian Roulette
         if (depth >= 3) {

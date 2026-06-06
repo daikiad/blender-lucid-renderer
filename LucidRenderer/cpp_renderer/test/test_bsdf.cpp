@@ -80,9 +80,9 @@ TEST_F(FresnelSchlickTest, HalfAngle_ExpectedValue) {
 // ============================================================================
 
 TEST(FresnelSchlickColorTest, BasicColorReflectance) {
-    AttenuationRGB f0 = render::make_attenuation_rgb(0.9f, 0.6f, 0.3f);  // Gold-like
-    AttenuationRGB result = fresnelSchlickColor(1.0f, f0);
-    
+    render::RGB3f f0 = render::make_color_rgb(0.9f, 0.6f, 0.3f);  // Gold-like
+    render::RGB3f result = fresnelSchlickColor(1.0f, f0);
+
     auto [rr, rg, rb] = render::color_to_floats(result);
     auto [f0r, f0g, f0b] = render::color_to_floats(f0);
     EXPECT_NEAR(rr, f0r, kEps);
@@ -91,9 +91,9 @@ TEST(FresnelSchlickColorTest, BasicColorReflectance) {
 }
 
 TEST(FresnelSchlickColorTest, GrazingAngle_White) {
-    AttenuationRGB f0 = render::make_attenuation_rgb(0.9f, 0.6f, 0.3f);
-    AttenuationRGB result = fresnelSchlickColor(0.0f, f0);
-    
+    render::RGB3f f0 = render::make_color_rgb(0.9f, 0.6f, 0.3f);
+    render::RGB3f result = fresnelSchlickColor(0.0f, f0);
+
     auto [rr, rg, rb] = render::color_to_floats(result);
     EXPECT_NEAR(rr, 1.0f, kEps);
     EXPECT_NEAR(rg, 1.0f, kEps);

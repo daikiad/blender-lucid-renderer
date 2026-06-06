@@ -107,7 +107,7 @@ class BSDFSampleBehaviorTest : public ::testing::Test {
 protected:
     MaterialParams createDiffuseMaterial(float r, float g, float b) {
         MaterialParams mat;
-        mat.albedo = render::make_color_rgb(r, g, b);
+        mat.albedo = render::make_attenuation_rgb(r, g, b);
         mat.roughness = 1.0f;
         mat.metallic = 0.0f;
         mat.transmission = 0.0f;
@@ -116,7 +116,7 @@ protected:
     
     MaterialParams createGlossyMaterial(float roughness) {
         MaterialParams mat;
-        mat.albedo = render::make_color_rgb(0.8f, 0.8f, 0.8f);
+        mat.albedo = render::make_attenuation_rgb(0.8f, 0.8f, 0.8f);
         mat.roughness = roughness;
         mat.metallic = 0.9f;
         mat.transmission = 0.0f;
@@ -125,7 +125,7 @@ protected:
     
     MaterialParams createGlassMaterial(float ior, float roughness) {
         MaterialParams mat;
-        mat.albedo = render::make_color_rgb(1.0f, 1.0f, 1.0f);
+        mat.albedo = render::make_attenuation_rgb(1.0f, 1.0f, 1.0f);
         mat.roughness = roughness;
         mat.metallic = 0.0f;
         mat.transmission = 1.0f;
@@ -151,9 +151,9 @@ TEST_F(BSDFSampleBehaviorTest, DiffuseNoUseWeight) {
         BSDFSample sample = sampleBSDF(mat, wo, n, u1, u2, 0.0f);
         
         // Only check valid samples (those that sampled above hemisphere)
-        if (sample.pdf > MIN_PDF || sample.useWeight) {
+        if (sample.isValid()) {
             validSamples++;
-            if (sample.useWeight) {
+            if (sample.hasPrecomputedWeight()) {
                 useWeightCount++;
             }
         }
@@ -182,7 +182,7 @@ TEST_F(BSDFSampleBehaviorTest, SpecularMayUseWeight) {
         float u3 = static_cast<float>((i * 13 + 7) % samples) / samples;
         
         BSDFSample sample = sampleBSDF(mat, wo, n, u1, u2, u3);
-        if (sample.useWeight) {
+        if (sample.hasPrecomputedWeight()) {
             useWeightCount++;
         }
     }
@@ -207,7 +207,7 @@ TEST_F(BSDFSampleBehaviorTest, TransmissionUsesWeight) {
         float u3 = static_cast<float>((i * 13 + 7) % samples) / samples;
         
         BSDFSample sample = sampleBSDF(mat, wo, n, u1, u2, u3);
-        if (sample.useWeight) {
+        if (sample.hasPrecomputedWeight()) {
             useWeightCount++;
         }
     }
@@ -232,16 +232,9 @@ protected:
         
         for (int i = 0; i < samples; ++i) {
             BSDFSample sample = sampleBSDF(mat, wo, n, dist(rng), dist(rng), dist(rng));
-            
-            if (sample.useWeight) {
-                // Weight already includes cos/pdf
-                auto [wr, wg, wb] = render::color_to_floats(sample.weight);
-                float lum = 0.2126f * wr + 0.7152f * wg + 0.0722f * wb;
-                sum += lum;
-            } else if (sample.pdf > MIN_PDF) {
-                float NdotL = std::abs(dot(n.vec(), sample.wi.vec()));
-                ThroughputRGB weight = bsdf_sample_weight(sample.f, NdotL, sample.pdf);
-                auto [wr, wg, wb] = render::color_to_floats(weight);
+
+            if (auto weightOpt = compute_throughput_update(sample, n)) {
+                auto [wr, wg, wb] = render::color_to_floats(*weightOpt);
                 float lum = 0.2126f * wr + 0.7152f * wg + 0.0722f * wb;
                 sum += lum;
             }
@@ -254,7 +247,7 @@ protected:
 // Test: White diffuse should reflect ~1/π of incoming light
 TEST_F(BSDFConsistencyTest, DiffuseReflectance) {
     MaterialParams mat;
-    mat.albedo = render::make_color_rgb(1.0f, 1.0f, 1.0f);  // White
+    mat.albedo = render::make_attenuation_rgb(1.0f, 1.0f, 1.0f);  // White
     mat.roughness = 1.0f;
     mat.metallic = 0.0f;
     mat.transmission = 0.0f;
@@ -272,7 +265,7 @@ TEST_F(BSDFConsistencyTest, DiffuseReflectance) {
 // Test: Glossy metal should have high reflectance at normal incidence
 TEST_F(BSDFConsistencyTest, GlossyMetalReflectance) {
     MaterialParams mat;
-    mat.albedo = render::make_color_rgb(0.95f, 0.95f, 0.95f);  // Silver-like
+    mat.albedo = render::make_attenuation_rgb(0.95f, 0.95f, 0.95f);  // Silver-like
     mat.roughness = 0.1f;
     mat.metallic = 1.0f;
     mat.transmission = 0.0f;
@@ -290,7 +283,7 @@ TEST_F(BSDFConsistencyTest, GlossyMetalReflectance) {
 // Test: Low roughness should concentrate energy in specular direction
 TEST_F(BSDFConsistencyTest, LowRoughnessConcentration) {
     MaterialParams mat;
-    mat.albedo = render::make_color_rgb(0.8f, 0.8f, 0.8f);
+    mat.albedo = render::make_attenuation_rgb(0.8f, 0.8f, 0.8f);
     mat.roughness = 0.02f;  // Very smooth
     mat.metallic = 1.0f;
     mat.transmission = 0.0f;
@@ -331,7 +324,7 @@ class PDFConsistencyTest : public ::testing::Test {};
 // Test: PDF should be positive for valid samples
 TEST(PDFConsistencyTest, PositivePDFForValidSamples) {
     MaterialParams mat;
-    mat.albedo = render::make_color_rgb(0.8f, 0.8f, 0.8f);
+    mat.albedo = render::make_attenuation_rgb(0.8f, 0.8f, 0.8f);
     mat.roughness = 0.5f;
     mat.metallic = 0.0f;
     mat.transmission = 0.0f;
@@ -349,19 +342,17 @@ TEST(PDFConsistencyTest, PositivePDFForValidSamples) {
         BSDFSample sample = sampleBSDF(mat, wo, n, dist(rng), dist(rng), dist(rng));
         
         // A sample is either:
-        // 1. Valid with useWeight=true (pre-computed weight)
-        // 2. Valid with useWeight=false and pdf > 0 (standard f/pdf)
-        // 3. Invalid with pdf=0 and useWeight=false (sampled below hemisphere)
-        if (sample.useWeight || sample.pdf > MIN_PDF) {
+        // 1. PrecomputedWeight variant (pre-computed weight, delta-like)
+        // 2. EvaluatedBSDF variant with pdf > 0 (standard f/pdf)
+        // 3. EvaluatedBSDF variant with pdf=0 (sampled below hemisphere, invalid)
+        if (sample.isValid()) {
             validCount++;
-            // Valid non-weight samples should have positive PDF
-            if (!sample.useWeight) {
-                EXPECT_GT(sample.pdf.numerical_value_in(per_sr), 0.0f)
-                    << "Non-weight valid samples should have positive PDF";
+            if (auto* eval = std::get_if<EvaluatedBSDF>(&sample.result)) {
+                EXPECT_GT(eval->pdf.numerical_value_in(per_sr), 0.0f)
+                    << "EvaluatedBSDF valid samples should have positive PDF";
             }
         } else {
             invalidCount++;
-            // Invalid samples have pdf=0, which is expected for below-hemisphere samples
         }
     }
     
@@ -372,7 +363,7 @@ TEST(PDFConsistencyTest, PositivePDFForValidSamples) {
 // Test: Weight components should be non-negative
 TEST(PDFConsistencyTest, NonNegativeWeight) {
     MaterialParams mat;
-    mat.albedo = render::make_color_rgb(0.8f, 0.8f, 0.8f);
+    mat.albedo = render::make_attenuation_rgb(0.8f, 0.8f, 0.8f);
     mat.roughness = 0.1f;
     mat.metallic = 0.5f;
     mat.transmission = 0.0f;
@@ -386,10 +377,10 @@ TEST(PDFConsistencyTest, NonNegativeWeight) {
     for (int i = 0; i < 100; ++i) {
         BSDFSample sample = sampleBSDF(mat, wo, n, dist(rng), dist(rng), dist(rng));
         
-        if (sample.useWeight) {
-            EXPECT_GE(sample.weight.r, 0.0f);
-            EXPECT_GE(sample.weight.g, 0.0f);
-            EXPECT_GE(sample.weight.b, 0.0f);
+        if (auto* w = std::get_if<PrecomputedWeight>(&sample.result)) {
+            EXPECT_GE(w->weight.r, 0.0f);
+            EXPECT_GE(w->weight.g, 0.0f);
+            EXPECT_GE(w->weight.b, 0.0f);
         }
     }
 }
@@ -401,7 +392,7 @@ TEST(PDFConsistencyTest, NonNegativeWeight) {
 TEST(EnergyConservationTest, DiffuseTotalReflectanceBounded) {
     // Estimate total hemispheric reflectance via Monte Carlo
     MaterialParams mat;
-    mat.albedo = render::make_color_rgb(1.0f, 1.0f, 1.0f);
+    mat.albedo = render::make_attenuation_rgb(1.0f, 1.0f, 1.0f);
     mat.roughness = 1.0f;
     mat.metallic = 0.0f;
     mat.transmission = 0.0f;
@@ -418,13 +409,8 @@ TEST(EnergyConservationTest, DiffuseTotalReflectanceBounded) {
         BSDFSample sample = sampleBSDF(mat, wo, n, dist(rng), dist(rng), dist(rng));
         
         float contrib = 0.0f;
-        if (sample.useWeight) {
-            auto [wr, wg, wb] = render::color_to_floats(sample.weight);
-            contrib = wr;  // For white material, all channels equal
-        } else if (sample.pdf > MIN_PDF) {
-            float NdotL = std::abs(dot(n.vec(), sample.wi.vec()));
-            ThroughputRGB weight = bsdf_sample_weight(sample.f, NdotL, sample.pdf);
-            auto [wr, wg, wb] = render::color_to_floats(weight);
+        if (auto weightOpt = compute_throughput_update(sample, n)) {
+            auto [wr, wg, wb] = render::color_to_floats(*weightOpt);
             contrib = wr;
         }
         sum += contrib;
@@ -439,7 +425,7 @@ TEST(EnergyConservationTest, DiffuseTotalReflectanceBounded) {
 
 TEST(EnergyConservationTest, MetalReflectanceBounded) {
     MaterialParams mat;
-    mat.albedo = render::make_color_rgb(1.0f, 1.0f, 1.0f);
+    mat.albedo = render::make_attenuation_rgb(1.0f, 1.0f, 1.0f);
     mat.roughness = 0.2f;
     mat.metallic = 1.0f;
     mat.transmission = 0.0f;
@@ -454,22 +440,17 @@ TEST(EnergyConservationTest, MetalReflectanceBounded) {
     
     for (int i = 0; i < samples; ++i) {
         BSDFSample sample = sampleBSDF(mat, wo, n, dist(rng), dist(rng), dist(rng));
-        
+
         float contrib = 0.0f;
-        if (sample.useWeight) {
-            auto [wr, wg, wb] = render::color_to_floats(sample.weight);
-            contrib = wr;
-        } else if (sample.pdf > MIN_PDF) {
-            float NdotL = std::abs(dot(n.vec(), sample.wi.vec()));
-            ThroughputRGB weight = bsdf_sample_weight(sample.f, NdotL, sample.pdf);
-            auto [wr, wg, wb] = render::color_to_floats(weight);
+        if (auto weightOpt = compute_throughput_update(sample, n)) {
+            auto [wr, wg, wb] = render::color_to_floats(*weightOpt);
             contrib = wr;
         }
         sum += contrib;
     }
-    
+
     float avgReflectance = sum / samples;
-    
+
     // Metal can have high reflectance but should still conserve energy
     EXPECT_LE(avgReflectance, 1.2f) << "Metal should conserve energy";
     EXPECT_GE(avgReflectance, 0.5f) << "White metal should reflect significant light";

@@ -315,8 +315,8 @@ public:
                         // カメラ感度を適用（平均化は Python 側で行う）
                         // 累積値をサンプル数で割らず、そのまま返す
                         // Python 側で total_samples で正規化する
-                        render::AttenuationRGB color = render::apply_camera_sensitivity(radiance, camera_.sensitivity());
-                        
+                        render::PixelRGB color = render::apply_camera_sensitivity(radiance, camera_.sensitivity());
+
                         // 負の値をクランプして float に抽出
                         color = render::attenuation_clamp_min_zero(color);
                         auto [r, g, b] = render::color_to_floats(color);
@@ -937,7 +937,7 @@ private:
             const auto& envJson = j["environment"];
             
             if (envJson.contains("color") && envJson["color"].is_array()) {
-                scene.environment.color = render::make_color_rgb(
+                scene.environment.color = render::make_attenuation_rgb(
                     envJson["color"][0].get<float>(),
                     envJson["color"][1].get<float>(),
                     envJson["color"][2].get<float>()

@@ -24,7 +24,7 @@
 #include <algorithm>
 
 // Forward declaration for node evaluator
-render::AttenuationRGB getEmissionFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
+render::RGB3f getEmissionFromNodeTree(const NodeTree& tree, const render::Vec2f& uv);
 
 // ========== MIS Weight Functions ==========
 // NOTE: Use render::mis_power_heuristic(PdfW, PdfW) from render_units.hpp for typed MIS.
@@ -64,7 +64,7 @@ struct SceneLights {
             // Check if mesh has emission using is_emissive (unit-typed)
             render::RadianceRGB emission = mesh.material.emission;
             if (mesh.material.useNodes && mesh.material.nodeTree.valid) {
-                render::AttenuationRGB emissionColor = getEmissionFromNodeTree(mesh.material.nodeTree, render::Vec2f(0.0f, 0.0f));
+                render::RGB3f emissionColor = getEmissionFromNodeTree(mesh.material.nodeTree, render::Vec2f(0.0f, 0.0f));
                 emission = render::to_radiance(emissionColor);
             }
             
@@ -222,7 +222,7 @@ render::Length t_dist;
                 }
                 
                 if (hitLight && t_dist < result.t) {
-                    float facing = render::dot(light.normal.vec(), ray.direction.vec());
+                    float facing = render::dot(light.normal, ray.direction);
                     if (facing < 0) {  // Front side
                         result.hit = true;
                         result.t = t_dist;

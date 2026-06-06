@@ -212,10 +212,10 @@ TEST_F(PDFConversionTest, AreaToPdfW_ZeroHandling) {
 // ============================================================================
 
 TEST(RadianceConversionTest, RoundTrip) {
-    AttenuationRGB original = render::make_attenuation_rgb(0.5f, 0.7f, 0.3f);
+    render::RGB3f original = render::make_color_rgb(0.5f, 0.7f, 0.3f);
     RadianceRGB radiance = to_radiance(original);
-    AttenuationRGB back = render::apply_camera_sensitivity(radiance, render::kDefaultCameraSensitivity);
-    
+    render::PixelRGB back = render::apply_camera_sensitivity(radiance, render::kDefaultCameraSensitivity);
+
     auto [or_, og, ob] = render::color_to_floats(original);
     auto [br, bg, bb] = render::color_to_floats(back);
     EXPECT_NEAR(or_, br, kEps);
@@ -225,11 +225,11 @@ TEST(RadianceConversionTest, RoundTrip) {
 
 TEST(RadianceConversionTest, Multiplication) {
     ThroughputRGB throughput = render::make_throughput_rgb(0.5f, 0.5f, 0.5f);
-    RadianceRGB emission = to_radiance(render::make_attenuation_rgb(2.0f, 2.0f, 2.0f));
-    
+    RadianceRGB emission = to_radiance(render::make_color_rgb(2.0f, 2.0f, 2.0f));
+
     RadianceRGB result = throughput * emission;
-    AttenuationRGB result_color = render::apply_camera_sensitivity(result, render::kDefaultCameraSensitivity);
-    
+    render::PixelRGB result_color = render::apply_camera_sensitivity(result, render::kDefaultCameraSensitivity);
+
     auto [rr, rg, rb] = render::color_to_floats(result_color);
     EXPECT_NEAR(rr, 1.0f, kEps);
     EXPECT_NEAR(rg, 1.0f, kEps);

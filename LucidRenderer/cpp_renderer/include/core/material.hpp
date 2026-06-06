@@ -133,17 +133,17 @@ struct NodeTree {
  * Material - Physical material properties for PBR rendering (unit-safe)
  */
 struct Material {
-    render::RGB3f albedo;         // Base color (dimensionless [0,1])
-    float metallic;               // Metallic factor (dimensionless, 0-1)
-    float roughness;              // Surface roughness (dimensionless, 0-1)
-    render::RadianceRGB emission; // Emission [W/(sr·m²)]
-    float transmission;           // Glass/transparency (dimensionless, 0-1)
-    float ior;                    // Index of Refraction (dimensionless)
-    
+    render::AttenuationRGB albedo; // Base color reflectance (dimensionless [0,1])
+    float metallic;                // Metallic factor (dimensionless, 0-1)
+    float roughness;               // Surface roughness (dimensionless, 0-1)
+    render::RadianceRGB emission;  // Emission [W/(sr·m²)]
+    float transmission;            // Glass/transparency (dimensionless, 0-1)
+    float ior;                     // Index of Refraction (dimensionless)
+
     NodeTree nodeTree;
     bool useNodes;
-    
-    Material() 
+
+    Material()
         : albedo(0.8f, 0.8f, 0.8f)
         , metallic(0.0f)
         , roughness(0.5f)
@@ -151,13 +151,13 @@ struct Material {
         , transmission(0.0f)
         , ior(1.45f)
         , useNodes(false) {}
-    
-    Material(const render::RGB3f& a, float m, float r) 
+
+    Material(const render::AttenuationRGB& a, float m, float r)
         : albedo(a), metallic(m), roughness(r)
         , emission()
         , transmission(0.0f), ior(1.45f), useNodes(false) {}
-    
-    Material(const render::RGB3f& a, float m, float r, const render::RadianceRGB& e) 
+
+    Material(const render::AttenuationRGB& a, float m, float r, const render::RadianceRGB& e)
         : albedo(a), metallic(m), roughness(r)
         , emission(e)
         , transmission(0.0f), ior(1.45f), useNodes(false) {}

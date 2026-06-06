@@ -806,6 +806,26 @@ inline Normal Direction::as_normal() const {
 inline float dot(Direction d, Normal n) { return render::dot(d.vec(), n.vec()); }
 inline float dot(Normal n, Direction d) { return render::dot(n.vec(), d.vec()); }
 
+// Dot products for same-typed Direction/Normal pairs.
+// Direction is dimensionless (unit vector), so the result is a plain float (cosine).
+constexpr float dot(Direction a, Direction b) { return dot(a.vec(), b.vec()); }
+constexpr float dot(Normal    a, Normal    b) { return dot(a.vec(), b.vec()); }
+
+// Half-vector: normalized bisector of wo and wi.
+// Returns nullopt when wo + wi cancels (back-to-back rays, geometric degeneracy).
+// Used by microfacet BSDFs to construct the microfacet normal h.
+[[nodiscard]] inline std::optional<Direction>
+half_vector(Direction wo, Direction wi) {
+    return make_direction(wo.vec() + wi.vec());
+}
+
+// Half-vector with default fallback for sites where degeneracy is known not to
+// occur (PDF evaluation after sampling), to preserve previous behavior.
+[[nodiscard]] inline Direction
+half_vector_or_default(Direction wo, Direction wi, Direction fallback = Direction{}) {
+    return make_direction_or_default(wo.vec() + wi.vec(), fallback);
+}
+
 // ============================================================================
 // Part F: Geometric Utilities
 // ============================================================================
@@ -964,32 +984,113 @@ inline std::tuple<float, float, float> to_floats(RGB3f c) {
 }
 
 // ============================================================================
-// Part H.2: Type Aliases for Backward Compatibility
+// Part H.2: TaggedRGB - Strong-typed RGB by physical role
+// ============================================================================
+// Three semantically distinct RGB types share the same float-triple layout
+// but cannot be implicitly assigned or mixed:
+//   - AttenuationRGB: material reflectance [0, 1]
+//   - ThroughputRGB:  path weight [0, ∞), accumulated BSDF/cos/pdf factors
+//   - PixelRGB:       post-radiance pixel value (e.g. result of camera sensitivity)
+// Only the explicitly defined cross-type operators below compile; everything
+// else (e.g. ThroughputRGB = AttenuationRGB, ThroughputRGB + AttenuationRGB)
+// is a compile error by construction.
+
+template <typename Tag>
+struct TaggedRGB {
+    float r = 0.0f, g = 0.0f, b = 0.0f;
+
+    constexpr TaggedRGB() = default;
+    constexpr TaggedRGB(float r_, float g_, float b_) : r(r_), g(g_), b(b_) {}
+
+    constexpr TaggedRGB  operator+(TaggedRGB o) const { return {r + o.r, g + o.g, b + o.b}; }
+    constexpr TaggedRGB& operator+=(TaggedRGB o)      { r += o.r; g += o.g; b += o.b; return *this; }
+    constexpr TaggedRGB  operator-(TaggedRGB o) const { return {r - o.r, g - o.g, b - o.b}; }
+    constexpr TaggedRGB& operator-=(TaggedRGB o)      { r -= o.r; g -= o.g; b -= o.b; return *this; }
+    constexpr TaggedRGB  operator*(float s) const     { return {r * s, g * s, b * s}; }
+    constexpr TaggedRGB& operator*=(float s)          { r *= s; g *= s; b *= s; return *this; }
+    constexpr TaggedRGB  operator/(float s) const     { return {r / s, g / s, b / s}; }
+    constexpr TaggedRGB& operator/=(float s)          { r /= s; g /= s; b /= s; return *this; }
+    constexpr bool       operator==(TaggedRGB o) const { return r == o.r && g == o.g && b == o.b; }
+    constexpr bool       operator!=(TaggedRGB o) const { return !(*this == o); }
+};
+
+template <typename Tag>
+constexpr TaggedRGB<Tag> operator*(float s, TaggedRGB<Tag> c) { return c * s; }
+
+struct AttenuationTag {};
+struct ThroughputTag  {};
+struct PixelTag       {};
+
+using AttenuationRGB = TaggedRGB<AttenuationTag>;
+using ThroughputRGB  = TaggedRGB<ThroughputTag>;
+using PixelRGB       = TaggedRGB<PixelTag>;
+
+// Hadamard products for same-type composition
+constexpr AttenuationRGB operator*(AttenuationRGB a, AttenuationRGB b) {
+    return {a.r * b.r, a.g * b.g, a.b * b.b};
+}
+constexpr ThroughputRGB operator*(ThroughputRGB a, ThroughputRGB b) {
+    return {a.r * b.r, a.g * b.g, a.b * b.b};
+}
+
+// Cross-tag products (allowed combinations only)
+constexpr ThroughputRGB operator*(ThroughputRGB t, AttenuationRGB a) {
+    return {t.r * a.r, t.g * a.g, t.b * a.b};
+}
+constexpr ThroughputRGB operator*(AttenuationRGB a, ThroughputRGB t) { return t * a; }
+
+// ============================================================================
+// Part H.3: Factory and Helper Functions
 // ============================================================================
 
-using AttenuationRGB = RGB3f;
-using ThroughputRGB = RGB3f;
+inline constexpr AttenuationRGB make_attenuation_rgb(float r, float g, float b) { return {r, g, b}; }
+inline constexpr ThroughputRGB  make_throughput_rgb (float r, float g, float b) { return {r, g, b}; }
+inline constexpr PixelRGB       make_pixel_rgb      (float r, float g, float b) { return {r, g, b}; }
 
-// ============================================================================
-// Part H.3: Factory and Helper Functions (Compatibility)
-// ============================================================================
-
-inline constexpr RGB3f make_attenuation_rgb(float r, float g, float b) { return {r, g, b}; }
-inline constexpr RGB3f make_throughput_rgb(float r, float g, float b) { return {r, g, b}; }
-
-// Legacy alias for make_color_rgb (widely used in codebase)
+// Legacy alias for make_color_rgb (widely used in codebase, untagged RGB3f)
 inline constexpr RGB3f make_color_rgb(float r, float g, float b) { return {r, g, b}; }
 
-inline constexpr RGB3f zero_attenuation_rgb() { return zero_rgb3f(); }
-inline constexpr RGB3f zero_throughput_rgb() { return zero_rgb3f(); }
-inline constexpr RGB3f unit_throughput_rgb() { return unit_rgb3f(); }
+inline constexpr AttenuationRGB zero_attenuation_rgb() { return {}; }
+inline constexpr ThroughputRGB  zero_throughput_rgb()  { return {}; }
+inline constexpr ThroughputRGB  unit_throughput_rgb()  { return {1.0f, 1.0f, 1.0f}; }
+inline constexpr PixelRGB       zero_pixel_rgb()       { return {}; }
 
-inline bool throughput_is_valid(RGB3f c) { return is_valid(c); }
-inline float throughput_max_component(RGB3f c) { return max_component(c); }
-inline RGB3f attenuation_clamp_min_zero(RGB3f c) { return clamp_min_zero(c); }
+// Generic helpers over TaggedRGB<Tag>
+template <typename Tag>
+inline bool throughput_is_valid(TaggedRGB<Tag> c) {
+    return !std::isnan(c.r) && !std::isnan(c.g) && !std::isnan(c.b) &&
+           !std::isinf(c.r) && !std::isinf(c.g) && !std::isinf(c.b);
+}
+template <typename Tag>
+inline float throughput_max_component(TaggedRGB<Tag> c) { return std::max({c.r, c.g, c.b}); }
+template <typename Tag>
+inline TaggedRGB<Tag> attenuation_clamp_min_zero(TaggedRGB<Tag> c) {
+    return {std::max(c.r, 0.0f), std::max(c.g, 0.0f), std::max(c.b, 0.0f)};
+}
+
+// Boundary conversion: extract raw RGB3f from a tagged color.
+// Used at well-defined boundaries (Fresnel f0 modulation, Python FFI, diagnostics).
+template <typename Tag>
+inline constexpr RGB3f to_rgb3f(TaggedRGB<Tag> c) { return {c.r, c.g, c.b}; }
+
+// Boundary conversion: tag a raw RGB3f triple. Use at the I/O / node-eval boundary
+// where the caller asserts the semantic role of an untagged value.
+template <typename Tag>
+inline constexpr TaggedRGB<Tag> tag_rgb(RGB3f c) { return {c.r, c.g, c.b}; }
+inline constexpr AttenuationRGB as_attenuation(RGB3f c) { return tag_rgb<AttenuationTag>(c); }
+inline constexpr ThroughputRGB  as_throughput (RGB3f c) { return tag_rgb<ThroughputTag>(c); }
+inline constexpr PixelRGB       as_pixel      (RGB3f c) { return tag_rgb<PixelTag>(c); }
+
+// Convenience: extract (r, g, b) tuple from a tagged color (mirror of to_floats).
+template <typename Tag>
+inline std::tuple<float, float, float> to_floats(TaggedRGB<Tag> c) {
+    return {c.r, c.g, c.b};
+}
 
 // Legacy alias for color_to_floats (widely used in codebase)
 inline std::tuple<float, float, float> color_to_floats(RGB3f c) { return to_floats(c); }
+template <typename Tag>
+inline std::tuple<float, float, float> color_to_floats(TaggedRGB<Tag> c) { return {c.r, c.g, c.b}; }
 
 // ============================================================================
 // Part I: Radiance and BSDF Types (Unit-Typed with mp-units)
@@ -1108,16 +1209,22 @@ inline bool is_emissive(RadianceRGB emission) {
 
 // --- BSDFRGB Operators with RGB3f ---
 
-// BSDFRGB * RGB3f -> BSDFRGB (modulate by albedo/kd)
+// BSDFRGB * RGB3f -> BSDFRGB (modulate by albedo/kd as plain coefficient)
 // Physical: [1/sr] × [dimensionless] -> [1/sr]
 inline BSDFRGB operator*(BSDFRGB bsdf, RGB3f color) {
     return {bsdf.r * color.r, bsdf.g * color.g, bsdf.b * color.b};
 }
 inline BSDFRGB operator*(RGB3f color, BSDFRGB bsdf) { return bsdf * color; }
 
-// BSDFRGB / PdfW -> RGB3f (importance sampling weight)
+// BSDFRGB * AttenuationRGB -> BSDFRGB (modulate by reflectance — typed version)
+// Physical: [1/sr] × [0,1] -> [1/sr]
+inline BSDFRGB operator*(BSDFRGB bsdf, AttenuationRGB a) {
+    return {bsdf.r * a.r, bsdf.g * a.g, bsdf.b * a.b};
+}
+inline BSDFRGB operator*(AttenuationRGB a, BSDFRGB bsdf) { return bsdf * a; }
+
+// BSDFRGB / PdfW -> RGB3f (importance sampling weight building block)
 // Physical: [1/sr] / [1/sr] -> [dimensionless]
-// Note: Returns RGB3f (throughput-like weight)
 inline RGB3f operator/(BSDFRGB f, PdfW pdf) {
     if (pdf < MIN_PDF) return zero_rgb3f();
     // [1/sr] / [1/sr] = dimensionless
@@ -1130,7 +1237,7 @@ inline RGB3f operator/(BSDFRGB f, PdfW pdf) {
 
 // Lambertian diffuse BSDF from albedo: albedo / π → [1/sr]
 // [dimensionless] * [1/sr] = [1/sr]
-inline BSDFRGB diffuse_bsdf_from_albedo(RGB3f albedo) {
+inline BSDFRGB diffuse_bsdf_from_albedo(AttenuationRGB albedo) {
     constexpr float INV_PI = 0.31830988618f;
     return {
         albedo.r * INV_PI * per_sr,
@@ -1139,15 +1246,34 @@ inline BSDFRGB diffuse_bsdf_from_albedo(RGB3f albedo) {
     };
 }
 
-// --- RGB3f * RadianceRGB Operators ---
+// --- Tagged RGB * RadianceRGB Operators ---
 
-// RGB3f * RadianceRGB -> RadianceRGB (throughput × emission)
+// ThroughputRGB * RadianceRGB -> RadianceRGB (path weight × emission)
 // Physical: [dimensionless] × [W/(sr·m²)] -> [W/(sr·m²)]
 // This is the main operator used in path tracing: result += throughput * emission
-inline RadianceRGB operator*(RGB3f throughput, RadianceRGB rad) {
+inline RadianceRGB operator*(ThroughputRGB throughput, RadianceRGB rad) {
     return {rad.r * throughput.r, rad.g * throughput.g, rad.b * throughput.b};
 }
-inline RadianceRGB operator*(RadianceRGB rad, RGB3f throughput) { return throughput * rad; }
+inline RadianceRGB operator*(RadianceRGB rad, ThroughputRGB throughput) { return throughput * rad; }
+
+// AttenuationRGB * RadianceRGB -> RadianceRGB (reflectance × radiance)
+inline RadianceRGB operator*(AttenuationRGB att, RadianceRGB rad) {
+    return {rad.r * att.r, rad.g * att.g, rad.b * att.b};
+}
+inline RadianceRGB operator*(RadianceRGB rad, AttenuationRGB att) { return att * rad; }
+
+// RGB3f * RadianceRGB -> RadianceRGB (raw dimensionless RGB; kept for boundary use)
+inline RadianceRGB operator*(RGB3f c, RadianceRGB rad) {
+    return {rad.r * c.r, rad.g * c.g, rad.b * c.b};
+}
+inline RadianceRGB operator*(RadianceRGB rad, RGB3f c) { return c * rad; }
+
+// --- ThroughputRGB scaling by Dimensionless (e.g. inverse_square_factor) ---
+inline ThroughputRGB operator*(ThroughputRGB t, Dimensionless d) {
+    float f = d.numerical_value_in(one);
+    return {t.r * f, t.g * f, t.b * f};
+}
+inline ThroughputRGB operator*(Dimensionless d, ThroughputRGB t) { return t * d; }
 
 // RadianceRGB * Dimensionless -> RadianceRGB (attenuation factor)
 // Physical: [W/(sr·m²)] × [dimensionless] -> [W/(sr·m²)]
@@ -1190,10 +1316,11 @@ inline CameraSensitivity sensitivity_from_ev(float ev) {
     return std::pow(2.0f, ev) * camera_sensitivity_unit;
 }
 
-// RadianceRGB × CameraSensitivity → RGB3f (physically correct conversion)
-// [W/(sr·m²)] × [sr·m²/W] = [dimensionless]
-inline RGB3f apply_camera_sensitivity(RadianceRGB rad, CameraSensitivity sens) {
-    // [W/(sr·m²)] × [sr·m²/W] = dimensionless
+// RadianceRGB × CameraSensitivity → PixelRGB (physically correct conversion)
+// [W/(sr·m²)] × [sr·m²/W] = [dimensionless], the result is a pixel value
+// (post-radiance, ready for tone mapping). Tagged PixelRGB so it can't be
+// confused with reflectance or path weights.
+inline PixelRGB apply_camera_sensitivity(RadianceRGB rad, CameraSensitivity sens) {
     return {
         (rad.r * sens).numerical_value_in(one),
         (rad.g * sens).numerical_value_in(one),
@@ -1225,6 +1352,40 @@ inline constexpr PdfW zero_pdf_w() { return 0.0f * per_sr; }
 inline constexpr auto MIN_AREA = 1e-6f * mp_units::square(mp_units::si::metre);
 inline constexpr auto MIN_LENGTH = 1e-6f * mp_units::si::metre;
 
+// ----------------------------------------------------------------------------
+// User-defined literals for typed quantities
+// ----------------------------------------------------------------------------
+// Opt-in: `using namespace render::literals;` brings these into scope.
+// Not in an `inline namespace` to avoid colliding with std::chrono UDLs (`_m`).
+namespace literals {
+    constexpr Length    operator""_m       (long double v) { return static_cast<float>(v) * si::metre; }
+    constexpr Length    operator""_m       (unsigned long long v) { return static_cast<float>(v) * si::metre; }
+    constexpr Length    operator""_mm      (long double v) { return static_cast<float>(v) * 1e-3f * si::metre; }
+    constexpr Length    operator""_mm      (unsigned long long v) { return static_cast<float>(v) * 1e-3f * si::metre; }
+    constexpr Angle     operator""_rad     (long double v) { return static_cast<float>(v) * si::radian; }
+    constexpr Angle     operator""_rad     (unsigned long long v) { return static_cast<float>(v) * si::radian; }
+    inline    Angle     operator""_deg     (long double v) { return degrees(static_cast<float>(v)); }
+    inline    Angle     operator""_deg     (unsigned long long v) { return degrees(static_cast<float>(v)); }
+    constexpr PdfW      operator""_per_sr  (long double v) { return static_cast<float>(v) * per_sr; }
+    constexpr PdfW      operator""_per_sr  (unsigned long long v) { return static_cast<float>(v) * per_sr; }
+    constexpr PdfA      operator""_per_m2  (long double v) { return static_cast<float>(v) * per_m2; }
+    constexpr PdfA      operator""_per_m2  (unsigned long long v) { return static_cast<float>(v) * per_m2; }
+}  // namespace literals
+
+// ----------------------------------------------------------------------------
+// Generic zero<Q>() factory for typed quantities
+// ----------------------------------------------------------------------------
+// Provides a uniform spelling for unit-typed zero values, e.g. `zero<Length>()`,
+// instead of `0.0f * mp_units::si::metre` scattered across constructors.
+template <typename Q> constexpr Q zero();
+template <> constexpr Length    zero<Length>()    { return 0.0f * si::metre; }
+template <> constexpr Area      zero<Area>()      { return 0.0f * mp_units::square(si::metre); }
+template <> constexpr Volume    zero<Volume>()    { return 0.0f * mp_units::cubic(si::metre); }
+template <> constexpr PdfW      zero<PdfW>()      { return 0.0f * per_sr; }
+template <> constexpr PdfA      zero<PdfA>()      { return 0.0f * per_m2; }
+template <> constexpr Angle     zero<Angle>()     { return 0.0f * si::radian; }
+template <> constexpr SolidAngle zero<SolidAngle>() { return 0.0f * si::steradian; }
+
 // Inverse square falloff factor: 1/d² -> Dimensionless
 // Common pattern for point/spot light attenuation
 // Returns: 1 m² / d² (dimensionless quantity)
@@ -1248,14 +1409,14 @@ inline Dimensionless area_ratio(Area numerator, Area denominator) {
 
 // Compute throughput weight from BSDF sample: f × |cosθ| / pdf
 // This is the main importance sampling weight calculation.
-// Returns RGB3f [0,∞) that can be multiplied with path throughput.
-inline RGB3f bsdf_sample_weight(BSDFRGB f, float abs_cos_theta, PdfW pdf) {
+// Returns ThroughputRGB [0,∞) that can be multiplied with path throughput.
+inline ThroughputRGB bsdf_sample_weight(BSDFRGB f, float abs_cos_theta, PdfW pdf) {
     // Debug: catch invalid PDFs early (indicates sampling bug)
     assert((pdf >= 0.0f * per_sr) && "bsdf_sample_weight: negative PDF");
-    if (pdf < MIN_PDF) return zero_rgb3f();
+    if (pdf < MIN_PDF) return zero_throughput_rgb();
     // Use typed division: BSDFRGB [1/sr] / PdfW [1/sr] -> RGB3f [dimensionless]
     RGB3f base = f / pdf;
-    return base * abs_cos_theta;
+    return ThroughputRGB{base.r * abs_cos_theta, base.g * abs_cos_theta, base.b * abs_cos_theta};
 }
 
 // MIS power heuristic (balance heuristic with power=2)
@@ -1343,5 +1504,54 @@ static_assert(std::is_same_v<decltype(inverse_square_factor(std::declval<Length>
 
 static_assert(std::is_same_v<decltype(compute_pdf_w_from_area(std::declval<Length>(), std::declval<Area>(), 1.0f)), PdfW>,
               "compute_pdf_w_from_area must return PdfW [1/sr]");
+
+// ----------------------------------------------------------------------------
+// Refactor invariants (P3+ type hardening)
+// ----------------------------------------------------------------------------
+
+// Sizes: typed scalars must collapse to plain floats, vectors to Vec3f
+static_assert(sizeof(PdfW)     == sizeof(float),  "PdfW must be a thin float wrapper");
+static_assert(sizeof(PdfA)     == sizeof(float),  "PdfA must be a thin float wrapper");
+static_assert(sizeof(Length)   == sizeof(float),  "Length must be a thin float wrapper");
+static_assert(sizeof(Area)     == sizeof(float),  "Area must be a thin float wrapper");
+static_assert(sizeof(Angle)    == sizeof(float),  "Angle must be a thin float wrapper");
+static_assert(sizeof(Direction) == sizeof(Vec3f), "Direction must be a thin Vec3f wrapper");
+static_assert(sizeof(Normal)    == sizeof(Vec3f), "Normal must be a thin Vec3f wrapper");
+
+// TaggedRGB: 12-byte float triple per tag
+static_assert(sizeof(AttenuationRGB) == 12, "AttenuationRGB must be 3 floats, no padding");
+static_assert(sizeof(ThroughputRGB)  == 12, "ThroughputRGB must be 3 floats, no padding");
+static_assert(sizeof(PixelRGB)       == 12, "PixelRGB must be 3 floats, no padding");
+
+// Trivially copyable: hot-path values stay register-friendly
+static_assert(std::is_trivially_copyable_v<Direction>);
+static_assert(std::is_trivially_copyable_v<Normal>);
+static_assert(std::is_trivially_copyable_v<AttenuationRGB>);
+static_assert(std::is_trivially_copyable_v<ThroughputRGB>);
+static_assert(std::is_trivially_copyable_v<PixelRGB>);
+
+// Tagged types are *not* interchangeable, even though their layout is identical
+static_assert(!std::is_same_v<AttenuationRGB, ThroughputRGB>,
+              "AttenuationRGB and ThroughputRGB must be distinct types");
+static_assert(!std::is_same_v<AttenuationRGB, PixelRGB>,
+              "AttenuationRGB and PixelRGB must be distinct types");
+static_assert(!std::is_same_v<ThroughputRGB, PixelRGB>,
+              "ThroughputRGB and PixelRGB must be distinct types");
+static_assert(!std::is_constructible_v<ThroughputRGB, AttenuationRGB>,
+              "ThroughputRGB must not be implicitly constructible from AttenuationRGB");
+static_assert(!std::is_constructible_v<AttenuationRGB, PixelRGB>,
+              "AttenuationRGB must not be implicitly constructible from PixelRGB");
+
+// Operator return types match the intended algebra
+static_assert(std::is_same_v<decltype(std::declval<ThroughputRGB>() * std::declval<RadianceRGB>()), RadianceRGB>,
+              "ThroughputRGB * RadianceRGB must return RadianceRGB");
+static_assert(std::is_same_v<decltype(std::declval<AttenuationRGB>() * std::declval<RadianceRGB>()), RadianceRGB>,
+              "AttenuationRGB * RadianceRGB must return RadianceRGB");
+static_assert(std::is_same_v<decltype(std::declval<ThroughputRGB>() * std::declval<AttenuationRGB>()), ThroughputRGB>,
+              "ThroughputRGB * AttenuationRGB must return ThroughputRGB");
+static_assert(std::is_same_v<decltype(apply_camera_sensitivity(std::declval<RadianceRGB>(), std::declval<CameraSensitivity>())), PixelRGB>,
+              "apply_camera_sensitivity must return PixelRGB");
+static_assert(std::is_same_v<decltype(bsdf_sample_weight(std::declval<BSDFRGB>(), 0.0f, std::declval<PdfW>())), ThroughputRGB>,
+              "bsdf_sample_weight must return ThroughputRGB");
 
 }  // namespace render

@@ -182,10 +182,10 @@ inline Hit intersectScene(const Scene& scene, const Ray& ray,
  * Get environment/background color for ray
  * @param ray   Ray direction (for future HDRI support)
  * @param env   Environment settings
- * @return Environment color coefficient (AttenuationRGB)
+ * @return Environment color (RGB3f) — caller passes through to_radiance to obtain RadianceRGB
  */
-inline render::AttenuationRGB getEnvironmentColor(const Ray& ray, const Environment& env) {
-    return env.color * env.strength;
+inline render::RGB3f getEnvironmentColor(const Ray& ray, const Environment& env) {
+    return render::to_rgb3f(env.color) * env.strength;
 }
 
 // ========== Shadow Testing ==========

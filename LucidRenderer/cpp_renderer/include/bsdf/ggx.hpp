@@ -56,9 +56,9 @@ inline render::Direction localToWorld(const render::Direction& local, const rend
 inline render::Direction worldToLocal(const render::Direction& world, const render::Direction& n, 
                                        const render::Direction& t, const render::Direction& b) {
     return render::make_direction_or_default(render::Vec3f(
-        render::dot(world.vec(), t.vec()),
-        render::dot(world.vec(), b.vec()),
-        render::dot(world.vec(), n.vec())
+        render::dot(world, t),
+        render::dot(world, b),
+        render::dot(world, n)
     ));
 }
 
@@ -171,9 +171,9 @@ inline render::Direction sampleGGXVNDF(const render::Direction& wo, float roughn
  * PDF for GGX VNDF sampling
  */
 inline float pdfGGXVNDF(const render::Direction& wo, const render::Direction& h, float roughness, const render::Direction& n) {
-    float NdotH = render::dot(n.vec(), h.vec());
-    float VdotH = render::dot(wo.vec(), h.vec());
-    float NdotV = render::dot(n.vec(), wo.vec());
+    float NdotH = render::dot(n, h);
+    float VdotH = render::dot(wo, h);
+    float NdotV = render::dot(n, wo);
     if (NdotH <= 0.0f || VdotH <= 0.0f || NdotV <= 0.0f) return 0.0f;
     
     float D = ggxD(NdotH, roughness);

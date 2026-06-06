@@ -208,7 +208,7 @@ render::AttenuationRGB evaluateNode(const NodeTree &tree, const std::string &nod
             } else {
                 // Use default value
                 if(baseColorSocket->default_value.type == SocketValue::VEC4) {
-                    return baseColorSocket->default_value.v4;  // VEC4 uses v4 field (already Color3)
+                    return render::as_attenuation(baseColorSocket->default_value.v4);  // VEC4 uses v4 field (already Color3)
                 } else if(baseColorSocket->default_value.type == SocketValue::VEC3) {
                     return render::make_attenuation_rgb(baseColorSocket->default_value.v3.x,
                                        baseColorSocket->default_value.v3.y,
@@ -221,7 +221,7 @@ render::AttenuationRGB evaluateNode(const NodeTree &tree, const std::string &nod
             const NodeSocket *socket = node->findInput("Base Color");
             if(socket && !socket->is_linked) {
                 if(socket->default_value.type == SocketValue::VEC4) {
-                    return socket->default_value.v4;
+                    return render::as_attenuation(socket->default_value.v4);
                 } else if(socket->default_value.type == SocketValue::VEC3) {
                     return render::make_attenuation_rgb(socket->default_value.v3.x,
                                        socket->default_value.v3.y,
@@ -245,7 +245,7 @@ render::AttenuationRGB evaluateNode(const NodeTree &tree, const std::string &nod
                 if(colorSocket->is_linked) {
                     color = evaluateNode(tree, colorSocket->linked_node, colorSocket->linked_socket, uv);
                 } else if(colorSocket->default_value.type == SocketValue::VEC4) {
-                    color = colorSocket->default_value.v4;  // RGBA → use v4 field
+                    color = render::as_attenuation(colorSocket->default_value.v4);  // RGBA → use v4 field
                 } else if(colorSocket->default_value.type == SocketValue::VEC3) {
                     color = render::make_attenuation_rgb(colorSocket->default_value.v3.x,
                                         colorSocket->default_value.v3.y,
@@ -280,7 +280,7 @@ render::AttenuationRGB evaluateNode(const NodeTree &tree, const std::string &nod
             } else {
                 // Use default value
                 if(colorSocket->default_value.type == SocketValue::VEC4) {
-                    return colorSocket->default_value.v4;  // RGBA → use v4 field (already Color3)
+                    return render::as_attenuation(colorSocket->default_value.v4);  // RGBA → use v4 field (already Color3)
                 } else if(colorSocket->default_value.type == SocketValue::VEC3) {
                     return render::make_attenuation_rgb(colorSocket->default_value.v3.x,
                                        colorSocket->default_value.v3.y,
@@ -295,7 +295,7 @@ render::AttenuationRGB evaluateNode(const NodeTree &tree, const std::string &nod
         for(const auto &output : node->outputs) {
             if(output.name == "Color" && output.default_value.type != SocketValue::NONE) {
                 if(output.default_value.type == SocketValue::VEC4) {
-                    return output.default_value.v4;  // RGBA → use v4 field (already Color3)
+                    return render::as_attenuation(output.default_value.v4);  // RGBA → use v4 field (already Color3)
                 } else if(output.default_value.type == SocketValue::VEC3) {
                     return render::make_attenuation_rgb(output.default_value.v3.x,
                                        output.default_value.v3.y,
@@ -325,7 +325,7 @@ render::AttenuationRGB evaluateNode(const NodeTree &tree, const std::string &nod
             if(aSocket->is_linked) {
                 colorA = evaluateNode(tree, aSocket->linked_node, aSocket->linked_socket, uv);
             } else if(aSocket->default_value.type == SocketValue::VEC4) {
-                colorA = aSocket->default_value.v4;
+                colorA = render::as_attenuation(aSocket->default_value.v4);
             } else if(aSocket->default_value.type == SocketValue::VEC3) {
                 colorA = render::make_attenuation_rgb(aSocket->default_value.v3.x,
                                      aSocket->default_value.v3.y,
@@ -337,7 +337,7 @@ render::AttenuationRGB evaluateNode(const NodeTree &tree, const std::string &nod
             if(bSocket->is_linked) {
                 colorB = evaluateNode(tree, bSocket->linked_node, bSocket->linked_socket, uv);
             } else if(bSocket->default_value.type == SocketValue::VEC4) {
-                colorB = bSocket->default_value.v4;
+                colorB = render::as_attenuation(bSocket->default_value.v4);
             } else if(bSocket->default_value.type == SocketValue::VEC3) {
                 colorB = render::make_attenuation_rgb(bSocket->default_value.v3.x,
                                      bSocket->default_value.v3.y,
@@ -362,7 +362,7 @@ render::AttenuationRGB evaluateNode(const NodeTree &tree, const std::string &nod
             if(color1Socket->is_linked) {
                 color1 = evaluateNode(tree, color1Socket->linked_node, color1Socket->linked_socket, uv);
             } else if(color1Socket->default_value.type == SocketValue::VEC4) {
-                color1 = color1Socket->default_value.v4;
+                color1 = render::as_attenuation(color1Socket->default_value.v4);
             } else if(color1Socket->default_value.type == SocketValue::VEC3) {
                 color1 = render::make_attenuation_rgb(color1Socket->default_value.v3.x,
                                      color1Socket->default_value.v3.y,
@@ -374,7 +374,7 @@ render::AttenuationRGB evaluateNode(const NodeTree &tree, const std::string &nod
             if(color2Socket->is_linked) {
                 color2 = evaluateNode(tree, color2Socket->linked_node, color2Socket->linked_socket, uv);
             } else if(color2Socket->default_value.type == SocketValue::VEC4) {
-                color2 = color2Socket->default_value.v4;
+                color2 = render::as_attenuation(color2Socket->default_value.v4);
             } else if(color2Socket->default_value.type == SocketValue::VEC3) {
                 color2 = render::make_attenuation_rgb(color2Socket->default_value.v3.x,
                                      color2Socket->default_value.v3.y,
@@ -489,29 +489,29 @@ render::AttenuationRGB getAlbedoFromNodeTree(const NodeTree &tree, const render:
  * This determines if a surface emits light (acts as a light source).
  * Used to implement area lights in path tracing.
  */
-render::AttenuationRGB getEmissionFromNodeTree(const NodeTree &tree, const render::Vec2f &uv) {
+render::RGB3f getEmissionFromNodeTree(const NodeTree &tree, const render::Vec2f &uv) {
     if(!tree.valid) {
-        return render::make_attenuation_rgb(0.0f, 0.0f, 0.0f);  // No emission
+        return render::make_color_rgb(0.0f, 0.0f, 0.0f);  // No emission
     }
-    
+
     // Find Material Output node
     const MaterialNode *outputNode = tree.findOutputNode();
     if(!outputNode) {
-        return render::make_attenuation_rgb(0.0f, 0.0f, 0.0f);
+        return render::make_color_rgb(0.0f, 0.0f, 0.0f);
     }
-    
+
     // Get Surface input
     const NodeSocket *surfaceSocket = outputNode->findInput("Surface");
     if(!surfaceSocket || !surfaceSocket->is_linked) {
-        return render::make_attenuation_rgb(0.0f, 0.0f, 0.0f);
+        return render::make_color_rgb(0.0f, 0.0f, 0.0f);
     }
-    
+
     // Check if connected node is Emission shader
     const MaterialNode *shaderNode = tree.findNode(surfaceSocket->linked_node);
     if(shaderNode && shaderNode->type == "ShaderNodeEmission") {
-        return evaluateNode(tree, surfaceSocket->linked_node, "Emission", uv);
+        return render::to_rgb3f(evaluateNode(tree, surfaceSocket->linked_node, "Emission", uv));
     }
-    
+
     // Principled BSDF also supports emission (for glowing objects)
     if(shaderNode && shaderNode->type == "ShaderNodeBsdfPrincipled") {
         // Try both "Emission Color" (newer Blender) and "Emission" (older versions)
@@ -519,10 +519,10 @@ render::AttenuationRGB getEmissionFromNodeTree(const NodeTree &tree, const rende
         if(!emissionSocket) {
             emissionSocket = shaderNode->findInput("Emission");
         }
-        
+
         if(emissionSocket) {
             if(emissionSocket->is_linked) {
-                render::AttenuationRGB emissionColor = evaluateNode(tree, emissionSocket->linked_node, emissionSocket->linked_socket, uv);
+                render::RGB3f emissionColor = render::to_rgb3f(evaluateNode(tree, emissionSocket->linked_node, emissionSocket->linked_socket, uv));
                 // Apply emission strength
                 const NodeSocket *strengthSocket = shaderNode->findInput("Emission Strength");
                 float strength = 0.0f;
@@ -537,7 +537,7 @@ render::AttenuationRGB getEmissionFromNodeTree(const NodeTree &tree, const rende
                 if(strengthSocket && strengthSocket->default_value.type == SocketValue::FLOAT) {
                     strength = strengthSocket->default_value.f;
                 }
-                return emissionSocket->default_value.v4 * strength;
+                return emissionSocket->default_value.v4 * strength;  // RGB3f → RGB3f (raw color path)
             } else if(emissionSocket->default_value.type == SocketValue::VEC3) {
                 // Emission strength is separate in Principled BSDF
                 const NodeSocket *strengthSocket = shaderNode->findInput("Emission Strength");
@@ -545,14 +545,14 @@ render::AttenuationRGB getEmissionFromNodeTree(const NodeTree &tree, const rende
                 if(strengthSocket && strengthSocket->default_value.type == SocketValue::FLOAT) {
                     strength = strengthSocket->default_value.f;
                 }
-                return render::make_attenuation_rgb(emissionSocket->default_value.v3.x,
+                return render::make_color_rgb(emissionSocket->default_value.v3.x,
                                    emissionSocket->default_value.v3.y,
                                    emissionSocket->default_value.v3.z) * strength;
             }
         }
     }
-    
-    return render::make_attenuation_rgb(0.0f, 0.0f, 0.0f);
+
+    return render::make_color_rgb(0.0f, 0.0f, 0.0f);
 }
 
 /**
