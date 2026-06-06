@@ -445,6 +445,13 @@ public:
         const std::string& mode)
     {
 #ifdef LUCID_HAS_DAWN
+        // Mirror CPU render_debug: clear the cancel flag at the start of
+        // every call. Without this, a single session.cancel() (which the
+        // viewport calls on camera changes) leaves cancel_requested_=true
+        // for the rest of the session, and is_cancelled() then poisons
+        // every subsequent RenderResult.
+        reset_cancel();
+
         // Phase 1b only supports normal mode on the GPU.
         if (mode != "normal") {
             return render_debug(tile_x, tile_y, tile_w, tile_h, full_w, full_h, mode);

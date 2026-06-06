@@ -357,38 +357,38 @@ class ViewportRenderer:
         current_time: float
     ) -> bool:
         """レンダリング結果をポーリング
-        
+
         Returns:
             テクスチャが更新された場合 True
         """
         import gpu
-        
+
         if state.render_future is None:
             return False
-        
+
         if not state.render_future.done():
             return False
-        
+
         try:
             result: RenderResult = state.render_future.result()
             state.render_future = None
             state.last_render_complete_time = current_time
-            
+
             if result.cancelled or not result.pixels:
                 return False
-            
+
             expected_len = result.width * result.height * 4
             if len(result.pixels) != expected_len:
                 return False
-            
+
             # サンプル累積
             self._accumulate_samples(state, result)
-            
+
             # テクスチャ更新
             self._update_texture(state, result)
-            
+
             return True
-            
+
         except Exception as e:
             print(f"[ViewportRenderer] Render error: {e}")
             import traceback

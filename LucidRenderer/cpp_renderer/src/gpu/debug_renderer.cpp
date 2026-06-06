@@ -248,7 +248,11 @@ std::vector<float> DebugRenderer::render_normal(DawnContext& ctx,
                 map_err.assign(msg.data, msg.length);
             }
         });
-    wait_for(ctx.instance(), map_future);
+    // Use a finite timeout so a stalled GPU surfaces as an exception rather
+    // than hanging the viewport thread forever.
+    if (!wait_for_with_timeout(ctx.instance(), map_future)) {
+        throw std::runtime_error("DebugRenderer::render_normal: MapAsync timed out (>5s)");
+    }
     if (!map_err.empty()) {
         throw std::runtime_error("DebugRenderer::render_normal: MapAsync failed: "
                                  + map_err);
