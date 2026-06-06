@@ -51,11 +51,31 @@ class DawnContext;
 // `point_lights` is 8 floats per light (std430 alignment):
 //   pos.xyz,   _pad      (vec4)
 //   color.xyz, intensity (vec4)   // intensity ≈ Blender Light.energy in W
+//
+// BVH (Phase 1c): single global BVH over the flat triangle list. Each node is
+// 32 bytes / 2 vec4s (std430). The convention mirrors the CPU BVH: `triCount > 0`
+// means leaf, with `triStart` in the `left` slot and `triCount` in the `right`
+// slot. Internal nodes have `triCount == 0` and store child node indices.
+// Triangles are reordered during packing so that leaves can index the triangle
+// buffer directly — no separate triIndices indirection.
+struct GpuBvhNode {
+    float bmin[3];   int32_t left;             // child idx OR triStart (when leaf)
+    float bmax[3];   int32_t right_or_count;   // child idx OR triCount (when leaf)
+};
+static_assert(sizeof(GpuBvhNode) == 32, "GpuBvhNode must be 32 bytes for std430");
+
 struct PackedPathScene {
     std::vector<float> triangles;
     uint32_t triangle_count = 0;
     std::vector<float> point_lights;
     uint32_t point_light_count = 0;
+    std::vector<GpuBvhNode> bvh_nodes;
+    uint32_t bvh_node_count = 0;
+    // Monotonic id assigned at pack time. PathTracer compares against the id
+    // it last uploaded so the static buffers (tri / lights / bvh) skip
+    // WriteBuffer on subsequent dispatches with the same scene. 0 = unset
+    // (always re-upload, e.g. for tests that construct PackedPathScene by hand).
+    uint64_t cache_id = 0;
 };
 
 PackedPathScene pack_scene_for_path_tracer(const Scene& scene);
@@ -87,9 +107,9 @@ struct PathTracerParamsGpu {
     // Environment color (RGB) + strength (alpha slot)
     float    env_color[3];     float env_strength;
 
-    // Lights
+    // Lights / BVH counts
     uint32_t point_light_count;
-    uint32_t _pad4;
+    uint32_t bvh_node_count;   // 0 → shader skips traversal (empty scene)
     uint32_t _pad5;
     uint32_t _pad6;
 };
@@ -109,7 +129,8 @@ PathTracerParamsGpu make_path_tracer_params(
     uint32_t samples, uint32_t sample_offset, uint32_t max_bounces,
     uint32_t frame_seed,
     const float env_color[3], float env_strength,
-    uint32_t point_light_count);
+    uint32_t point_light_count,
+    uint32_t bvh_node_count);
 
 // ----------------------------------------------------------------------------
 // PathTracer - cached pipeline + storage buffers
@@ -142,8 +163,12 @@ private:
     wgpu::Buffer params_buf_;
     wgpu::Buffer tri_buf_;          uint64_t tri_buf_capacity_ = 0;
     wgpu::Buffer point_lights_buf_; uint64_t point_lights_buf_capacity_ = 0;
+    wgpu::Buffer bvh_buf_;          uint64_t bvh_buf_capacity_ = 0;
     wgpu::Buffer out_buf_;          uint64_t out_buf_capacity_ = 0;
     wgpu::Buffer stage_buf_;        uint64_t stage_buf_capacity_ = 0;
+
+    // Last successfully uploaded PackedPathScene::cache_id; 0 means stale.
+    uint64_t last_scene_cache_id_ = 0;
 };
 
 }  // namespace lucid::gpu

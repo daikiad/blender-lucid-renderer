@@ -13,6 +13,7 @@
 #include "light/light.hpp"  // Scene contains std::vector<Light>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -44,6 +45,101 @@ inline void pack_vec3(std::vector<float>& dst, render::Vec3f v, float pad) {
     dst.push_back(pad);
 }
 
+// ----------------------------------------------------------------------------
+// Flat BVH builder (median split on longest axis, leaves at <= 4 triangles)
+// ----------------------------------------------------------------------------
+// Mirrors the CPU `BVH::build` semantics so traversal logic is identical:
+//   - leaf when triCount > 0; left = triStart, right = triCount
+//   - internal when triCount == 0; left/right = child node indices
+// Triangles are reordered to match leaf order so leaves can index the packed
+// triangle array directly (no separate triIndices buffer).
+
+struct TriAabb {
+    float bmin[3];
+    float bmax[3];
+    float centroid[3];
+};
+
+inline void aabb_union(float (&dst_min)[3], float (&dst_max)[3],
+                       const float src_min[3], const float src_max[3]) {
+    dst_min[0] = std::min(dst_min[0], src_min[0]);
+    dst_min[1] = std::min(dst_min[1], src_min[1]);
+    dst_min[2] = std::min(dst_min[2], src_min[2]);
+    dst_max[0] = std::max(dst_max[0], src_max[0]);
+    dst_max[1] = std::max(dst_max[1], src_max[1]);
+    dst_max[2] = std::max(dst_max[2], src_max[2]);
+}
+
+// Encoding (32 bytes, std430):
+//   leaf:     left = triStart (>= 0), right_or_count = triCount (>= 1)
+//   internal: left = left_child (>= 0), right_or_count = -(right_child + 1) (<= -1)
+// Detection: `right_or_count > 0` is a leaf; `< 0` is internal. A 0 value never
+// occurs because leaves always have count >= 1.
+int32_t build_bvh_recursive(std::vector<GpuBvhNode>& nodes,
+                            std::vector<int32_t>& tri_order,
+                            const std::vector<TriAabb>& tri_aabbs,
+                            int32_t start, int32_t end) {
+    const int32_t node_idx = static_cast<int32_t>(nodes.size());
+    nodes.emplace_back();
+
+    // Compute bounds for this node.
+    float bmin[3] = { 1e30f,  1e30f,  1e30f};
+    float bmax[3] = {-1e30f, -1e30f, -1e30f};
+    for (int32_t i = start; i < end; ++i) {
+        const TriAabb& a = tri_aabbs[tri_order[i]];
+        aabb_union(bmin, bmax, a.bmin, a.bmax);
+    }
+    {
+        auto& node = nodes[node_idx];
+        node.bmin[0] = bmin[0]; node.bmin[1] = bmin[1]; node.bmin[2] = bmin[2];
+        node.bmax[0] = bmax[0]; node.bmax[1] = bmax[1]; node.bmax[2] = bmax[2];
+    }
+
+    const int32_t count = end - start;
+    if (count <= 4) {
+        nodes[node_idx].left           = start;
+        nodes[node_idx].right_or_count = count;   // > 0 → leaf
+        return node_idx;
+    }
+
+    // Longest-axis median split.
+    const float ex = bmax[0] - bmin[0];
+    const float ey = bmax[1] - bmin[1];
+    const float ez = bmax[2] - bmin[2];
+    int axis = 0;
+    if (ey > ex)                          axis = 1;
+    if (ez > (axis == 0 ? ex : ey))       axis = 2;
+
+    const int32_t mid = (start + end) / 2;
+    std::nth_element(tri_order.begin() + start,
+                     tri_order.begin() + mid,
+                     tri_order.begin() + end,
+                     [&](int32_t a, int32_t b) {
+                         return tri_aabbs[a].centroid[axis]
+                              < tri_aabbs[b].centroid[axis];
+                     });
+
+    const int32_t left  = build_bvh_recursive(nodes, tri_order, tri_aabbs, start, mid);
+    const int32_t right = build_bvh_recursive(nodes, tri_order, tri_aabbs, mid, end);
+    nodes[node_idx].left           = left;
+    nodes[node_idx].right_or_count = -(right + 1);   // < 0 → internal
+    return node_idx;
+}
+
+// Build a global BVH over `tri_aabbs`. Returns the permutation `tri_order`
+// such that `tri_order[i]` gives the original triangle index that should land
+// at packed position `i`.
+void build_global_bvh(std::vector<GpuBvhNode>& nodes,
+                      std::vector<int32_t>& tri_order,
+                      const std::vector<TriAabb>& tri_aabbs) {
+    const int32_t n = static_cast<int32_t>(tri_aabbs.size());
+    tri_order.resize(n);
+    for (int32_t i = 0; i < n; ++i) tri_order[i] = i;
+    if (n == 0) return;
+    nodes.reserve(2 * static_cast<size_t>(n));
+    build_bvh_recursive(nodes, tri_order, tri_aabbs, 0, n);
+}
+
 }  // namespace
 
 // ----------------------------------------------------------------------------
@@ -52,6 +148,12 @@ inline void pack_vec3(std::vector<float>& dst, render::Vec3f v, float pad) {
 
 PackedPathScene pack_scene_for_path_tracer(const Scene& scene) {
     PackedPathScene out;
+    // Monotonic id starting at 1 (0 = "unset / always re-upload"). Each pack
+    // call gets a fresh id, even if the resulting buffers happen to look
+    // identical — comparisons in PathTracer::render are by id, not content.
+    static std::atomic<uint64_t> next_cache_id{1};
+    out.cache_id = next_cache_id.fetch_add(1, std::memory_order_relaxed);
+
     uint32_t total = 0;
     for (const auto& m : scene.meshes) {
         total += static_cast<uint32_t>(m.triangles.size());
@@ -81,6 +183,13 @@ PackedPathScene pack_scene_for_path_tracer(const Scene& scene) {
         out.point_lights.push_back(energy);
         ++out.point_light_count;
     }
+
+    // Pack into a temp buffer first; BVH build below picks an ordering and we
+    // then copy into out.triangles in that order.
+    std::vector<float>   tmp_triangles;       // 32 floats per tri (unordered)
+    std::vector<TriAabb> tri_aabbs;
+    tmp_triangles.reserve(static_cast<size_t>(total) * 32);
+    tri_aabbs.reserve(total);
 
     for (const auto& mesh : scene.meshes) {
         // Evaluate albedo + emission once per mesh. If the material uses a node
@@ -114,26 +223,49 @@ PackedPathScene pack_scene_for_path_tracer(const Scene& scene) {
             const auto v1 = position_to_vec3(mesh.vertices[tri.i1]);
             const auto v2 = position_to_vec3(mesh.vertices[tri.i2]);
 
-            pack_vec3(out.triangles, v0, 0.0f);
-            pack_vec3(out.triangles, v1, 0.0f);
-            pack_vec3(out.triangles, v2, 0.0f);
+            pack_vec3(tmp_triangles, v0, 0.0f);
+            pack_vec3(tmp_triangles, v1, 0.0f);
+            pack_vec3(tmp_triangles, v2, 0.0f);
 
             const float smooth_flag = tri.smooth ? 1.0f : 0.0f;
-            pack_vec3(out.triangles, tri.n0.vec(), 0.0f);
-            pack_vec3(out.triangles, tri.n1.vec(), 0.0f);
-            pack_vec3(out.triangles, tri.n2.vec(), smooth_flag);
+            pack_vec3(tmp_triangles, tri.n0.vec(), 0.0f);
+            pack_vec3(tmp_triangles, tri.n1.vec(), 0.0f);
+            pack_vec3(tmp_triangles, tri.n2.vec(), smooth_flag);
 
-            // Albedo (RGB + pad)
-            out.triangles.push_back(albedo_r);
-            out.triangles.push_back(albedo_g);
-            out.triangles.push_back(albedo_b);
-            out.triangles.push_back(0.0f);
-            // Emission (RGB + pad)
-            out.triangles.push_back(emission_r);
-            out.triangles.push_back(emission_g);
-            out.triangles.push_back(emission_b);
-            out.triangles.push_back(0.0f);
+            tmp_triangles.push_back(albedo_r);
+            tmp_triangles.push_back(albedo_g);
+            tmp_triangles.push_back(albedo_b);
+            tmp_triangles.push_back(0.0f);
+            tmp_triangles.push_back(emission_r);
+            tmp_triangles.push_back(emission_g);
+            tmp_triangles.push_back(emission_b);
+            tmp_triangles.push_back(0.0f);
+
+            TriAabb a;
+            a.bmin[0] = std::min(std::min(v0.x, v1.x), v2.x);
+            a.bmin[1] = std::min(std::min(v0.y, v1.y), v2.y);
+            a.bmin[2] = std::min(std::min(v0.z, v1.z), v2.z);
+            a.bmax[0] = std::max(std::max(v0.x, v1.x), v2.x);
+            a.bmax[1] = std::max(std::max(v0.y, v1.y), v2.y);
+            a.bmax[2] = std::max(std::max(v0.z, v1.z), v2.z);
+            a.centroid[0] = (v0.x + v1.x + v2.x) * (1.0f / 3.0f);
+            a.centroid[1] = (v0.y + v1.y + v2.y) * (1.0f / 3.0f);
+            a.centroid[2] = (v0.z + v1.z + v2.z) * (1.0f / 3.0f);
+            tri_aabbs.push_back(a);
         }
+    }
+
+    // ---- Build BVH and reorder triangles to match leaf order ----
+    std::vector<int32_t> tri_order;
+    build_global_bvh(out.bvh_nodes, tri_order, tri_aabbs);
+    out.bvh_node_count = static_cast<uint32_t>(out.bvh_nodes.size());
+
+    out.triangles.resize(tmp_triangles.size());
+    for (size_t new_idx = 0; new_idx < tri_order.size(); ++new_idx) {
+        const size_t old_idx = static_cast<size_t>(tri_order[new_idx]);
+        std::memcpy(&out.triangles[new_idx * 32],
+                    &tmp_triangles[old_idx * 32],
+                    32 * sizeof(float));
     }
     return out;
 }
@@ -151,7 +283,8 @@ PathTracerParamsGpu make_path_tracer_params(
     uint32_t samples, uint32_t sample_offset, uint32_t max_bounces,
     uint32_t frame_seed,
     const float env_color[3], float env_strength,
-    uint32_t point_light_count) {
+    uint32_t point_light_count,
+    uint32_t bvh_node_count) {
     PathTracerParamsGpu p{};
     const auto pc = position_to_vec3(pos);
     p.pos[0] = pc.x; p.pos[1] = pc.y; p.pos[2] = pc.z;
@@ -175,6 +308,7 @@ PathTracerParamsGpu make_path_tracer_params(
     p.env_color[2]  = env_color[2];
     p.env_strength  = env_strength;
     p.point_light_count = point_light_count;
+    p.bvh_node_count    = bvh_node_count;
     return p;
 }
 
@@ -196,7 +330,7 @@ std::optional<PathTracer> PathTracer::create(DawnContext& ctx) {
         return std::nullopt;
     }
 
-    wgpu::BindGroupLayoutEntry entries[4] = {};
+    wgpu::BindGroupLayoutEntry entries[5] = {};
     entries[0].binding = 0;
     entries[0].visibility = wgpu::ShaderStage::Compute;
     entries[0].buffer.type = wgpu::BufferBindingType::Uniform;
@@ -214,8 +348,12 @@ std::optional<PathTracer> PathTracer::create(DawnContext& ctx) {
     entries[3].visibility = wgpu::ShaderStage::Compute;
     entries[3].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
 
+    entries[4].binding = 4;
+    entries[4].visibility = wgpu::ShaderStage::Compute;
+    entries[4].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+
     wgpu::BindGroupLayoutDescriptor bgl{};
-    bgl.entryCount = 4;
+    bgl.entryCount = 5;
     bgl.entries    = entries;
     wgpu::BindGroupLayout layout = ctx.device().CreateBindGroupLayout(&bgl);
 
@@ -250,18 +388,27 @@ std::vector<float> PathTracer::render(DawnContext& ctx,
     }
     ctx.queue().WriteBuffer(params_buf_, 0, &params, sizeof(params));
 
+    // ---- Static buffers (tri / lights / bvh): skip WriteBuffer when the
+    //      packed scene's cache_id matches what we last uploaded. If any
+    //      buffer had to grow we force re-upload regardless. cache_id == 0
+    //      means "unset" (e.g. hand-built test scenes) → always re-upload.
+    const bool scene_id_matches =
+        scene.cache_id != 0 && scene.cache_id == last_scene_cache_id_;
+
     // ---- Triangle storage (grow on demand) ----
     const uint64_t tri_bytes = static_cast<uint64_t>(scene.triangles.size())
                                * sizeof(float);
     const uint64_t tri_alloc = std::max(tri_bytes, kMinStorageBytes);
+    bool tri_buf_new = false;
     if (tri_alloc > tri_buf_capacity_ || !tri_buf_) {
         wgpu::BufferDescriptor d{};
         d.size  = tri_alloc;
         d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
         tri_buf_          = ctx.device().CreateBuffer(&d);
         tri_buf_capacity_ = tri_alloc;
+        tri_buf_new       = true;
     }
-    if (tri_bytes > 0) {
+    if (tri_bytes > 0 && (tri_buf_new || !scene_id_matches)) {
         ctx.queue().WriteBuffer(tri_buf_, 0, scene.triangles.data(), tri_bytes);
     }
 
@@ -269,17 +416,41 @@ std::vector<float> PathTracer::render(DawnContext& ctx,
     const uint64_t pl_bytes = static_cast<uint64_t>(scene.point_lights.size())
                               * sizeof(float);
     const uint64_t pl_alloc = std::max(pl_bytes, kMinStorageBytes);
+    bool pl_buf_new = false;
     if (pl_alloc > point_lights_buf_capacity_ || !point_lights_buf_) {
         wgpu::BufferDescriptor d{};
         d.size  = pl_alloc;
         d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
         point_lights_buf_          = ctx.device().CreateBuffer(&d);
         point_lights_buf_capacity_ = pl_alloc;
+        pl_buf_new                 = true;
     }
-    if (pl_bytes > 0) {
+    if (pl_bytes > 0 && (pl_buf_new || !scene_id_matches)) {
         ctx.queue().WriteBuffer(point_lights_buf_, 0,
                                 scene.point_lights.data(), pl_bytes);
     }
+
+    // ---- BVH node storage (grow on demand) ----
+    const uint64_t bvh_bytes = static_cast<uint64_t>(scene.bvh_nodes.size())
+                               * sizeof(GpuBvhNode);
+    const uint64_t bvh_alloc = std::max(bvh_bytes, kMinStorageBytes);
+    bool bvh_buf_new = false;
+    if (bvh_alloc > bvh_buf_capacity_ || !bvh_buf_) {
+        wgpu::BufferDescriptor d{};
+        d.size  = bvh_alloc;
+        d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+        bvh_buf_          = ctx.device().CreateBuffer(&d);
+        bvh_buf_capacity_ = bvh_alloc;
+        bvh_buf_new       = true;
+    }
+    if (bvh_bytes > 0 && (bvh_buf_new || !scene_id_matches)) {
+        ctx.queue().WriteBuffer(bvh_buf_, 0, scene.bvh_nodes.data(), bvh_bytes);
+    }
+
+    // All three uploads (or skips) succeeded — remember the id so we can skip
+    // next time. Setting it to 0 is the canonical "stale" marker if the test
+    // happened to pass a cache_id == 0 scene.
+    last_scene_cache_id_ = scene.cache_id;
 
     // ---- Output storage (grow on demand) ----
     if (out_bytes > out_buf_capacity_ || !out_buf_) {
@@ -300,7 +471,7 @@ std::vector<float> PathTracer::render(DawnContext& ctx,
     }
 
     // ---- Bind group (rebuilt per call) ----
-    wgpu::BindGroupEntry bg_entries[4] = {};
+    wgpu::BindGroupEntry bg_entries[5] = {};
     bg_entries[0].binding = 0;
     bg_entries[0].buffer  = params_buf_;
     bg_entries[0].offset  = 0;
@@ -317,10 +488,14 @@ std::vector<float> PathTracer::render(DawnContext& ctx,
     bg_entries[3].buffer  = point_lights_buf_;
     bg_entries[3].offset  = 0;
     bg_entries[3].size    = point_lights_buf_capacity_;
+    bg_entries[4].binding = 4;
+    bg_entries[4].buffer  = bvh_buf_;
+    bg_entries[4].offset  = 0;
+    bg_entries[4].size    = bvh_buf_capacity_;
 
     wgpu::BindGroupDescriptor bg{};
     bg.layout     = layout_;
-    bg.entryCount = 4;
+    bg.entryCount = 5;
     bg.entries    = bg_entries;
     wgpu::BindGroup bind_group = ctx.device().CreateBindGroup(&bg);
 

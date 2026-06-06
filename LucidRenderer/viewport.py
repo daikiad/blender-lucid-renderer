@@ -284,10 +284,21 @@ class ViewportRenderer:
         # デバッグモード
         debug_mode = lucid.debug_mode if lucid.debug_mode != 'NONE' else None
         
+        # GPU backend pays a fixed dispatch round-trip cost (~5-10 ms) regardless
+        # of samples per call; CPU runs in-process and has no such cost. In
+        # FINAL mode (camera settled) we bump samples/dispatch to amortise that
+        # overhead — accumulation converges noticeably faster. In EDITING mode
+        # (camera moving) we stay at 1 so each dispatch returns ASAP and the
+        # viewport tracks input snappily.
+        if lucid.backend == 'gpu' and mode == RenderMode.FINAL:
+            samples_per_dispatch = 4
+        else:
+            samples_per_dispatch = 1
+
         params = RenderParams(
             width=render_width,
             height=render_height,
-            samples=1,
+            samples=samples_per_dispatch,
             max_bounces=max_bounces,
             algorithm=lucid.sampling_algorithm,
             debug_mode=debug_mode,
@@ -401,24 +412,32 @@ class ViewportRenderer:
         state: 'ViewportState',
         result: RenderResult
     ) -> None:
-        """サンプルを累積（重み付き平均）"""
+        """サンプルを累積（重み付き平均）
+
+        Both CPU (`render_tile`) and GPU (`render_tile_gpu`) follow the SUM
+        convention: `result.pixels` is the un-normalized sum of radiance over
+        `result.samples` paths (with camera sensitivity already applied). The
+        accumulator stores a running mean and combines via:
+            new_avg = (old_avg * prev_count + new_sum) / (prev_count + N)
+        For the first dispatch, the running mean is `new_sum / N` (i.e. divide
+        the sum by the number of samples it contained).
+        """
         tile_key = (result.width, result.height)
-        
+
         if tile_key in state.accumulated_samples:
             acc_array, prev_count = state.accumulated_samples[tile_key]
             new_count = prev_count + result.samples
-            
-            # 重み付き平均: new = (old * old_count + new * new_samples) / total_count
-            # 累積バッファは既に平均化されているので、まず合計に戻す
+
             for i in range(len(acc_array)):
                 old_sum = acc_array[i] * prev_count
-                new_sum = result.pixels[i] * result.samples
-                acc_array[i] = (old_sum + new_sum) / new_count
+                new_sum_in_dispatch = result.pixels[i]   # already a sum
+                acc_array[i] = (old_sum + new_sum_in_dispatch) / new_count
         else:
-            # 最初のサンプル
-            acc_array = array.array('f', result.pixels)
+            # 最初のディスパッチ: SUM をサンプル数で割って AVG にする
+            inv_n = 1.0 / float(result.samples) if result.samples > 0 else 1.0
+            acc_array = array.array('f', (p * inv_n for p in result.pixels))
             new_count = result.samples
-        
+
         state.accumulated_samples[tile_key] = (acc_array, new_count)
     
     def _update_texture(

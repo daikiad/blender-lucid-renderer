@@ -1,7 +1,9 @@
-// path_trace.wgsl - Phase 2a GPU path tracer
+// path_trace.wgsl - Phase 2a + Phase 1c GPU path tracer
 //
-// Mirrors the CPU `traceSimple()` integrator: BSDF sampling only, no NEE/MIS.
-// Lambertian diffuse + emissive triangles. Russian roulette from depth 3.
+// Phase 2a: BSDF sampling only (no NEE/MIS for indirect), Lambertian diffuse
+// + emissive triangles + NEE for point lights, Russian roulette from depth 3.
+// Phase 1c: BVH-accelerated closest-hit + any-hit (shadow) traversal.
+//
 // Per-pixel inner loop sums radiance over `params.samples` paths
 // (un-normalized — Python's _accumulate_samples handles time-averaging).
 
@@ -25,7 +27,8 @@ struct PathParams {
     env_color:     vec3<f32>,
     env_strength:  f32,
     point_light_count: u32,
-    _p4: u32, _p5: u32, _p6: u32,
+    bvh_node_count: u32,
+    _p5: u32, _p6: u32,
 };
 
 struct PointLight {
@@ -44,10 +47,20 @@ struct Triangle {
     emission:     vec3<f32>, _p6: f32,
 };
 
+// BVH node layout (32 bytes / 2 vec4s, std430). Encoding matches GpuBvhNode:
+//   leaf:     left = triStart (>= 0), right_or_count = triCount (>= 1)
+//   internal: left = left_child,      right_or_count = -(right_child + 1)
+// Detection: `right_or_count > 0` → leaf; `right_or_count < 0` → internal.
+struct BvhNode {
+    bmin: vec3<f32>, left: i32,
+    bmax: vec3<f32>, right_or_count: i32,
+};
+
 @group(0) @binding(0) var<uniform>             params       : PathParams;
 @group(0) @binding(1) var<storage, read>       tris         : array<Triangle>;
 @group(0) @binding(2) var<storage, read_write> out_pixels   : array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read>       point_lights : array<PointLight>;
+@group(0) @binding(4) var<storage, read>       bvh_nodes    : array<BvhNode>;
 
 // ----------------------------------------------------------------------------
 // PCG random helpers
@@ -73,7 +86,6 @@ fn pcg_next(state: ptr<function, u32>) -> u32 {
 }
 
 fn rand_f32(state: ptr<function, u32>) -> f32 {
-    // Strip the top bit so 0x7FFFFFFF -> ~0.9999... ; never quite 1.0.
     let u = pcg_next(state) >> 9u;             // [0, 2^23 - 1]
     return f32(u) * (1.0 / 8388608.0);          // [0, 1)
 }
@@ -140,6 +152,137 @@ fn intersect_tri(orig: vec3<f32>, dir: vec3<f32>,
 }
 
 // ----------------------------------------------------------------------------
+// Robust AABB slab test using precomputed inverse direction. Treats infinities
+// from a 0-component direction correctly (using sign of inv_dir).
+// Returns true if the ray hits the slab in [0, t_max].
+// ----------------------------------------------------------------------------
+
+fn intersect_aabb(orig: vec3<f32>, inv_dir: vec3<f32>,
+                  bmin: vec3<f32>, bmax: vec3<f32>, t_max: f32) -> bool {
+    let t0 = (bmin - orig) * inv_dir;
+    let t1 = (bmax - orig) * inv_dir;
+    let tlo = min(t0, t1);
+    let thi = max(t0, t1);
+    let t_enter = max(max(tlo.x, tlo.y), tlo.z);
+    let t_exit  = min(min(thi.x, thi.y), thi.z);
+    return t_exit >= max(t_enter, 0.0) && t_enter <= t_max;
+}
+
+// ----------------------------------------------------------------------------
+// BVH closest-hit traversal — stack-based, prunes by best_t.
+// Writes hit info via pointer args.
+// ----------------------------------------------------------------------------
+
+struct ClosestHit {
+    hit: bool,
+    best_t: f32,
+    best_n: vec3<f32>,
+    best_albedo: vec3<f32>,
+    best_emission: vec3<f32>,
+};
+
+fn trace_closest(orig: vec3<f32>, dir: vec3<f32>) -> ClosestHit {
+    var result: ClosestHit;
+    result.hit = false;
+    result.best_t = 1e30;
+    result.best_n = vec3<f32>(0.0, 0.0, 1.0);
+    result.best_albedo = vec3<f32>(0.0, 0.0, 0.0);
+    result.best_emission = vec3<f32>(0.0, 0.0, 0.0);
+
+    if (params.bvh_node_count == 0u) { return result; }
+
+    let inv_dir = vec3<f32>(1.0, 1.0, 1.0) / dir;
+
+    var stack: array<i32, 64>;
+    stack[0] = 0;
+    var sp: i32 = 1;
+
+    while (sp > 0) {
+        sp = sp - 1;
+        let node = bvh_nodes[stack[sp]];
+
+        if (!intersect_aabb(orig, inv_dir, node.bmin, node.bmax, result.best_t)) {
+            continue;
+        }
+
+        if (node.right_or_count > 0) {
+            // Leaf — test triangles [left, left + right_or_count).
+            let start = node.left;
+            let count = node.right_or_count;
+            for (var i: i32 = 0; i < count; i = i + 1) {
+                let tri = tris[u32(start + i)];
+                var t: f32; var u: f32; var v: f32;
+                if (intersect_tri(orig, dir, tri.v0, tri.v1, tri.v2,
+                                   &t, &u, &v) && t < result.best_t) {
+                    result.best_t = t;
+                    result.hit = true;
+                    let w = 1.0 - u - v;
+                    if (tri.smooth_flag > 0.5) {
+                        result.best_n = normalize(w * tri.n0 + u * tri.n1 + v * tri.n2);
+                    } else {
+                        result.best_n = normalize(cross(tri.v1 - tri.v0, tri.v2 - tri.v0));
+                    }
+                    result.best_albedo   = tri.albedo;
+                    result.best_emission = tri.emission;
+                }
+            }
+        } else {
+            // Internal — push children. Decode right child from -(right+1).
+            let right = -(node.right_or_count + 1);
+            if (sp < 62) {
+                stack[sp] = right;     sp = sp + 1;
+                stack[sp] = node.left; sp = sp + 1;
+            }
+        }
+    }
+    return result;
+}
+
+// ----------------------------------------------------------------------------
+// BVH any-hit traversal (shadow ray) — returns true if any triangle is hit
+// with t < max_t. Early-out as soon as one is found.
+// ----------------------------------------------------------------------------
+
+fn trace_any(orig: vec3<f32>, dir: vec3<f32>, max_t: f32) -> bool {
+    if (params.bvh_node_count == 0u) { return false; }
+
+    let inv_dir = vec3<f32>(1.0, 1.0, 1.0) / dir;
+
+    var stack: array<i32, 64>;
+    stack[0] = 0;
+    var sp: i32 = 1;
+
+    while (sp > 0) {
+        sp = sp - 1;
+        let node = bvh_nodes[stack[sp]];
+
+        if (!intersect_aabb(orig, inv_dir, node.bmin, node.bmax, max_t)) {
+            continue;
+        }
+
+        if (node.right_or_count > 0) {
+            let start = node.left;
+            let count = node.right_or_count;
+            for (var i: i32 = 0; i < count; i = i + 1) {
+                let tri = tris[u32(start + i)];
+                var t: f32; var u: f32; var v: f32;
+                if (intersect_tri(orig, dir, tri.v0, tri.v1, tri.v2,
+                                   &t, &u, &v) && t < max_t) {
+                    return true;
+                }
+            }
+        } else {
+            let right = -(node.right_or_count + 1);
+            if (sp < 62) {
+                stack[sp] = right;     sp = sp + 1;
+                stack[sp] = node.left; sp = sp + 1;
+            }
+        }
+    }
+    return false;
+}
+
+// ----------------------------------------------------------------------------
 // Main path tracer
 // ----------------------------------------------------------------------------
 
@@ -160,7 +303,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
 
     var radiance_sum = vec3<f32>(0.0, 0.0, 0.0);
-    let n_tris = arrayLength(&tris);
 
     for (var s: u32 = 0u; s < params.samples; s = s + 1u) {
         var rng = pcg_seed(
@@ -175,54 +317,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         var radiance   = vec3<f32>(0.0, 0.0, 0.0);
 
         for (var b: u32 = 0u; b < params.max_bounces; b = b + 1u) {
-            // ---- Brute-force closest-hit search ----
-            var best_t = 1e30;
-            var hit = false;
-            var best_n        = vec3<f32>(0.0, 0.0, 1.0);
-            var best_albedo   = vec3<f32>(0.0, 0.0, 0.0);
-            var best_emission = vec3<f32>(0.0, 0.0, 0.0);
-
-            for (var i: u32 = 0u; i < n_tris; i = i + 1u) {
-                let tri = tris[i];
-                var t: f32; var u: f32; var v: f32;
-                if (intersect_tri(orig, dir, tri.v0, tri.v1, tri.v2,
-                                   &t, &u, &v) && t < best_t) {
-                    best_t = t;
-                    hit = true;
-                    let w = 1.0 - u - v;
-                    if (tri.smooth_flag > 0.5) {
-                        best_n = normalize(w * tri.n0 + u * tri.n1 + v * tri.n2);
-                    } else {
-                        best_n = normalize(cross(tri.v1 - tri.v0, tri.v2 - tri.v0));
-                    }
-                    best_albedo   = tri.albedo;
-                    best_emission = tri.emission;
-                }
-            }
+            let h = trace_closest(orig, dir);
 
             // ---- Termination cases ----
-            if (!hit) {
+            if (!h.hit) {
                 radiance = radiance + throughput * (params.env_color * params.env_strength);
                 break;
             }
-            if (any(best_emission > vec3<f32>(1e-6, 1e-6, 1e-6))) {
-                radiance = radiance + throughput * best_emission;
+            if (any(h.best_emission > vec3<f32>(1e-6, 1e-6, 1e-6))) {
+                radiance = radiance + throughput * h.best_emission;
                 break;
             }
 
             // ---- Back-facing normal fix ----
-            // If the surface normal points along the incoming ray (meshes
-            // exported with the "outside" normal facing the camera), flip it
-            // so the cosine hemisphere samples into the lit hemisphere rather
-            // than the inside of the wall. Mirrors CPU `frontFace` handling.
+            var best_n = h.best_n;
             if (dot(dir, best_n) > 0.0) {
                 best_n = -best_n;
             }
 
             // ---- NEE: direct contribution from every point light ----
             // Point lights have area=0, so they can never be hit by BSDF sampling.
-            // No double-counting with the indirect bounce below.
-            let hit_point = orig + dir * best_t;
+            let hit_point = orig + dir * h.best_t;
             let inv_pi = 0.31830988618;  // 1/π for the Lambertian f = albedo/π
             for (var li: u32 = 0u; li < params.point_light_count; li = li + 1u) {
                 let light = point_lights[li];
@@ -234,33 +349,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let cos_theta = dot(best_n, light_dir);
                 if (cos_theta <= 0.0) { continue; }
 
-                // Shadow ray — brute-force occlusion test against every triangle.
                 let shadow_orig = hit_point + best_n * 1e-3;
                 let max_t = d - 2e-3;
-                var occluded = false;
-                for (var k: u32 = 0u; k < n_tris; k = k + 1u) {
-                    let st  = tris[k];
-                    var t: f32; var u: f32; var v: f32;
-                    if (intersect_tri(shadow_orig, light_dir, st.v0, st.v1, st.v2,
-                                       &t, &u, &v) && t < max_t) {
-                        occluded = true;
-                        break;
-                    }
-                }
-                if (occluded) { continue; }
+                if (trace_any(shadow_orig, light_dir, max_t)) { continue; }
 
                 // Isotropic point light:
-                //   radiant flux Φ = light.intensity (Blender Light.energy, W)
-                //   radiant intensity I = Φ / 4π  (W/sr)
-                //   irradiance at surface E = I · cos(θ) / d²  (W/m²)
-                // Lambertian BRDF f = albedo / π. Delta-direction so pdf=1.
-                let inv_4pi = 0.07957747154;  // 1 / (4π)
+                //   Φ = light.intensity (Blender Light.energy, W)
+                //   I = Φ / 4π        (W/sr)
+                //   E = I · cos(θ) / d²
+                // Lambertian BRDF f = albedo / π. Delta direction → pdf = 1.
+                let inv_4pi = 0.07957747154;
                 let L = light.color * (light.intensity * inv_4pi) / d2;
-                radiance = radiance + throughput * best_albedo * inv_pi * L * cos_theta;
+                radiance = radiance + throughput * h.best_albedo * inv_pi * L * cos_theta;
             }
 
             // ---- Lambertian: throughput accumulates albedo (for indirect bounce) ----
-            throughput = throughput * best_albedo;
+            throughput = throughput * h.best_albedo;
 
             // ---- Russian roulette from depth 3 ----
             if (b >= 3u) {
@@ -270,7 +374,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
 
             // ---- Next ray: cosine-weighted hemisphere ----
-            // Capture the hit point with the *old* dir before overwriting.
             let new_orig = hit_point + best_n * 1e-3;  // FP32 grazing slack
             let u1 = rand_f32(&rng);
             let u2 = rand_f32(&rng);

@@ -43,7 +43,8 @@ auto default_camera_params(uint32_t w, uint32_t h,
         /*frame_seed=*/12345u,
         env_color ? env_color : zero_env,
         env_strength,
-        /*point_light_count=*/0u);
+        /*point_light_count=*/0u,
+        /*bvh_node_count=*/0u);
 }
 
 // Helper: a single emissive +Z triangle in front of the camera at z = -2.
@@ -112,6 +113,7 @@ TEST(PathTracerTest, SingleEmissiveTriangle) {
     const uint32_t samples = 4;
     auto params = default_camera_params(W, H,
                                         samples, /*offset=*/0, /*max_bounces=*/2);
+    params.bvh_node_count = packed.bvh_node_count;
     auto out = pt->render(*ctx, packed, params);
     ASSERT_EQ(out.size(), static_cast<size_t>(W) * H * 4);
 
@@ -140,6 +142,7 @@ TEST(PathTracerTest, SingleEmissiveTriangle_NoNaN) {
     const uint32_t W = 64, H = 64;
     auto params = default_camera_params(W, H,
                                         /*samples=*/16, /*offset=*/0, /*max_bounces=*/16);
+    params.bvh_node_count = packed.bvh_node_count;
     auto out = pt->render(*ctx, packed, params);
     ASSERT_EQ(out.size(), static_cast<size_t>(W) * H * 4);
 

@@ -569,14 +569,17 @@ public:
             return std::vector<float>(tile_w * tile_h * 4, 0.0f);
         }
 
-        // ---- Soft cap: brute-force can't handle huge scenes without BVH ----
+        // ---- Soft cap (with BVH; budget is shader stack depth + memory) ----
+        // 64-deep traversal stack supports ~2^64 nodes in theory, but the build
+        // is single-threaded on CPU. ~500k tris is the practical ceiling before
+        // we want SAH/parallel build.
         uint32_t total_tri = 0;
         for (const auto& m : scene_.meshes) total_tri += static_cast<uint32_t>(m.triangles.size());
-        if (total_tri > 5000) {
+        if (total_tri > 500000) {
             static bool warned = false;
             if (!warned) {
                 std::cerr << "[PyRenderer] scene has " << total_tri
-                          << " triangles, brute-force GPU too slow; CPU fallback (Phase 1c will lift)\n";
+                          << " triangles, exceeds GPU BVH soft cap; CPU fallback\n";
                 warned = true;
             }
             return render_tile(tile_x, tile_y, tile_w, tile_h,
@@ -589,6 +592,10 @@ public:
         if (!packed_pt_cache_ || packed_pt_version_ != scene_version_) {
             packed_pt_cache_   = lucid::gpu::pack_scene_for_path_tracer(scene_);
             packed_pt_version_ = scene_version_;
+            std::cerr << "[PyRenderer] GPU PathTracer scene cache: "
+                      << packed_pt_cache_->triangle_count   << " tris, "
+                      << packed_pt_cache_->bvh_node_count   << " bvh nodes, "
+                      << packed_pt_cache_->point_light_count << " point lights\n";
         }
 
         // Environment color (multiplied by strength) read from scene_.environment
@@ -612,7 +619,8 @@ public:
             static_cast<uint32_t>(std::max(1, max_depth)),
             frame_seed,
             env_color, env_strength,
-            packed_pt_cache_->point_light_count);
+            packed_pt_cache_->point_light_count,
+            packed_pt_cache_->bvh_node_count);
 
         std::vector<float> raw;
         try {
