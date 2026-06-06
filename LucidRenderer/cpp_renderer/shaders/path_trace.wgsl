@@ -210,6 +210,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 break;
             }
 
+            // ---- Back-facing normal fix ----
+            // If the surface normal points along the incoming ray (meshes
+            // exported with the "outside" normal facing the camera), flip it
+            // so the cosine hemisphere samples into the lit hemisphere rather
+            // than the inside of the wall. Mirrors CPU `frontFace` handling.
+            if (dot(dir, best_n) > 0.0) {
+                best_n = -best_n;
+            }
+
             // ---- NEE: direct contribution from every point light ----
             // Point lights have area=0, so they can never be hit by BSDF sampling.
             // No double-counting with the indirect bounce below.
@@ -240,9 +249,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
                 if (occluded) { continue; }
 
-                // Irradiance from an isotropic point light: L = color · energy / d²
-                // Lambertian BRDF f = albedo / π. Delta-direction light so pdf=1.
-                let L = light.color * light.intensity / d2;
+                // Isotropic point light:
+                //   radiant flux Φ = light.intensity (Blender Light.energy, W)
+                //   radiant intensity I = Φ / 4π  (W/sr)
+                //   irradiance at surface E = I · cos(θ) / d²  (W/m²)
+                // Lambertian BRDF f = albedo / π. Delta-direction so pdf=1.
+                let inv_4pi = 0.07957747154;  // 1 / (4π)
+                let L = light.color * (light.intensity * inv_4pi) / d2;
                 radiance = radiance + throughput * best_albedo * inv_pi * L * cos_theta;
             }
 
@@ -257,12 +270,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
 
             // ---- Next ray: cosine-weighted hemisphere ----
+            // Capture the hit point with the *old* dir before overwriting.
+            let new_orig = hit_point + best_n * 1e-3;  // FP32 grazing slack
             let u1 = rand_f32(&rng);
             let u2 = rand_f32(&rng);
             dir  = cosine_hemisphere(best_n, u1, u2);
-            // Offset along the hit normal to dodge self-intersection.
-            // 1e-3 (vs CPU's 1e-4) — FP32 grazing-angle slack.
-            orig = (orig + dir * best_t) + best_n * 1e-3;
+            orig = new_orig;
         }
 
         radiance_sum = radiance_sum + radiance;
