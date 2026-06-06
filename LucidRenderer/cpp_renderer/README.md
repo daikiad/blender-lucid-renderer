@@ -17,7 +17,7 @@ A physically-based renderer implemented in C++20 with type-safe units, designed 
 - **GCC 15** (required for mp-units C++20 support; AppleClang has template issues)
 - **Conan 2.x** (package manager)
 - **CMake 3.25+**
-- **Python 3.11** (for Blender compatibility)
+- **Python 3.13** (for Blender 5.1 compatibility)
 
 ## Installation
 
@@ -30,8 +30,8 @@ brew install gcc@15
 # Install Conan 2
 pip install conan
 
-# Install Python 3.11 via uv (recommended for Blender compatibility)
-uv python install 3.11
+# Install Python 3.13 via uv (recommended for Blender 5.1 compatibility)
+uv python install 3.13
 ```
 
 ### 2. Configure Conan Profile
@@ -200,9 +200,9 @@ brew install gcc@15
 
 ### Python Version Mismatch
 
-Ensure Python 3.11 for Blender compatibility:
+Ensure Python 3.13 for Blender 5.1 compatibility:
 ```bash
-uv python install 3.11
+uv python install 3.13
 # CMakeLists.txt automatically finds UV's Python
 ```
 

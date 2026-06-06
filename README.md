@@ -70,7 +70,7 @@ Symlink `LucidRenderer/` into Blender's addons directory:
 
 ```bash
 ln -s "$(pwd)/LucidRenderer" \
-      "$HOME/Library/Application Support/Blender/4.5/scripts/addons/LucidRenderer"
+      "$HOME/Library/Application Support/Blender/5.1/scripts/addons/LucidRenderer"
 ```
 
 Launch Blender → Edit > Preferences > Add-ons → enable `Lucid Renderer (Minimal Example)` → in the Render Engine dropdown, pick `Lucid (Minimal)`.
@@ -86,8 +86,8 @@ Launch Blender → Edit > Preferences > Add-ons → enable `Lucid Renderer (Mini
 
 | | Version |
 |---|---|
-| Blender | 4.5 |
-| Python | 3.11 (must match Blender's bundled Python) |
+| Blender | 5.1 |
+| Python | 3.13 (must match Blender's bundled Python) |
 | GCC | 15 (Homebrew) |
 | Conan | 2.x |
 | CMake | 3.30+ |
