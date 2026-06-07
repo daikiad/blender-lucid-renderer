@@ -63,6 +63,16 @@ const ALGO_NEE:        u32 = 1u;
 const ALGO_MIS:        u32 = 2u;
 const ALGO_VOLUME_MIS: u32 = 3u;  // surface MIS + Woodcock/HG in-medium scatter
 
+// "Algorithm wants surface MIS at every surface event." Volume MIS is just
+// surface MIS plus an extra in-medium scatter step, so its surface body must
+// take all the same MIS weights ALGO_MIS does. Checking the constant directly
+// at every surface MIS gate left ALGO_VOLUME_MIS double-counting direct
+// lighting (NEE + BSDF emission hits both unweighted) and made the entire
+// scene look ~2x brighter than Cycles / CPU.
+fn surface_uses_mis(algo: u32) -> bool {
+    return algo == ALGO_MIS || algo == ALGO_VOLUME_MIS;
+}
+
 // Triangle (10 vec4s / 160 B). Material fields cover the full Principled BSDF
 // socket set (albedo / metallic / roughness / transmission / ior / emission)
 // constant-folded at uv=(0,0). The reserved vec4's first slot carries
@@ -1370,7 +1380,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Case 1: native light hit before any triangle.
             if (lh.hit == 1u && lh.t < tri_t) {
                 var mis_w = 1.0;
-                if (params.algorithm == ALGO_MIS && last_bsdf_pdf > 1e-6) {
+                if (surface_uses_mis(params.algorithm) && last_bsdf_pdf > 1e-6) {
                     let light = lights[lh.light_idx];
                     let pdf_l = pdf_light_sample(light, orig, lh.point, lh.normal)
                                 * light.selection_pdf;
@@ -1390,7 +1400,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // when the triangle is in the light buffer.
             if (any(h.mat.emission > vec3<f32>(1e-6, 1e-6, 1e-6))) {
                 var mis_w = 1.0;
-                if (params.algorithm == ALGO_MIS
+                if (surface_uses_mis(params.algorithm)
                     && last_bsdf_pdf > 1e-6
                     && h.light_idx >= 0) {
                     let light = lights[h.light_idx];
@@ -1467,7 +1477,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                                 let pdf_l_combined = ls.pdf * select_prob;
                                 var contribution = f * ls.emission * cos_theta
                                                    / pdf_l_combined;
-                                if (params.algorithm == ALGO_MIS && ls.delta == 0u) {
+                                if (surface_uses_mis(params.algorithm) && ls.delta == 0u) {
                                     let pdf_b = pdf_bsdf(mat, wo, ls.direction, shading_n);
                                     let mis_w = mis_power_heuristic(pdf_l_combined, pdf_b);
                                     contribution = contribution * mis_w;
