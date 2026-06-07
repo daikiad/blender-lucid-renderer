@@ -45,8 +45,9 @@ auto default_camera_params(uint32_t w, uint32_t h,
         /*frame_seed=*/12345u,
         env_color ? env_color : zero_env,
         env_strength,
-        /*point_light_count=*/0u,
-        /*bvh_node_count=*/0u);
+        /*light_count=*/0u,
+        /*bvh_node_count=*/0u,
+        /*algorithm=*/2u);
 }
 
 // Helper: a single emissive +Z triangle in front of the camera at z = -2.
@@ -214,8 +215,9 @@ TEST(PathTracerTest, MaterialParity_PointLightStride) {
     l.area     = 1.0f * mp_units::square(mp_units::si::metre);
     scene.nativeLights.push_back(l);
     auto packed = pack_scene_for_path_tracer(scene);
-    ASSERT_EQ(packed.point_light_count, 1u);
-    EXPECT_EQ(packed.point_lights.size(), 12u);
+    // After the Phase 2c unification, every light is a GpuLight (128 B / 32 floats).
+    ASSERT_EQ(packed.light_count, 1u);
+    EXPECT_EQ(packed.lights.size(), 1u);
 }
 
 TEST(PathTracerTest, MaterialParity_GlassNoNaN) {
@@ -325,7 +327,7 @@ TEST(PathTracerTest, MaterialParity_PointLightFluxConservation) {
     const uint32_t samples = 64;
     auto params = default_camera_params(W, H, samples, /*offset=*/0, /*max_bounces=*/3);
     params.bvh_node_count    = packed.bvh_node_count;
-    params.point_light_count = packed.point_light_count;
+    params.light_count = packed.light_count;
     auto out = pt->render(*ctx, packed, params);
     ASSERT_EQ(out.size(), static_cast<size_t>(W) * H * 4);
 

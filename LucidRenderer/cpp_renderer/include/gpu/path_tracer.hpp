@@ -51,12 +51,35 @@ class DawnContext;
 //
 // Environment color / strength live in PathTracerParamsGpu, not here.
 //
-// `point_lights` is 12 floats per light (std430 alignment):
-//   pos.xyz,      radius        (vec4)
-//   emission.xyz, area          (vec4)   // emission already premultiplied on
-//                                        // C++ side: radius>0 ⇒ color*energy/(π·area),
-//                                        // radius=0 ⇒ color*energy/(4π).
-//   _pad, _pad, _pad, _pad      (vec4)   // reserved (future light_kind)
+// `lights` is the unified light buffer. Every entry — POINT, SUN, SPOT, AREA
+// or EMISSIVE_MESH triangle — is the same 128-byte `GpuLight`. The shader
+// branches on the `type` discriminant; unused fields are zeroed by the packer.
+// `selection_pdf` is precomputed = area / total_area; the CDF in `light_cdf`
+// implements area-weighted importance sampling for `select_light(u)`.
+//
+// Light type discriminants (mirrored in WGSL):
+enum class GpuLightType : uint32_t {
+    Point        = 0,   // delta (radius==0) or sphere (radius>0)
+    Sun          = 1,   // delta direction
+    Spot         = 2,   // delta position + cone
+    AreaRect     = 3,
+    AreaDisk     = 4,
+    AreaEllipse  = 5,
+    EmissiveMesh = 6,   // triangle (v0/v1/v2 carried in primary/normal/right/up slots)
+};
+
+struct GpuLight {
+    uint32_t type;            float    area;          float    selection_pdf; uint32_t _p0;
+    float    position[3];     float    _p1;
+    float    emission[3];     float    _p2;
+    float    normal[3];       float    radius;
+    float    right[3];        float    sizeX;
+    float    up[3];           float    sizeY;
+    float    v1[3];           float    spotAngle;
+    float    v2[3];           float    spotBlend;
+};
+static_assert(sizeof(GpuLight) == 128,
+              "GpuLight must be 128 bytes / 8 vec4s for std430");
 //
 // BVH (Phase 1c): single global BVH over the flat triangle list. Each node is
 // 32 bytes / 2 vec4s (std430). The convention mirrors the CPU BVH: `triCount > 0`
@@ -73,8 +96,15 @@ static_assert(sizeof(GpuBvhNode) == 32, "GpuBvhNode must be 32 bytes for std430"
 struct PackedPathScene {
     std::vector<float> triangles;
     uint32_t triangle_count = 0;
-    std::vector<float> point_lights;
-    uint32_t point_light_count = 0;
+    // Unified light buffer (replaces the Phase 2a POINT-only `point_lights`).
+    // 32 floats / 128 bytes per entry (GpuLight). Includes every native light
+    // AND every emissive triangle, in that order; the first
+    // `emissive_mesh_light_count` entries are EMISSIVE_MESH triangles.
+    std::vector<GpuLight> lights;
+    uint32_t light_count = 0;
+    // Area-weighted CDF over `lights`, used by select_light(u) for importance
+    // sampling. `light_cdf.size() == light_count`. Values in [0,1] monotonic.
+    std::vector<float> light_cdf;
     std::vector<GpuBvhNode> bvh_nodes;
     uint32_t bvh_node_count = 0;
     // Monotonic id assigned at pack time. PathTracer compares against the id
@@ -114,9 +144,12 @@ struct PathTracerParamsGpu {
     float    env_color[3];     float env_strength;
 
     // Lights / BVH counts
-    uint32_t point_light_count;
-    uint32_t bvh_node_count;   // 0 → shader skips traversal (empty scene)
-    uint32_t _pad5;
+    uint32_t light_count;       // unified light buffer (POINT/SUN/SPOT/AREA/EMISSIVE)
+    uint32_t bvh_node_count;    // 0 → shader skips traversal (empty scene)
+    // Integrator selection: 0=simple (BSDF + POINT delta-NEE only; Phase 2a),
+    //                       1=nee    (NEE for all light types, no MIS),
+    //                       2=mis    (NEE + MIS power heuristic, default).
+    uint32_t algorithm;
     uint32_t _pad6;
 };
 static_assert(sizeof(PathTracerParamsGpu) == 144,
@@ -135,8 +168,9 @@ PathTracerParamsGpu make_path_tracer_params(
     uint32_t samples, uint32_t sample_offset, uint32_t max_bounces,
     uint32_t frame_seed,
     const float env_color[3], float env_strength,
-    uint32_t point_light_count,
-    uint32_t bvh_node_count);
+    uint32_t light_count,
+    uint32_t bvh_node_count,
+    uint32_t algorithm);
 
 // ----------------------------------------------------------------------------
 // PathTracer - cached pipeline + storage buffers
@@ -228,7 +262,8 @@ private:
     // Cached storage / staging buffers; grown on demand.
     wgpu::Buffer params_buf_;
     wgpu::Buffer tri_buf_;          uint64_t tri_buf_capacity_ = 0;
-    wgpu::Buffer point_lights_buf_; uint64_t point_lights_buf_capacity_ = 0;
+    wgpu::Buffer lights_buf_;       uint64_t lights_buf_capacity_ = 0;
+    wgpu::Buffer light_cdf_buf_;    uint64_t light_cdf_buf_capacity_ = 0;
     wgpu::Buffer bvh_buf_;          uint64_t bvh_buf_capacity_ = 0;
     wgpu::Buffer out_buf_;          uint64_t out_buf_capacity_ = 0;
     wgpu::Buffer stage_buf_;        uint64_t stage_buf_capacity_ = 0;

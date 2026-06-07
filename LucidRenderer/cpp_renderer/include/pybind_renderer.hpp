@@ -595,7 +595,7 @@ public:
             std::cerr << "[PyRenderer] GPU PathTracer scene cache: "
                       << packed_pt_cache_->triangle_count   << " tris, "
                       << packed_pt_cache_->bvh_node_count   << " bvh nodes, "
-                      << packed_pt_cache_->point_light_count << " point lights\n";
+                      << packed_pt_cache_->light_count       << " lights\n";
         }
 
         // Environment color (multiplied by strength) read from scene_.environment
@@ -619,8 +619,9 @@ public:
             static_cast<uint32_t>(std::max(1, max_depth)),
             frame_seed,
             env_color, env_strength,
-            packed_pt_cache_->point_light_count,
-            packed_pt_cache_->bvh_node_count);
+            packed_pt_cache_->light_count,
+            packed_pt_cache_->bvh_node_count,
+            /*algorithm=*/2u);
 
         std::vector<float> raw;
         try {
@@ -728,8 +729,9 @@ public:
             static_cast<uint32_t>(std::max(1, max_depth)),
             /*frame_seed=*/0u,
             env_color, env_strength,
-            packed_pt_cache_->point_light_count,
-            packed_pt_cache_->bvh_node_count);
+            packed_pt_cache_->light_count,
+            packed_pt_cache_->bvh_node_count,
+            /*algorithm=*/2u);
 
         try {
             gpu_path_tracer_->start_async(*gpu_ctx_, *packed_pt_cache_, params);
@@ -810,8 +812,9 @@ public:
             static_cast<uint32_t>(std::max(1, max_depth)),
             /*frame_seed=*/0u,
             env_color, env_strength,
-            packed_pt_cache_->point_light_count,
-            packed_pt_cache_->bvh_node_count);
+            packed_pt_cache_->light_count,
+            packed_pt_cache_->bvh_node_count,
+            /*algorithm=*/2u);
 
         try {
             gpu_path_tracer_->reset_async(params);

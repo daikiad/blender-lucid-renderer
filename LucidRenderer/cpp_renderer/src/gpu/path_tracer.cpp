@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -173,40 +174,60 @@ PackedPathScene pack_scene_for_path_tracer(const Scene& scene) {
     out.triangle_count = total;
     out.triangles.reserve(static_cast<size_t>(total) * 40);
 
-    // ---- Point lights (NEE) ----
-    // Pack each POINT light as 12 floats / 48 B (std430):
-    //   pos.xyz,      radius      (vec4)
-    //   emission.xyz, area        (vec4)
-    //   _pad, _pad, _pad, _pad    (vec4, reserved for future light_kind)
-    //
-    // emission is already premultiplied on the CPU side ([pybind_renderer.hpp:1278-1296]):
-    //   radius > 0 (sphere): color * energy / (π * area)   — Lambertian sphere radiance
-    //   radius = 0 (delta):  color * energy / (4π)         — point intensity I [W/sr]
-    // The shader does NOT need raw `energy`; it branches on radius and applies
-    // the correct measure-conversion (sphere area-pdf vs delta 1/d²).
-    for (const auto& light : scene.nativeLights) {
-        if (light.type != LightType::POINT) continue;
-        const auto p = position_to_vec3(light.position);
-        const float radius = light.radius.numerical_value_in(mp_units::si::metre);
-        const float area   = light.area.numerical_value_in(
+    // ---- Native lights: POINT / SUN / SPOT / AREA into the unified buffer ----
+    // emission for native lights is already pre-multiplied on the CPU JSON
+    // parser side ([pybind_renderer.hpp:1261-1340]) so the shader consumes
+    // light.emission directly and does NOT need to divide by 4π again.
+    auto emit_native = [&out](const Light& light) {
+        GpuLight g{};
+        const auto p = render::displacement_from_origin(light.position)
+                          .numerical_value_in(render::si::metre);
+        g.position[0] = p.x; g.position[1] = p.y; g.position[2] = p.z;
+        g.emission[0] = light.emission.r.numerical_value_in(render::radiance_unit);
+        g.emission[1] = light.emission.g.numerical_value_in(render::radiance_unit);
+        g.emission[2] = light.emission.b.numerical_value_in(render::radiance_unit);
+        const auto n = light.normal.vec();
+        g.normal[0] = n.x; g.normal[1] = n.y; g.normal[2] = n.z;
+        g.area   = light.area.numerical_value_in(
             mp_units::square(mp_units::si::metre));
-        out.point_lights.push_back(p.x);
-        out.point_lights.push_back(p.y);
-        out.point_lights.push_back(p.z);
-        out.point_lights.push_back(radius);
-        const float er = light.emission.r.numerical_value_in(render::radiance_unit);
-        const float eg = light.emission.g.numerical_value_in(render::radiance_unit);
-        const float eb = light.emission.b.numerical_value_in(render::radiance_unit);
-        out.point_lights.push_back(er);
-        out.point_lights.push_back(eg);
-        out.point_lights.push_back(eb);
-        out.point_lights.push_back(area);
-        out.point_lights.push_back(0.0f);
-        out.point_lights.push_back(0.0f);
-        out.point_lights.push_back(0.0f);
-        out.point_lights.push_back(0.0f);
-        ++out.point_light_count;
-    }
+        g.radius = light.radius.numerical_value_in(mp_units::si::metre);
+        switch (light.type) {
+            case LightType::POINT:
+                g.type = static_cast<uint32_t>(GpuLightType::Point);
+                break;
+            case LightType::SUN:
+                g.type = static_cast<uint32_t>(GpuLightType::Sun);
+                break;
+            case LightType::SPOT: {
+                g.type = static_cast<uint32_t>(GpuLightType::Spot);
+                g.spotAngle = light.spotAngle.numerical_value_in(mp_units::si::radian);
+                g.spotBlend = light.spotBlend;
+                break;
+            }
+            case LightType::AREA: {
+                switch (light.shape) {
+                    case AreaLightShape::DISK:
+                        g.type = static_cast<uint32_t>(GpuLightType::AreaDisk); break;
+                    case AreaLightShape::ELLIPSE:
+                        g.type = static_cast<uint32_t>(GpuLightType::AreaEllipse); break;
+                    default:  // SQUARE, RECTANGLE
+                        g.type = static_cast<uint32_t>(GpuLightType::AreaRect); break;
+                }
+                const auto r = light.right.vec();
+                const auto u = light.up.vec();
+                g.right[0] = r.x; g.right[1] = r.y; g.right[2] = r.z;
+                g.up[0]    = u.x; g.up[1]    = u.y; g.up[2]    = u.z;
+                g.sizeX    = light.sizeX.numerical_value_in(mp_units::si::metre);
+                g.sizeY    = light.sizeY.numerical_value_in(mp_units::si::metre);
+                break;
+            }
+            default:
+                return;  // EMISSIVE_MESH (shouldn't be in nativeLights but skip if so)
+        }
+        out.lights.push_back(g);
+    };
+    for (const auto& light : scene.nativeLights) emit_native(light);
+    const uint32_t native_light_count = static_cast<uint32_t>(out.lights.size());
 
     // Pack into a temp buffer first; BVH build below picks an ordering and we
     // then copy into out.triangles in that order.
@@ -259,6 +280,16 @@ PackedPathScene pack_scene_for_path_tracer(const Scene& scene) {
         const float emission_g = emission_rgb.g;
         const float emission_b = emission_rgb.b;
 
+        // A mesh is "emissive" if any channel of its constant-folded emission
+        // is above the same threshold the shader uses to detect an emissive
+        // hit. All triangles in such a mesh are added to the light buffer as
+        // EMISSIVE_MESH entries; we cache the light_idx for each into the
+        // triangle's reserved vec4 slot (i32 reinterpreted as f32 via bitcast)
+        // so the integrator can compute MIS weights against pdf_light when a
+        // BSDF sample lands on the surface.
+        const bool mesh_is_emissive =
+            emission_r > 1e-6f || emission_g > 1e-6f || emission_b > 1e-6f;
+
         for (const auto& tri : mesh.triangles) {
             const auto v0 = position_to_vec3(mesh.vertices[tri.i0]);
             const auto v1 = position_to_vec3(mesh.vertices[tri.i1]);
@@ -273,9 +304,6 @@ PackedPathScene pack_scene_for_path_tracer(const Scene& scene) {
             pack_vec3(tmp_triangles, tri.n1.vec(), 0.0f);
             pack_vec3(tmp_triangles, tri.n2.vec(), smooth_flag);
 
-            // Material packed into 3 vec4s + 1 reserved vec4 (12+4 = 16 floats).
-            // Layout: (albedo.rgb, metallic), (emission.rgb, roughness),
-            //         (transmission, ior, _, _), (_, _, _, _ reserved).
             tmp_triangles.push_back(albedo_r);
             tmp_triangles.push_back(albedo_g);
             tmp_triangles.push_back(albedo_b);
@@ -288,8 +316,40 @@ PackedPathScene pack_scene_for_path_tracer(const Scene& scene) {
             tmp_triangles.push_back(ior);
             tmp_triangles.push_back(0.0f);
             tmp_triangles.push_back(0.0f);
-            // Reserved vec4 (e.g. future per-fragment UV data, normal-map tangent).
-            tmp_triangles.push_back(0.0f);
+
+            // Reserved vec4: slot[0] = light_idx (-1 if not emissive). Stored
+            // as f32 bits so the std430 alignment / Triangle struct doesn't
+            // need a mixed-type layout; shader reads via bitcast<i32>(f32).
+            int32_t light_idx = -1;
+            if (mesh_is_emissive) {
+                // Triangle area: 0.5 * |cross(v1-v0, v2-v0)|.
+                const float e1x = v1.x - v0.x;
+                const float e1y = v1.y - v0.y;
+                const float e1z = v1.z - v0.z;
+                const float e2x = v2.x - v0.x;
+                const float e2y = v2.y - v0.y;
+                const float e2z = v2.z - v0.z;
+                const float cx = e1y * e2z - e1z * e2y;
+                const float cy = e1z * e2x - e1x * e2z;
+                const float cz = e1x * e2y - e1y * e2x;
+                const float tri_area = 0.5f * std::sqrt(cx*cx + cy*cy + cz*cz);
+                if (tri_area > 1e-12f) {
+                    GpuLight g{};
+                    g.type        = static_cast<uint32_t>(GpuLightType::EmissiveMesh);
+                    g.area        = tri_area;
+                    g.position[0] = v0.x; g.position[1] = v0.y; g.position[2] = v0.z;
+                    g.emission[0] = emission_r;
+                    g.emission[1] = emission_g;
+                    g.emission[2] = emission_b;
+                    const auto fn = tri.faceNormal.vec();
+                    g.normal[0] = fn.x; g.normal[1] = fn.y; g.normal[2] = fn.z;
+                    g.v1[0] = v1.x; g.v1[1] = v1.y; g.v1[2] = v1.z;
+                    g.v2[0] = v2.x; g.v2[1] = v2.y; g.v2[2] = v2.z;
+                    light_idx = static_cast<int32_t>(out.lights.size());
+                    out.lights.push_back(g);
+                }
+            }
+            tmp_triangles.push_back(std::bit_cast<float>(light_idx));
             tmp_triangles.push_back(0.0f);
             tmp_triangles.push_back(0.0f);
             tmp_triangles.push_back(0.0f);
@@ -320,6 +380,41 @@ PackedPathScene pack_scene_for_path_tracer(const Scene& scene) {
                     &tmp_triangles[old_idx * 40],
                     40 * sizeof(float));
     }
+
+    // ---- Light selection: area-weighted CDF ----
+    // CPU sceneLights ([scene_lights.hpp:114-121]) uses a CDF over light areas
+    // for importance sampling. SUN/SPOT have area=1 (symbolic) so they get
+    // their fair share; emissive triangles and area lights weight by physical
+    // surface area.
+    out.light_count = static_cast<uint32_t>(out.lights.size());
+    out.light_cdf.resize(out.light_count);
+    (void)native_light_count;  // silence "unused" — useful for debugging
+    if (out.light_count > 0) {
+        float total_area = 0.0f;
+        for (const auto& l : out.lights) total_area += l.area;
+        if (total_area < 1e-12f) {
+            // Degenerate; assign uniform selection.
+            const float inv_n = 1.0f / static_cast<float>(out.light_count);
+            float cum = 0.0f;
+            for (size_t i = 0; i < out.lights.size(); ++i) {
+                out.lights[i].selection_pdf = inv_n;
+                cum += inv_n;
+                out.light_cdf[i] = cum;
+            }
+        } else {
+            const float inv_total = 1.0f / total_area;
+            float cum = 0.0f;
+            for (size_t i = 0; i < out.lights.size(); ++i) {
+                const float p = out.lights[i].area * inv_total;
+                out.lights[i].selection_pdf = p;
+                cum += p;
+                out.light_cdf[i] = cum;
+            }
+            // Clamp the tail to exactly 1.0 — guards binary search at u≈1.
+            if (!out.light_cdf.empty()) out.light_cdf.back() = 1.0f;
+        }
+    }
+
     return out;
 }
 
@@ -336,8 +431,9 @@ PathTracerParamsGpu make_path_tracer_params(
     uint32_t samples, uint32_t sample_offset, uint32_t max_bounces,
     uint32_t frame_seed,
     const float env_color[3], float env_strength,
-    uint32_t point_light_count,
-    uint32_t bvh_node_count) {
+    uint32_t light_count,
+    uint32_t bvh_node_count,
+    uint32_t algorithm) {
     PathTracerParamsGpu p{};
     const auto pc = position_to_vec3(pos);
     p.pos[0] = pc.x; p.pos[1] = pc.y; p.pos[2] = pc.z;
@@ -360,8 +456,9 @@ PathTracerParamsGpu make_path_tracer_params(
     p.env_color[1]  = env_color[1];
     p.env_color[2]  = env_color[2];
     p.env_strength  = env_strength;
-    p.point_light_count = point_light_count;
-    p.bvh_node_count    = bvh_node_count;
+    p.light_count    = light_count;
+    p.bvh_node_count = bvh_node_count;
+    p.algorithm      = algorithm;
     return p;
 }
 
@@ -383,7 +480,7 @@ std::optional<PathTracer> PathTracer::create(DawnContext& ctx) {
         return std::nullopt;
     }
 
-    wgpu::BindGroupLayoutEntry entries[5] = {};
+    wgpu::BindGroupLayoutEntry entries[6] = {};
     entries[0].binding = 0;
     entries[0].visibility = wgpu::ShaderStage::Compute;
     entries[0].buffer.type = wgpu::BufferBindingType::Uniform;
@@ -397,6 +494,7 @@ std::optional<PathTracer> PathTracer::create(DawnContext& ctx) {
     entries[2].visibility = wgpu::ShaderStage::Compute;
     entries[2].buffer.type = wgpu::BufferBindingType::Storage;
 
+    // Binding 3: unified light buffer (was POINT-only; now POINT/SUN/SPOT/AREA/EMISSIVE_MESH)
     entries[3].binding = 3;
     entries[3].visibility = wgpu::ShaderStage::Compute;
     entries[3].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
@@ -405,8 +503,13 @@ std::optional<PathTracer> PathTracer::create(DawnContext& ctx) {
     entries[4].visibility = wgpu::ShaderStage::Compute;
     entries[4].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
 
+    // Binding 5: light_cdf (f32 per light, area-weighted CDF for select_light)
+    entries[5].binding = 5;
+    entries[5].visibility = wgpu::ShaderStage::Compute;
+    entries[5].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+
     wgpu::BindGroupLayoutDescriptor bgl{};
-    bgl.entryCount = 5;
+    bgl.entryCount = 6;
     bgl.entries    = entries;
     wgpu::BindGroupLayout layout = ctx.device().CreateBindGroupLayout(&bgl);
 
@@ -465,22 +568,40 @@ std::vector<float> PathTracer::render(DawnContext& ctx,
         ctx.queue().WriteBuffer(tri_buf_, 0, scene.triangles.data(), tri_bytes);
     }
 
-    // ---- Point-light storage (grow on demand) ----
-    const uint64_t pl_bytes = static_cast<uint64_t>(scene.point_lights.size())
-                              * sizeof(float);
-    const uint64_t pl_alloc = std::max(pl_bytes, kMinStorageBytes);
-    bool pl_buf_new = false;
-    if (pl_alloc > point_lights_buf_capacity_ || !point_lights_buf_) {
+    // ---- Unified light buffer (grow on demand) ----
+    const uint64_t lt_bytes = static_cast<uint64_t>(scene.lights.size())
+                              * sizeof(GpuLight);
+    const uint64_t lt_alloc = std::max(lt_bytes, kMinStorageBytes);
+    bool lt_buf_new = false;
+    if (lt_alloc > lights_buf_capacity_ || !lights_buf_) {
         wgpu::BufferDescriptor d{};
-        d.size  = pl_alloc;
+        d.size  = lt_alloc;
         d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
-        point_lights_buf_          = ctx.device().CreateBuffer(&d);
-        point_lights_buf_capacity_ = pl_alloc;
-        pl_buf_new                 = true;
+        lights_buf_          = ctx.device().CreateBuffer(&d);
+        lights_buf_capacity_ = lt_alloc;
+        lt_buf_new           = true;
     }
-    if (pl_bytes > 0 && (pl_buf_new || !scene_id_matches)) {
-        ctx.queue().WriteBuffer(point_lights_buf_, 0,
-                                scene.point_lights.data(), pl_bytes);
+    if (lt_bytes > 0 && (lt_buf_new || !scene_id_matches)) {
+        ctx.queue().WriteBuffer(lights_buf_, 0,
+                                scene.lights.data(), lt_bytes);
+    }
+
+    // ---- Light selection CDF (grow on demand) ----
+    const uint64_t cdf_bytes = static_cast<uint64_t>(scene.light_cdf.size())
+                               * sizeof(float);
+    const uint64_t cdf_alloc = std::max(cdf_bytes, kMinStorageBytes);
+    bool cdf_buf_new = false;
+    if (cdf_alloc > light_cdf_buf_capacity_ || !light_cdf_buf_) {
+        wgpu::BufferDescriptor d{};
+        d.size  = cdf_alloc;
+        d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+        light_cdf_buf_          = ctx.device().CreateBuffer(&d);
+        light_cdf_buf_capacity_ = cdf_alloc;
+        cdf_buf_new             = true;
+    }
+    if (cdf_bytes > 0 && (cdf_buf_new || !scene_id_matches)) {
+        ctx.queue().WriteBuffer(light_cdf_buf_, 0,
+                                scene.light_cdf.data(), cdf_bytes);
     }
 
     // ---- BVH node storage (grow on demand) ----
@@ -529,7 +650,7 @@ std::vector<float> PathTracer::render(DawnContext& ctx,
     }
 
     // ---- Bind group (rebuilt per call) ----
-    wgpu::BindGroupEntry bg_entries[5] = {};
+    wgpu::BindGroupEntry bg_entries[6] = {};
     bg_entries[0].binding = 0;
     bg_entries[0].buffer  = params_buf_;
     bg_entries[0].offset  = 0;
@@ -543,17 +664,21 @@ std::vector<float> PathTracer::render(DawnContext& ctx,
     bg_entries[2].offset  = 0;
     bg_entries[2].size    = out_bytes;
     bg_entries[3].binding = 3;
-    bg_entries[3].buffer  = point_lights_buf_;
+    bg_entries[3].buffer  = lights_buf_;
     bg_entries[3].offset  = 0;
-    bg_entries[3].size    = point_lights_buf_capacity_;
+    bg_entries[3].size    = lights_buf_capacity_;
     bg_entries[4].binding = 4;
     bg_entries[4].buffer  = bvh_buf_;
     bg_entries[4].offset  = 0;
     bg_entries[4].size    = bvh_buf_capacity_;
+    bg_entries[5].binding = 5;
+    bg_entries[5].buffer  = light_cdf_buf_;
+    bg_entries[5].offset  = 0;
+    bg_entries[5].size    = light_cdf_buf_capacity_;
 
     wgpu::BindGroupDescriptor bg{};
     bg.layout     = layout_;
-    bg.entryCount = 5;
+    bg.entryCount = 6;
     bg.entries    = bg_entries;
     wgpu::BindGroup bind_group = ctx.device().CreateBindGroup(&bg);
 
@@ -622,7 +747,8 @@ struct PathTracer::AsyncState {
     wgpu::BindGroupLayout layout;
     wgpu::Buffer          params_buf;
     wgpu::Buffer          tri_buf;          uint64_t tri_buf_size = 0;
-    wgpu::Buffer          point_lights_buf; uint64_t point_lights_buf_size = 0;
+    wgpu::Buffer          lights_buf;       uint64_t lights_buf_size = 0;
+    wgpu::Buffer          light_cdf_buf;    uint64_t light_cdf_buf_size = 0;
     wgpu::Buffer          bvh_buf;          uint64_t bvh_buf_size = 0;
 
     // ---- Owned by this session ----
@@ -669,7 +795,7 @@ void PathTracer::AsyncState::worker_loop() {
     {
         wgpu::BindGroupLayoutEntry dummy{};
         (void)dummy;
-        wgpu::BindGroupEntry bg_entries[5] = {};
+        wgpu::BindGroupEntry bg_entries[6] = {};
         bg_entries[0].binding = 0;
         bg_entries[0].buffer  = params_buf;
         bg_entries[0].offset  = 0;
@@ -683,17 +809,21 @@ void PathTracer::AsyncState::worker_loop() {
         bg_entries[2].offset  = 0;
         bg_entries[2].size    = accum_bytes;
         bg_entries[3].binding = 3;
-        bg_entries[3].buffer  = point_lights_buf;
+        bg_entries[3].buffer  = lights_buf;
         bg_entries[3].offset  = 0;
-        bg_entries[3].size    = point_lights_buf_size;
+        bg_entries[3].size    = lights_buf_size;
         bg_entries[4].binding = 4;
         bg_entries[4].buffer  = bvh_buf;
         bg_entries[4].offset  = 0;
         bg_entries[4].size    = bvh_buf_size;
+        bg_entries[5].binding = 5;
+        bg_entries[5].buffer  = light_cdf_buf;
+        bg_entries[5].offset  = 0;
+        bg_entries[5].size    = light_cdf_buf_size;
 
         wgpu::BindGroupDescriptor bg{};
         bg.layout     = layout;
-        bg.entryCount = 5;
+        bg.entryCount = 6;
         bg.entries    = bg_entries;
         bind_group    = ctx->device().CreateBindGroup(&bg);
     }
@@ -896,19 +1026,32 @@ void PathTracer::start_async(DawnContext& ctx,
     if (tri_bytes > 0) {
         ctx.queue().WriteBuffer(tri_buf_, 0, scene.triangles.data(), tri_bytes);
     }
-    const uint64_t pl_bytes = static_cast<uint64_t>(scene.point_lights.size())
-                              * sizeof(float);
-    const uint64_t pl_alloc = std::max(pl_bytes, kMinStorageBytes);
-    if (pl_alloc > point_lights_buf_capacity_ || !point_lights_buf_) {
+    const uint64_t lt_bytes = static_cast<uint64_t>(scene.lights.size())
+                              * sizeof(GpuLight);
+    const uint64_t lt_alloc = std::max(lt_bytes, kMinStorageBytes);
+    if (lt_alloc > lights_buf_capacity_ || !lights_buf_) {
         wgpu::BufferDescriptor d{};
-        d.size  = pl_alloc;
+        d.size  = lt_alloc;
         d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
-        point_lights_buf_          = ctx.device().CreateBuffer(&d);
-        point_lights_buf_capacity_ = pl_alloc;
+        lights_buf_          = ctx.device().CreateBuffer(&d);
+        lights_buf_capacity_ = lt_alloc;
     }
-    if (pl_bytes > 0) {
-        ctx.queue().WriteBuffer(point_lights_buf_, 0,
-                                scene.point_lights.data(), pl_bytes);
+    if (lt_bytes > 0) {
+        ctx.queue().WriteBuffer(lights_buf_, 0, scene.lights.data(), lt_bytes);
+    }
+    const uint64_t cdf_bytes = static_cast<uint64_t>(scene.light_cdf.size())
+                               * sizeof(float);
+    const uint64_t cdf_alloc = std::max(cdf_bytes, kMinStorageBytes);
+    if (cdf_alloc > light_cdf_buf_capacity_ || !light_cdf_buf_) {
+        wgpu::BufferDescriptor d{};
+        d.size  = cdf_alloc;
+        d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+        light_cdf_buf_          = ctx.device().CreateBuffer(&d);
+        light_cdf_buf_capacity_ = cdf_alloc;
+    }
+    if (cdf_bytes > 0) {
+        ctx.queue().WriteBuffer(light_cdf_buf_, 0,
+                                scene.light_cdf.data(), cdf_bytes);
     }
     const uint64_t bvh_bytes = static_cast<uint64_t>(scene.bvh_nodes.size())
                                * sizeof(GpuBvhNode);
@@ -932,8 +1075,10 @@ void PathTracer::start_async(DawnContext& ctx,
     st->params_buf       = params_buf_;
     st->tri_buf          = tri_buf_;
     st->tri_buf_size     = tri_buf_capacity_;
-    st->point_lights_buf = point_lights_buf_;
-    st->point_lights_buf_size = point_lights_buf_capacity_;
+    st->lights_buf       = lights_buf_;
+    st->lights_buf_size  = lights_buf_capacity_;
+    st->light_cdf_buf    = light_cdf_buf_;
+    st->light_cdf_buf_size = light_cdf_buf_capacity_;
     st->bvh_buf          = bvh_buf_;
     st->bvh_buf_size     = bvh_buf_capacity_;
     st->base_params      = base_params;
