@@ -549,7 +549,13 @@ class RenderSession:
         
         # レンダリング実行
         if params.debug_mode:
-            debug_map = {'NORMAL': 'normal', 'ALBEDO': 'albedo', 'EMISSION': 'emission'}
+            # Preferences uses lowercase enum values for the newer modes; map
+            # both forms so old/new property values both reach the C++ side.
+            debug_map = {
+                'NORMAL': 'normal', 'ALBEDO': 'albedo', 'EMISSION': 'emission',
+                'normal': 'normal', 'albedo': 'albedo', 'emission': 'emission',
+                'volume': 'volume',
+            }
             mode = debug_map.get(params.debug_mode, 'normal')
             if params.backend == 'gpu' and hasattr(self._renderer, 'render_debug_gpu'):
                 # GPU path (Phase 1b: only 'normal' is real GPU; others fall back internally)

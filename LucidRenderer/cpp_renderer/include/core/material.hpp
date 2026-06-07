@@ -129,6 +129,22 @@ struct NodeTree {
 
 // ========== Material Definition ==========
 
+// Homogeneous-volume properties feeding the bounding-mesh of a participating
+// medium. `density` is the extinction coefficient (1/m); `color` is the
+// scattering/extinction tint applied per channel. Filled when Blender's
+// Material Output `Volume` socket is linked to Principled Volume / Volume
+// Scatter / Volume Absorption ([scene_export.py:_extract_volume_properties]).
+// Phase 1 is debug-only (thickness map); Phase 2 will use these in actual
+// Beer-Lambert + scattering integration.
+struct VolumeProperties {
+    render::RGB3f color;    // [0,1] tint
+    float density;          // > 0 means this mesh is a volume
+    float anisotropy;       // [-1, 1] Henyey-Greenstein g (unused in Phase 1)
+
+    VolumeProperties() : color{1.0f, 1.0f, 1.0f}, density(0.0f), anisotropy(0.0f) {}
+    bool present() const { return density > 0.0f; }
+};
+
 /**
  * Material - Physical material properties for PBR rendering (unit-safe)
  */
@@ -142,6 +158,8 @@ struct Material {
 
     NodeTree nodeTree;
     bool useNodes;
+
+    VolumeProperties volume;       // density==0 means "no volume" (default)
 
     Material()
         : albedo(0.8f, 0.8f, 0.8f)

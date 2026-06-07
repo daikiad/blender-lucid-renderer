@@ -203,6 +203,7 @@ class LucidRendererSettings(bpy.types.PropertyGroup):
             ('normal', "Normals", "Show surface normals as RGB colors"),
             ('albedo', "Albedo", "Show base colors without lighting"),
             ('emission', "Emission", "Show emissive surfaces only"),
+            ('volume', "Volumes", "Thickness map of volume-shaded meshes via Beer-Lambert"),
         ],
         default='NONE'
     )

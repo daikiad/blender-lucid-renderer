@@ -91,3 +91,44 @@ inline render::AttenuationRGB traceEmission(const Scene &scene, const Ray &ray, 
     }
     return render::make_attenuation_rgb(0, 0, 0);
 }
+
+// Debug mode: thickness map of volume-shaded meshes (Beer-Lambert lite).
+// Hit the front face of a volume; continue the ray a hair past the entry point
+// and find the next intersection (assumed to be the back face of the same
+// convex volume — non-convex / overlapping volumes are out of scope for the
+// debug pass). Output `(1 - exp(-density * thickness)) * volume.color`, which
+// is what the surface visually absorbs / scatters relative to a black
+// background. Non-volume meshes return black.
+inline render::AttenuationRGB traceVolume(const Scene &scene, const Ray &ray, bool useAABB = true) {
+    Hit hit = intersectScene(scene, ray, render::metres(0.0f), geometry::RAY_T_MAX_TYPED, useAABB);
+    if (!hit.hit || !hit.material->volume.present()) {
+        return render::make_attenuation_rgb(0.0f, 0.0f, 0.0f);
+    }
+
+    // Step a small amount past the entry point and trace again to find the
+    // exit. The new ray's `t` is the thickness through the medium.
+    constexpr float kEntryOffset = 1e-4f;
+    auto entry_pt = ray.at(hit.t);
+    Ray inside_ray(entry_pt + ray.direction * render::metres(kEntryOffset),
+                    ray.direction);
+    Hit exit_hit = intersectScene(scene, inside_ray,
+                                   render::metres(0.0f),
+                                   geometry::RAY_T_MAX_TYPED, useAABB);
+    if (!exit_hit.hit) {
+        // Ray escaped to infinity without exiting (e.g. open-mesh volume).
+        // Treat thickness as one "unit length" so the debug still shows
+        // something rather than going pitch black on edge cases.
+        const auto& vol = hit.material->volume;
+        const float t = 1.0f - std::exp(-vol.density);
+        return render::make_attenuation_rgb(vol.color.r * t,
+                                             vol.color.g * t,
+                                             vol.color.b * t);
+    }
+
+    const float thickness = exit_hit.t.numerical_value_in(render::si::metre);
+    const auto& vol = hit.material->volume;
+    const float t = 1.0f - std::exp(-vol.density * thickness);
+    return render::make_attenuation_rgb(vol.color.r * t,
+                                         vol.color.g * t,
+                                         vol.color.b * t);
+}

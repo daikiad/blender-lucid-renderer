@@ -412,6 +412,8 @@ public:
                     color = traceAlbedo(scene_, ray);
                 } else if (mode == "emission") {
                     color = traceEmission(scene_, ray);
+                } else if (mode == "volume") {
+                    color = traceVolume(scene_, ray);
                 } else {
                     color = render::make_attenuation_rgb(1.0f, 0.0f, 1.0f);  // マゼンタ（エラー表示）
                 }
@@ -1359,6 +1361,26 @@ private:
                 if (mat.contains("node_tree") && !mat["node_tree"].is_null()) {
                     m.material.nodeTree = parseNodeTree(mat["node_tree"]);
                     m.material.useNodes = mat.value("use_nodes", false) && m.material.nodeTree.valid;
+                }
+
+                // ---- Volume properties (Material Output -> Volume socket) ----
+                // scene_export.py emits null when no volume is bound, so the
+                // mesh stays a normal opaque surface. When present, density>0
+                // marks it as a participating-medium bounding mesh.
+                if (mat.contains("volume") && !mat["volume"].is_null()) {
+                    const auto& vol = mat["volume"];
+                    if (vol.contains("color") && vol["color"].is_array()
+                        && vol["color"].size() >= 3) {
+                        m.material.volume.color.r = vol["color"][0].get<float>();
+                        m.material.volume.color.g = vol["color"][1].get<float>();
+                        m.material.volume.color.b = vol["color"][2].get<float>();
+                    }
+                    if (vol.contains("density")) {
+                        m.material.volume.density = vol["density"].get<float>();
+                    }
+                    if (vol.contains("anisotropy")) {
+                        m.material.volume.anisotropy = vol["anisotropy"].get<float>();
+                    }
                 }
             }
             

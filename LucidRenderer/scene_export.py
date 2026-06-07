@@ -286,8 +286,68 @@ def get_material_properties(obj):
             'transmission': 0.0,
             'ior': 1.45
         }
-    
+
+    # ---- Volume extraction ----
+    # Walk Material Output -> Volume socket. If linked, find the upstream
+    # Principled Volume / Volume Scatter / Volume Absorption node and pull
+    # `color` + `density`. The Phase-1 volume renderer treats every mesh
+    # marked has_volume as a homogeneous medium bounded by its surface mesh.
+    result['volume'] = _extract_volume_properties(mat) if mat.use_nodes and mat.node_tree else None
+
     return result
+
+
+def _extract_volume_properties(mat):
+    """Look at Material Output's Volume socket; return a dict if any volume
+    node feeds it, else None. Recognises Principled Volume + Volume Scatter +
+    Volume Absorption. Returns:
+        {'color': [r,g,b], 'density': float, 'anisotropy': float, 'node_type': str}
+    """
+    output_node = None
+    for node in mat.node_tree.nodes:
+        if node.type == 'OUTPUT_MATERIAL':
+            output_node = node
+            break
+    if output_node is None or 'Volume' not in output_node.inputs:
+        return None
+
+    volume_socket = output_node.inputs['Volume']
+    if not volume_socket.is_linked or not volume_socket.links:
+        return None
+
+    volume_node = volume_socket.links[0].from_node
+    color = [1.0, 1.0, 1.0]
+    density = 0.0
+    anisotropy = 0.0
+
+    node_type = volume_node.type
+
+    # Principled Volume: Color, Density, Anisotropy, plus Absorption Color etc.
+    # Volume Scatter: Color, Density, Anisotropy.
+    # Volume Absorption: Color, Density (no anisotropy).
+    if node_type in ('VOLUME_PRINCIPLED', 'VOLUME_SCATTER', 'VOLUME_ABSORPTION'):
+        col_in = volume_node.inputs.get('Color')
+        if col_in is not None and not col_in.is_linked:
+            c = col_in.default_value
+            color = [c[0], c[1], c[2]]
+
+        dens_in = volume_node.inputs.get('Density')
+        if dens_in is not None and not dens_in.is_linked:
+            density = float(dens_in.default_value)
+
+        aniso_in = volume_node.inputs.get('Anisotropy')
+        if aniso_in is not None and not aniso_in.is_linked:
+            anisotropy = float(aniso_in.default_value)
+    else:
+        # Unknown volume node — flag as present but defaults are fine.
+        pass
+
+    return {
+        'node_type': node_type,
+        'color': color,
+        'density': density,
+        'anisotropy': anisotropy,
+    }
 
 
 def _export_world_environment(scene):
@@ -673,7 +733,8 @@ def export_scene_to_json(depsgraph):
                 "emission": mat_props['legacy_properties'].get('emission', [0.0, 0.0, 0.0]),
                 "transmission": mat_props['legacy_properties'].get('transmission', 0.0),
                 "ior": mat_props['legacy_properties'].get('ior', 1.45),
-                "node_tree": mat_props['node_tree']
+                "node_tree": mat_props['node_tree'],
+                "volume": mat_props.get('volume'),  # None if no Volume socket linked
             }
         else:
             material = {
