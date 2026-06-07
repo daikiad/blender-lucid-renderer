@@ -297,6 +297,152 @@ def get_material_properties(obj):
     return result
 
 
+def extract_smoke_domain_grid(obj, frame, sidecar_path):
+    """Detect a Fluid Domain modifier on `obj` and, if present, locate the
+    baked .vdb for the current frame, read the density grid via pyopenvdb,
+    and write it as raw float32 to `sidecar_path`. Returns a dict with grid
+    metadata (dims, world_bbox) for embedding in scene JSON, or None.
+
+    Layout: voxels stored in C-order (x fastest); dims = [Nx, Ny, Nz].
+    World bbox is derived from the grid's index-to-world transform applied
+    to the active voxel range, then composed with obj.matrix_world.
+    """
+    import os
+    import numpy as np
+
+    # ---- 1. Find a Fluid DOMAIN GAS modifier ----
+    domain_mod = None
+    for mod in obj.modifiers:
+        if mod.type != 'FLUID':
+            continue
+        if getattr(mod, 'fluid_type', None) != 'DOMAIN':
+            continue
+        settings = getattr(mod, 'domain_settings', None)
+        if settings is None or getattr(settings, 'domain_type', None) != 'GAS':
+            continue
+        domain_mod = mod
+        break
+    if domain_mod is None:
+        return None
+
+    settings = domain_mod.domain_settings
+    cache_dir = bpy.path.abspath(settings.cache_directory)
+    if not cache_dir or not os.path.isdir(cache_dir):
+        print(f"[smoke] domain '{obj.name}' cache dir not found: {cache_dir}")
+        return None
+
+    # ---- 2. Pick the .vdb for this frame ----
+    # Manta cache layout (cache type = All, OpenVDB format):
+    #   <cache_dir>/data/fluid_data_XXXX.vdb        (base sim)
+    #   <cache_dir>/noise/fluid_data_XXXX.vdb       (upresolved noise, if enabled)
+    candidates = [
+        os.path.join(cache_dir, 'noise', f'fluid_data_{frame:04d}.vdb'),
+        os.path.join(cache_dir, 'data',  f'fluid_data_{frame:04d}.vdb'),
+    ]
+    vdb_path = next((p for p in candidates if os.path.exists(p)), None)
+    if vdb_path is None:
+        print(f"[smoke] no .vdb found for frame {frame} under {cache_dir}")
+        return None
+
+    # ---- 3. Read density via pyopenvdb (bundled with Blender) ----
+    try:
+        import pyopenvdb as vdb
+    except ImportError:
+        try:
+            import openvdb as vdb  # some builds expose it without the py- prefix
+        except ImportError:
+            print("[smoke] pyopenvdb not available in this Blender build; "
+                  "smoke volumes will not be rendered")
+            return None
+
+    try:
+        # Try the standard density grid name first; fall back to any float grid.
+        density_grid = None
+        for name in ('density', 'density_noise', 'smoke', 'smoke_density'):
+            try:
+                density_grid = vdb.read(vdb_path, name)
+                break
+            except Exception:
+                continue
+        if density_grid is None:
+            metas = vdb.readAllGridMetadata(vdb_path)
+            for meta in metas:
+                if getattr(meta, 'valueTypeName', '') in ('float', 'Float'):
+                    density_grid = vdb.read(vdb_path, meta.name)
+                    break
+        if density_grid is None:
+            print(f"[smoke] no float density grid in {vdb_path}")
+            return None
+    except Exception as e:
+        print(f"[smoke] pyopenvdb read failed for {vdb_path}: {e}")
+        return None
+
+    # ---- 4. Extract dense numpy array + index/world transform ----
+    try:
+        bbox = density_grid.evalActiveVoxelBoundingBox()
+        ijk_min = bbox[0]
+        ijk_max = bbox[1]
+        dims = (
+            int(ijk_max[0] - ijk_min[0] + 1),
+            int(ijk_max[1] - ijk_min[1] + 1),
+            int(ijk_max[2] - ijk_min[2] + 1),
+        )
+        if dims[0] <= 0 or dims[1] <= 0 or dims[2] <= 0:
+            print(f"[smoke] empty active voxel bbox for {vdb_path}")
+            return None
+        arr = np.zeros(dims, dtype=np.float32)
+        density_grid.copyToArray(arr, ijk=ijk_min)
+
+        # Mantaflow's VDB stores grids with a transform whose origin is the
+        # min corner of the domain in WORLD units (not the object's origin,
+        # and not Blender local space). indexToWorld(ijk) therefore returns
+        # an offset from that corner. To place the active voxel region in
+        # actual world coordinates we add the mesh's world AABB minimum.
+        # This assumes the domain is axis-aligned, which Quick Smoke is by
+        # default; a rotated domain would need full per-voxel matrix
+        # composition (deferred to Phase 2 alongside real PT integration).
+        from mathutils import Vector
+        m = obj.matrix_world
+        mesh_corners_world = [m @ Vector(c) for c in obj.bound_box]
+        mesh_world_min = [min(c[i] for c in mesh_corners_world) for i in range(3)]
+
+        tx = density_grid.transform
+        vdb_min = tx.indexToWorld(ijk_min)
+        vdb_max = tx.indexToWorld(
+            (ijk_max[0] + 1, ijk_max[1] + 1, ijk_max[2] + 1))
+        ws_min = [mesh_world_min[i] + vdb_min[i] for i in range(3)]
+        ws_max = [mesh_world_min[i] + vdb_max[i] for i in range(3)]
+
+        print(f"[smoke] obj '{obj.name}' location={list(obj.location)} "
+              f"mesh_world_min={mesh_world_min}")
+    except Exception as e:
+        print(f"[smoke] grid array extraction failed: {e}")
+        return None
+
+    # ---- 5. Write raw float32 sidecar ----
+    try:
+        # numpy stores in (Nx, Ny, Nz) C-order; we want the C++ side to walk
+        # voxel (ix, iy, iz) with linear index ix + Nx*iy + Nx*Ny*iz, which is
+        # the same as numpy's default flattening (last index fastest).
+        # Swap to make x fastest, since that's typical for rendering.
+        arr_c = np.ascontiguousarray(np.transpose(arr, (2, 1, 0)))  # → (Nz, Ny, Nx) so x is fastest on flatten
+        arr_c.tofile(sidecar_path)
+    except Exception as e:
+        print(f"[smoke] failed to write sidecar {sidecar_path}: {e}")
+        return None
+
+    nx, ny, nz = dims
+    print(f"[smoke] {obj.name}: density grid {nx}x{ny}x{nz}, "
+          f"world bbox {ws_min} -> {ws_max}, wrote {sidecar_path}")
+    return {
+        'sidecar_path': sidecar_path,
+        'dims': [nx, ny, nz],
+        'world_min': ws_min,
+        'world_max': ws_max,
+        'source_vdb': vdb_path,
+    }
+
+
 def _extract_volume_properties(mat):
     """Look at Material Output's Volume socket; return a dict if any volume
     node feeds it, else None. Recognises Principled Volume + Volume Scatter +
@@ -916,7 +1062,30 @@ def _export_scene_to_path(depsgraph, path: str):
         mat_data = {}
         if obj.active_material:
             mat_data = get_material_properties(obj)
-        
+
+        # Smoke domain detection: if this mesh has a baked Fluid Domain
+        # modifier, read the per-frame .vdb via pyopenvdb, write a raw
+        # float32 sidecar next to the scene JSON, and stash metadata in
+        # the material's volume entry so the C++ parser can load it.
+        try:
+            import os
+            sidecar_dir = os.path.dirname(path)
+            sidecar = os.path.join(
+                sidecar_dir,
+                f"smoke_{obj.name}_{scene.frame_current:04d}.f32")
+            smoke_meta = extract_smoke_domain_grid(
+                obj, scene.frame_current, sidecar)
+            if smoke_meta is not None:
+                if 'volume' not in mat_data or mat_data['volume'] is None:
+                    mat_data['volume'] = {
+                        'color': [1.0, 1.0, 1.0],
+                        'density': 1.0,
+                        'anisotropy': 0.0,
+                    }
+                mat_data['volume']['smoke_grid'] = smoke_meta
+        except Exception as e:
+            print(f"[scene_export] smoke extraction failed for {obj.name}: {e}")
+
         mesh_data = {
             "name": obj.name,
             "vertices": verts,

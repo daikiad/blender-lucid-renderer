@@ -92,21 +92,136 @@ inline render::AttenuationRGB traceEmission(const Scene &scene, const Ray &ray, 
     return render::make_attenuation_rgb(0, 0, 0);
 }
 
-// Debug mode: thickness map of volume-shaded meshes (Beer-Lambert lite).
-// Hit the front face of a volume; continue the ray a hair past the entry point
-// and find the next intersection (assumed to be the back face of the same
-// convex volume — non-convex / overlapping volumes are out of scope for the
-// debug pass). Output `(1 - exp(-density * thickness)) * volume.color`, which
-// is what the surface visually absorbs / scatters relative to a black
-// background. Non-volume meshes return black.
+// Trilinear sample of a dense float grid stored x-fastest.
+// world_pos must be inside [grid_world_min, grid_world_max].
+inline float sample_grid_trilinear(const VolumeProperties& vol,
+                                    float wx, float wy, float wz) {
+    const float u = (wx - vol.grid_world_min[0])
+                  / std::max(1e-12f, vol.grid_world_max[0] - vol.grid_world_min[0]);
+    const float v = (wy - vol.grid_world_min[1])
+                  / std::max(1e-12f, vol.grid_world_max[1] - vol.grid_world_min[1]);
+    const float w = (wz - vol.grid_world_min[2])
+                  / std::max(1e-12f, vol.grid_world_max[2] - vol.grid_world_min[2]);
+    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f || w < 0.0f || w > 1.0f) {
+        return 0.0f;
+    }
+    const int nx = vol.grid_dims[0];
+    const int ny = vol.grid_dims[1];
+    const int nz = vol.grid_dims[2];
+    const float fx = u * static_cast<float>(nx - 1);
+    const float fy = v * static_cast<float>(ny - 1);
+    const float fz = w * static_cast<float>(nz - 1);
+    const int ix = std::clamp(static_cast<int>(fx), 0, nx - 2);
+    const int iy = std::clamp(static_cast<int>(fy), 0, ny - 2);
+    const int iz = std::clamp(static_cast<int>(fz), 0, nz - 2);
+    const float tx = fx - static_cast<float>(ix);
+    const float ty = fy - static_cast<float>(iy);
+    const float tz = fz - static_cast<float>(iz);
+
+    auto idx = [nx, ny](int i, int j, int k) {
+        return static_cast<size_t>(i)
+             + static_cast<size_t>(nx) * static_cast<size_t>(j)
+             + static_cast<size_t>(nx) * static_cast<size_t>(ny) * static_cast<size_t>(k);
+    };
+    const float c000 = vol.grid_density[idx(ix,   iy,   iz  )];
+    const float c100 = vol.grid_density[idx(ix+1, iy,   iz  )];
+    const float c010 = vol.grid_density[idx(ix,   iy+1, iz  )];
+    const float c110 = vol.grid_density[idx(ix+1, iy+1, iz  )];
+    const float c001 = vol.grid_density[idx(ix,   iy,   iz+1)];
+    const float c101 = vol.grid_density[idx(ix+1, iy,   iz+1)];
+    const float c011 = vol.grid_density[idx(ix,   iy+1, iz+1)];
+    const float c111 = vol.grid_density[idx(ix+1, iy+1, iz+1)];
+
+    const float c00 = c000 * (1.0f - tx) + c100 * tx;
+    const float c10 = c010 * (1.0f - tx) + c110 * tx;
+    const float c01 = c001 * (1.0f - tx) + c101 * tx;
+    const float c11 = c011 * (1.0f - tx) + c111 * tx;
+    const float c0  = c00  * (1.0f - ty) + c10  * ty;
+    const float c1  = c01  * (1.0f - ty) + c11  * ty;
+    return c0 * (1.0f - tz) + c1 * tz;
+}
+
+// Debug mode: thickness map of volume-shaded meshes.
+//
+// Homogeneous (no grid): hit front face, trace from inside to find back face,
+// output (1 - exp(-density * thickness)) * color.
+//
+// Heterogeneous (smoke grid attached): hit front face, then ray-march through
+// the volume's bbox at fixed step size, accumulating density * step at each
+// sample. Output (1 - exp(-integrated_density)) * color.
 inline render::AttenuationRGB traceVolume(const Scene &scene, const Ray &ray, bool useAABB = true) {
     Hit hit = intersectScene(scene, ray, render::metres(0.0f), geometry::RAY_T_MAX_TYPED, useAABB);
     if (!hit.hit || !hit.material->volume.present()) {
         return render::make_attenuation_rgb(0.0f, 0.0f, 0.0f);
     }
+    const auto& vol = hit.material->volume;
 
-    // Step a small amount past the entry point and trace again to find the
-    // exit. The new ray's `t` is the thickness through the medium.
+    // ---- Heterogeneous ray-march ----
+    if (vol.has_grid()) {
+        constexpr float kEntryOffset = 1e-4f;
+        const auto entry_pt = ray.at(hit.t);
+        Ray inside_ray(entry_pt + ray.direction * render::metres(kEntryOffset),
+                        ray.direction);
+        Hit exit_hit = intersectScene(scene, inside_ray,
+                                       render::metres(0.0f),
+                                       geometry::RAY_T_MAX_TYPED, useAABB);
+        const float t_inside = exit_hit.hit
+            ? exit_hit.t.numerical_value_in(render::si::metre)
+            : 0.0f;
+        if (t_inside <= 0.0f) {
+            return render::make_attenuation_rgb(0.0f, 0.0f, 0.0f);
+        }
+
+        // Step size: aim for ~2 samples per voxel along the longest axis.
+        const float extent = std::max({
+            vol.grid_world_max[0] - vol.grid_world_min[0],
+            vol.grid_world_max[1] - vol.grid_world_min[1],
+            vol.grid_world_max[2] - vol.grid_world_min[2],
+        });
+        const int max_dim = std::max({
+            vol.grid_dims[0], vol.grid_dims[1], vol.grid_dims[2]});
+        const float voxel_size = extent / std::max(1, max_dim);
+        const float step = std::max(1e-4f, voxel_size * 0.5f);
+        const int n_steps = std::min(2048, static_cast<int>(t_inside / step) + 1);
+
+        const auto rd = inside_ray.direction.vec();
+        const auto ro = render::displacement_from_origin(
+                            inside_ray.origin).numerical_value_in(render::si::metre);
+
+        float integrated = 0.0f;
+        float max_sampled = 0.0f;
+        int   nonzero_steps = 0;
+        for (int i = 0; i < n_steps; ++i) {
+            const float t = (static_cast<float>(i) + 0.5f) * step;
+            if (t > t_inside) break;
+            const float wx = ro.x + rd.x * t;
+            const float wy = ro.y + rd.y * t;
+            const float wz = ro.z + rd.z * t;
+            const float d = sample_grid_trilinear(vol, wx, wy, wz);
+            integrated += d * step;
+            if (d > max_sampled) max_sampled = d;
+            if (d > 0.0f) ++nonzero_steps;
+        }
+
+        (void)nonzero_steps;
+        // Debug viz: show the max density sampled along the ray, modulated by
+        // a Beer-Lambert-style opacity from the integrated extinction. Using
+        // the max is a "did the ray hit any smoke?" indicator that doesn't
+        // require enough thickness for the integral to register; the opacity
+        // term smoothly turns up the brightness where the ray genuinely
+        // travels through dense regions. Real Beer-Lambert without the max
+        // sentinel goes pitch black on thin / partially-occluded volumes
+        // because the next-hit (other geometry inside the domain) shrinks
+        // t_inside to near zero. Phase 2 (real PT integration) replaces
+        // this debug formula with proper participating-medium transport.
+        const float opacity = 1.0f - std::exp(-vol.density * integrated * 10.0f);
+        const float vis = std::max(max_sampled, opacity);
+        return render::make_attenuation_rgb(vol.color.r * vis,
+                                             vol.color.g * vis,
+                                             vol.color.b * vis);
+    }
+
+    // ---- Homogeneous (Phase 1 behaviour) ----
     constexpr float kEntryOffset = 1e-4f;
     auto entry_pt = ray.at(hit.t);
     Ray inside_ray(entry_pt + ray.direction * render::metres(kEntryOffset),
@@ -115,18 +230,12 @@ inline render::AttenuationRGB traceVolume(const Scene &scene, const Ray &ray, bo
                                    render::metres(0.0f),
                                    geometry::RAY_T_MAX_TYPED, useAABB);
     if (!exit_hit.hit) {
-        // Ray escaped to infinity without exiting (e.g. open-mesh volume).
-        // Treat thickness as one "unit length" so the debug still shows
-        // something rather than going pitch black on edge cases.
-        const auto& vol = hit.material->volume;
         const float t = 1.0f - std::exp(-vol.density);
         return render::make_attenuation_rgb(vol.color.r * t,
                                              vol.color.g * t,
                                              vol.color.b * t);
     }
-
     const float thickness = exit_hit.t.numerical_value_in(render::si::metre);
-    const auto& vol = hit.material->volume;
     const float t = 1.0f - std::exp(-vol.density * thickness);
     return render::make_attenuation_rgb(vol.color.r * t,
                                          vol.color.g * t,

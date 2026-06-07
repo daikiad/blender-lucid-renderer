@@ -28,6 +28,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <fstream>
 #include <iostream>
 
 #include "renderer.hpp"
@@ -1380,6 +1381,64 @@ private:
                     }
                     if (vol.contains("anisotropy")) {
                         m.material.volume.anisotropy = vol["anisotropy"].get<float>();
+                    }
+                    // Heterogeneous grid (smoke / fire) — Python writes the
+                    // dense float32 voxels to a sidecar file and embeds just
+                    // the path + dims + world bbox here. Load the raw binary
+                    // into the VolumeProperties.grid_density buffer.
+                    if (vol.contains("smoke_grid") && vol["smoke_grid"].is_object()) {
+                        const auto& sg = vol["smoke_grid"];
+                        if (sg.contains("dims") && sg["dims"].is_array()
+                            && sg["dims"].size() == 3
+                            && sg.contains("world_min") && sg["world_min"].is_array()
+                            && sg.contains("world_max") && sg["world_max"].is_array()
+                            && sg.contains("sidecar_path")) {
+                            m.material.volume.grid_dims[0] = sg["dims"][0].get<int>();
+                            m.material.volume.grid_dims[1] = sg["dims"][1].get<int>();
+                            m.material.volume.grid_dims[2] = sg["dims"][2].get<int>();
+                            for (int i = 0; i < 3; ++i) {
+                                m.material.volume.grid_world_min[i]
+                                    = sg["world_min"][i].get<float>();
+                                m.material.volume.grid_world_max[i]
+                                    = sg["world_max"][i].get<float>();
+                            }
+                            const std::string sidecar
+                                = sg["sidecar_path"].get<std::string>();
+                            const size_t voxel_count
+                                = static_cast<size_t>(m.material.volume.grid_dims[0])
+                                * m.material.volume.grid_dims[1]
+                                * m.material.volume.grid_dims[2];
+                            m.material.volume.grid_density.resize(voxel_count);
+                            std::ifstream f(sidecar, std::ios::binary);
+                            if (f) {
+                                f.read(reinterpret_cast<char*>(
+                                           m.material.volume.grid_density.data()),
+                                       voxel_count * sizeof(float));
+                                float max_d = 0.0f;
+                                float sum_d = 0.0f;
+                                size_t nonzero = 0;
+                                for (float d : m.material.volume.grid_density) {
+                                    if (d > 0.0f) { ++nonzero; sum_d += d; }
+                                    if (d > max_d) max_d = d;
+                                }
+                                std::cerr << "[Volume] loaded "
+                                          << m.material.volume.grid_dims[0] << "x"
+                                          << m.material.volume.grid_dims[1] << "x"
+                                          << m.material.volume.grid_dims[2]
+                                          << " density grid; max=" << max_d
+                                          << " mean(nonzero)=" << (nonzero ? sum_d/nonzero : 0.0f)
+                                          << " nonzero=" << nonzero
+                                          << "/" << voxel_count
+                                          << " from " << sidecar << "\n";
+                            } else {
+                                std::cerr << "[Volume] failed to open sidecar "
+                                          << sidecar << " — heterogeneous grid skipped\n";
+                                m.material.volume.grid_density.clear();
+                                m.material.volume.grid_dims[0] = 0;
+                                m.material.volume.grid_dims[1] = 0;
+                                m.material.volume.grid_dims[2] = 0;
+                            }
+                        }
                     }
                 }
             }

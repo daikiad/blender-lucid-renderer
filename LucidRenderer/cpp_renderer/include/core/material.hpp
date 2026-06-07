@@ -138,11 +138,31 @@ struct NodeTree {
 // Beer-Lambert + scattering integration.
 struct VolumeProperties {
     render::RGB3f color;    // [0,1] tint
-    float density;          // > 0 means this mesh is a volume
+    float density;          // Constant scale (homogeneous OR per-voxel multiplier)
     float anisotropy;       // [-1, 1] Henyey-Greenstein g (unused in Phase 1)
 
-    VolumeProperties() : color{1.0f, 1.0f, 1.0f}, density(0.0f), anisotropy(0.0f) {}
-    bool present() const { return density > 0.0f; }
+    // --- Heterogeneous grid extension (smoke / fire / general VDB-backed media) ---
+    // When `grid_density` is populated, the medium is sampled per-voxel via
+    // trilinear interpolation across this dense float buffer. `grid_dims` is
+    // (Nx, Ny, Nz) with the x index running fastest in linear memory.
+    // `grid_world_min` / `grid_world_max` define the AABB the grid occupies
+    // in world space; the bounding-mesh of the host object should match.
+    std::vector<float> grid_density;
+    int                grid_dims[3];
+    float              grid_world_min[3];
+    float              grid_world_max[3];
+
+    VolumeProperties()
+        : color{1.0f, 1.0f, 1.0f}, density(0.0f), anisotropy(0.0f),
+          grid_dims{0, 0, 0},
+          grid_world_min{0.0f, 0.0f, 0.0f},
+          grid_world_max{0.0f, 0.0f, 0.0f} {}
+
+    bool present()         const { return density > 0.0f || has_grid(); }
+    bool has_grid()        const { return !grid_density.empty()
+                                          && grid_dims[0] > 0
+                                          && grid_dims[1] > 0
+                                          && grid_dims[2] > 0; }
 };
 
 /**
