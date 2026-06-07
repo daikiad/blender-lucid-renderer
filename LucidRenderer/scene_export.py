@@ -462,35 +462,61 @@ def _extract_volume_properties(mat):
         return None
 
     volume_node = volume_socket.links[0].from_node
+    # Defaults follow Cycles' Principled Volume UI defaults: Color = white
+    # (full scattering), Absorption Color = black (no extra absorption),
+    # Density = 1, Anisotropy = 0.
     color = [1.0, 1.0, 1.0]
-    density = 0.0
+    absorption_color = [0.0, 0.0, 0.0]
+    density = 1.0
     anisotropy = 0.0
 
     node_type = volume_node.type
 
-    # Principled Volume: Color, Density, Anisotropy, plus Absorption Color etc.
-    # Volume Scatter: Color, Density, Anisotropy.
-    # Volume Absorption: Color, Density (no anisotropy).
-    if node_type in ('VOLUME_PRINCIPLED', 'VOLUME_SCATTER', 'VOLUME_ABSORPTION'):
+    if node_type == 'PRINCIPLED_VOLUME':
         col_in = volume_node.inputs.get('Color')
         if col_in is not None and not col_in.is_linked:
             c = col_in.default_value
             color = [c[0], c[1], c[2]]
-
+        abs_in = volume_node.inputs.get('Absorption Color')
+        if abs_in is not None and not abs_in.is_linked:
+            c = abs_in.default_value
+            absorption_color = [c[0], c[1], c[2]]
         dens_in = volume_node.inputs.get('Density')
         if dens_in is not None and not dens_in.is_linked:
             density = float(dens_in.default_value)
-
         aniso_in = volume_node.inputs.get('Anisotropy')
         if aniso_in is not None and not aniso_in.is_linked:
             anisotropy = float(aniso_in.default_value)
+    elif node_type == 'SCATTER_VOLUME':
+        # Pure scatterer: Color = scatter tint, no absorption.
+        col_in = volume_node.inputs.get('Color')
+        if col_in is not None and not col_in.is_linked:
+            c = col_in.default_value
+            color = [c[0], c[1], c[2]]
+        dens_in = volume_node.inputs.get('Density')
+        if dens_in is not None and not dens_in.is_linked:
+            density = float(dens_in.default_value)
+        aniso_in = volume_node.inputs.get('Anisotropy')
+        if aniso_in is not None and not aniso_in.is_linked:
+            anisotropy = float(aniso_in.default_value)
+    elif node_type == 'ABSORPTION_VOLUME':
+        # Pure absorber: the node's Color is the absorption tint; no scatter.
+        col_in = volume_node.inputs.get('Color')
+        if col_in is not None and not col_in.is_linked:
+            c = col_in.default_value
+            absorption_color = [c[0], c[1], c[2]]
+        color = [0.0, 0.0, 0.0]
+        dens_in = volume_node.inputs.get('Density')
+        if dens_in is not None and not dens_in.is_linked:
+            density = float(dens_in.default_value)
     else:
-        # Unknown volume node — flag as present but defaults are fine.
+        # Unknown volume node — keep defaults.
         pass
 
     return {
         'node_type': node_type,
         'color': color,
+        'absorption_color': absorption_color,
         'density': density,
         'anisotropy': anisotropy,
     }

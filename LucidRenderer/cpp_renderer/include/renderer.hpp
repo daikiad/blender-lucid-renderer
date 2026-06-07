@@ -92,54 +92,11 @@ inline render::AttenuationRGB traceEmission(const Scene &scene, const Ray &ray, 
     return render::make_attenuation_rgb(0, 0, 0);
 }
 
-// Trilinear sample of a dense float grid stored x-fastest.
-// world_pos must be inside [grid_world_min, grid_world_max].
-inline float sample_grid_trilinear(const VolumeProperties& vol,
-                                    float wx, float wy, float wz) {
-    const float u = (wx - vol.grid_world_min[0])
-                  / std::max(1e-12f, vol.grid_world_max[0] - vol.grid_world_min[0]);
-    const float v = (wy - vol.grid_world_min[1])
-                  / std::max(1e-12f, vol.grid_world_max[1] - vol.grid_world_min[1]);
-    const float w = (wz - vol.grid_world_min[2])
-                  / std::max(1e-12f, vol.grid_world_max[2] - vol.grid_world_min[2]);
-    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f || w < 0.0f || w > 1.0f) {
-        return 0.0f;
-    }
-    const int nx = vol.grid_dims[0];
-    const int ny = vol.grid_dims[1];
-    const int nz = vol.grid_dims[2];
-    const float fx = u * static_cast<float>(nx - 1);
-    const float fy = v * static_cast<float>(ny - 1);
-    const float fz = w * static_cast<float>(nz - 1);
-    const int ix = std::clamp(static_cast<int>(fx), 0, nx - 2);
-    const int iy = std::clamp(static_cast<int>(fy), 0, ny - 2);
-    const int iz = std::clamp(static_cast<int>(fz), 0, nz - 2);
-    const float tx = fx - static_cast<float>(ix);
-    const float ty = fy - static_cast<float>(iy);
-    const float tz = fz - static_cast<float>(iz);
-
-    auto idx = [nx, ny](int i, int j, int k) {
-        return static_cast<size_t>(i)
-             + static_cast<size_t>(nx) * static_cast<size_t>(j)
-             + static_cast<size_t>(nx) * static_cast<size_t>(ny) * static_cast<size_t>(k);
-    };
-    const float c000 = vol.grid_density[idx(ix,   iy,   iz  )];
-    const float c100 = vol.grid_density[idx(ix+1, iy,   iz  )];
-    const float c010 = vol.grid_density[idx(ix,   iy+1, iz  )];
-    const float c110 = vol.grid_density[idx(ix+1, iy+1, iz  )];
-    const float c001 = vol.grid_density[idx(ix,   iy,   iz+1)];
-    const float c101 = vol.grid_density[idx(ix+1, iy,   iz+1)];
-    const float c011 = vol.grid_density[idx(ix,   iy+1, iz+1)];
-    const float c111 = vol.grid_density[idx(ix+1, iy+1, iz+1)];
-
-    const float c00 = c000 * (1.0f - tx) + c100 * tx;
-    const float c10 = c010 * (1.0f - tx) + c110 * tx;
-    const float c01 = c001 * (1.0f - tx) + c101 * tx;
-    const float c11 = c011 * (1.0f - tx) + c111 * tx;
-    const float c0  = c00  * (1.0f - ty) + c10  * ty;
-    const float c1  = c01  * (1.0f - ty) + c11  * ty;
-    return c0 * (1.0f - tz) + c1 * tz;
-}
+// Volume sampling helpers (slab clip, voxel trilinear sample, Beer-Lambert
+// transmittance variants, delta-tracking distance sampler) live in a
+// dedicated header so both this compatibility shim and the path-tracer
+// integrators can use them without including all of `renderer.hpp`.
+#include "volume/transmittance.hpp"
 
 // Debug mode: thickness map of volume-shaded meshes.
 //

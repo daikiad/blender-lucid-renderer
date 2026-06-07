@@ -137,7 +137,8 @@ struct NodeTree {
 // Phase 1 is debug-only (thickness map); Phase 2 will use these in actual
 // Beer-Lambert + scattering integration.
 struct VolumeProperties {
-    render::RGB3f color;    // [0,1] tint
+    render::RGB3f color;            // Scatter color tint (Cycles "Color")
+    render::RGB3f absorption_color; // Absorption tint (Cycles "Absorption Color")
     float density;          // Constant scale (homogeneous OR per-voxel multiplier)
     float anisotropy;       // [-1, 1] Henyey-Greenstein g (unused in Phase 1)
 
@@ -152,11 +153,18 @@ struct VolumeProperties {
     float              grid_world_min[3];
     float              grid_world_max[3];
 
+    // Max value of `grid_density`. Used by `sample_volume_distance` as the
+    // delta-tracking majorant; multiplied by `density` to get sigma_max.
+    // Populated by the JSON parser after the grid is loaded; 0 when no grid.
+    float              grid_max;
+
     VolumeProperties()
-        : color{1.0f, 1.0f, 1.0f}, density(0.0f), anisotropy(0.0f),
+        : color{1.0f, 1.0f, 1.0f}, absorption_color{0.0f, 0.0f, 0.0f},
+          density(0.0f), anisotropy(0.0f),
           grid_dims{0, 0, 0},
           grid_world_min{0.0f, 0.0f, 0.0f},
-          grid_world_max{0.0f, 0.0f, 0.0f} {}
+          grid_world_max{0.0f, 0.0f, 0.0f},
+          grid_max(0.0f) {}
 
     bool present()         const { return density > 0.0f || has_grid(); }
     bool has_grid()        const { return !grid_density.empty()
@@ -180,6 +188,13 @@ struct Material {
     bool useNodes;
 
     VolumeProperties volume;       // density==0 means "no volume" (default)
+
+    // True for meshes that are *only* volume boundaries — e.g. a Blender
+    // smoke-domain cube whose Material Output has Volume linked but Surface
+    // empty. Path-tracer treats the surface as if it weren't there (ray
+    // passes through unattenuated) so distance sampling can fire inside the
+    // bbox the mesh defines. Populated by the JSON parser at load time.
+    bool volume_boundary_only = false;
 
     Material()
         : albedo(0.8f, 0.8f, 0.8f)

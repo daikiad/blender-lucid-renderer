@@ -1,5 +1,6 @@
 #include "renderer.hpp"
 #include <nlohmann/json.hpp>
+#include <atomic>
 #include <iostream>
 #include <map>
 #include <set>
@@ -453,7 +454,15 @@ render::AttenuationRGB getAlbedoFromNodeTree(const NodeTree &tree, const render:
     // Get Surface input (should be connected to a shader like Principled BSDF)
     const NodeSocket *surfaceSocket = outputNode->findInput("Surface");
     if(!surfaceSocket || !surfaceSocket->is_linked) {
-        std::cerr << "[NodeEval] Surface socket not connected\n";
+        // Volume-only materials (smoke domain etc.) legitimately leave Surface
+        // empty; previously this fired once per BSDF eval per pixel which
+        // pegged stderr and slowed F12 to a crawl.
+        static std::atomic<bool> warned{false};
+        bool expected = false;
+        if (warned.compare_exchange_strong(expected, true)) {
+            std::cerr << "[NodeEval] Surface socket not connected "
+                         "(falling back to gray; this message is one-shot)\n";
+        }
         return render::make_attenuation_rgb(0.8f, 0.8f, 0.8f);
     }
     

@@ -318,6 +318,10 @@ public:
                                     radiance = radiance + traceSimple(scene_, sample_ray, max_depth);
                                 } else if (algorithm_ == "mis") {
                                     radiance = radiance + traceMIS(scene_, scene_lights, sample_ray, max_depth);
+                                } else if (algorithm_ == "volume_simple") {
+                                    radiance = radiance + traceVolumeSimple(scene_, sample_ray, max_depth);
+                                } else if (algorithm_ == "volume_mis") {
+                                    radiance = radiance + traceVolumeMIS(scene_, scene_lights, sample_ray, max_depth);
                                 } else {
                                     radiance = radiance + traceNEE(scene_, scene_lights, sample_ray, max_depth);
                                 }
@@ -1364,6 +1368,20 @@ private:
                     m.material.useNodes = mat.value("use_nodes", false) && m.material.nodeTree.valid;
                 }
 
+                // Detect volume-boundary-only materials: Material Output has
+                // an unlinked Surface socket. We finalize the flag once we
+                // know whether Volume is also present (just below).
+                bool surface_socket_linked = true;
+                if (m.material.nodeTree.valid) {
+                    if (const MaterialNode* out = m.material.nodeTree.findOutputNode()) {
+                        if (const NodeSocket* s = out->findInput("Surface")) {
+                            surface_socket_linked = s->is_linked;
+                        } else {
+                            surface_socket_linked = false;
+                        }
+                    }
+                }
+
                 // ---- Volume properties (Material Output -> Volume socket) ----
                 // scene_export.py emits null when no volume is bound, so the
                 // mesh stays a normal opaque surface. When present, density>0
@@ -1375,6 +1393,13 @@ private:
                         m.material.volume.color.r = vol["color"][0].get<float>();
                         m.material.volume.color.g = vol["color"][1].get<float>();
                         m.material.volume.color.b = vol["color"][2].get<float>();
+                    }
+                    if (vol.contains("absorption_color")
+                        && vol["absorption_color"].is_array()
+                        && vol["absorption_color"].size() >= 3) {
+                        m.material.volume.absorption_color.r = vol["absorption_color"][0].get<float>();
+                        m.material.volume.absorption_color.g = vol["absorption_color"][1].get<float>();
+                        m.material.volume.absorption_color.b = vol["absorption_color"][2].get<float>();
                     }
                     if (vol.contains("density")) {
                         m.material.volume.density = vol["density"].get<float>();
@@ -1421,6 +1446,8 @@ private:
                                     if (d > 0.0f) { ++nonzero; sum_d += d; }
                                     if (d > max_d) max_d = d;
                                 }
+                                // Cache majorant for delta-tracking distance sampling.
+                                m.material.volume.grid_max = max_d;
                                 std::cerr << "[Volume] loaded "
                                           << m.material.volume.grid_dims[0] << "x"
                                           << m.material.volume.grid_dims[1] << "x"
@@ -1441,8 +1468,26 @@ private:
                         }
                     }
                 }
+
+                // Finalize the volume-boundary-only flag: material has a volume
+                // but no Surface BSDF connected. Such meshes are the geometric
+                // boundary of the volume bbox; the integrator skips surface
+                // shading on them so rays can enter the medium freely.
+                if (m.material.volume.present() && !surface_socket_linked) {
+                    m.material.volume_boundary_only = true;
+                    std::cerr << "[Material] mesh #" << scene.meshes.size()
+                              << " volume_boundary_only"
+                              << " density=" << m.material.volume.density
+                              << " grid_max=" << m.material.volume.grid_max
+                              << " color=(" << m.material.volume.color.r << ","
+                              << m.material.volume.color.g << ","
+                              << m.material.volume.color.b << ")"
+                              << " absorption=(" << m.material.volume.absorption_color.r << ","
+                              << m.material.volume.absorption_color.g << ","
+                              << m.material.volume.absorption_color.b << ")\n";
+                }
             }
-            
+
             finalizeMeshBounds(m);
             scene.meshes.push_back(std::move(m));
         }

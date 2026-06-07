@@ -190,6 +190,8 @@ class LucidRendererSettings(bpy.types.PropertyGroup):
             ('simple', "Simple", "BSDF sampling only (slow convergence, good for debugging)"),
             ('nee', "NEE", "Next Event Estimation (fast direct lighting)"),
             ('mis', "MIS", "Multiple Importance Sampling (best quality)"),
+            ('volume_simple', "Volume Simple", "Simple + Beer-Lambert volume absorption (Stage A)"),
+            ('volume_mis', "Volume MIS", "Full MIS volume path tracer (scattering + HG phase + in-medium NEE)"),
         ],
         default='mis'
     )

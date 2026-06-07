@@ -28,6 +28,8 @@
 #include "../bsdf/bsdf.hpp"
 #include "../light/light.hpp"
 #include "../light/scene_lights.hpp"
+#include "../volume/phase.hpp"
+#include "../volume/transmittance.hpp"
 #include <cmath>
 
 // Forward declarations for node evaluators
@@ -69,6 +71,53 @@ inline render::RadianceRGB getEmission(const Hit& hit) {
     return hit.material->emission;
 }
 
+// Find the next *real* surface and native-light hit along `ray`, ignoring
+// `volume_boundary_only` meshes (Blender smoke-domain cubes etc.). Returns
+// the closer of {real surface, native light} via the `hit` / `lightHit`
+// out-params; the returned `t` values are in the **original ray's**
+// parameter frame, which is critical for downstream `sample_volume_distance`
+// — it slabs the ray against the volume bbox using the original origin, so
+// advancing the ray past boundary hits would skip the smoke domain bbox and
+// no scatter could ever fire on camera rays.
+inline void intersect_skipping_volume_boundaries(
+    const Scene& scene, const Ray& ray, render::Length tMin, int depth,
+    Hit& hit, LightHit& lightHit) {
+    hit.hit = false;
+    render::Length search_min = tMin;
+    for (int peek = 0; peek < 8; ++peek) {
+        Hit h = intersectScene(scene, ray, search_min);
+        if (!h.hit) break;
+        if (!h.material->volume_boundary_only) { hit = h; break; }
+        // Boundary hit — skip past it and keep searching for a real surface.
+        search_min = h.t + render::metres(1e-3f);
+    }
+    lightHit = intersectNativeLights(scene, ray, depth);
+}
+
+// Shadow ray test that treats `volume_boundary_only` meshes as transparent.
+// Returns true if a *real* surface (not just a volume-boundary mesh) occludes
+// the segment [0, t_max] from `ray.origin` along `ray.direction`.
+// Used for NEE — without this, a scatter inside the smoke domain always
+// reports "shadowed" because the boundary cube blocks the shadow ray on the
+// way out, leaving the medium permanently unlit.
+inline bool is_shadowed_skipping_volume_boundaries(
+    const Scene& scene, const Ray& ray, render::Length t_max) {
+    Ray probe = ray;
+    float t_offset = 0.0f;
+    const float t_max_f = t_max.numerical_value_in(render::si::metre);
+    for (int peek = 0; peek < 8; ++peek) {
+        const float remaining = t_max_f - t_offset;
+        if (remaining <= 0.0f) return false;
+        Hit h = intersectScene(scene, probe, geometry::RAY_T_MIN_TYPED, render::metres(remaining));
+        if (!h.hit) return false;
+        if (!h.material->volume_boundary_only) return true;
+        const float skip = h.t.numerical_value_in(render::si::metre) + 1e-3f;
+        t_offset += skip;
+        probe = Ray(probe.at(render::metres(skip)), probe.direction);
+    }
+    return false;
+}
+
 // ========== Simple Path Tracer (BSDF only) ==========
 
 /**
@@ -81,22 +130,23 @@ inline render::RadianceRGB traceSimple(const Scene& scene, const Ray& ray, int m
     render::ThroughputRGB throughput = render::unit_throughput_rgb();
     Ray currentRay = ray;
     render::Length tMin = render::metres(0.0f);  // First ray starts from camera
-    
+
     for (int depth = 0; depth < maxDepth; ++depth) {
-        Hit hit = intersectScene(scene, currentRay, tMin);
-        LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
-        
+        Hit hit;
+        LightHit lightHit;
+        intersect_skipping_volume_boundaries(scene, currentRay, tMin, depth, hit, lightHit);
+
         // Check if we hit a native light closer than any mesh
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
             result += throughput * lightHit.emission;  // ColorRGB * RadianceRGB -> RadianceRGB
             break;
         }
-        
+
         if (!hit.hit) {
             result += throughput * render::to_radiance(getEnvironmentColor(currentRay, scene.environment));
             break;
         }
-        
+
         MaterialParams mat = getMaterialParams(hit);
         render::RadianceRGB emission = getEmission(hit);
         
@@ -147,6 +197,91 @@ inline render::RadianceRGB traceSimple(const Scene& scene, const Ray& ray, int m
     return result;  // Return RadianceRGB, let caller apply camera sensitivity
 }
 
+// ========== Simple Path Tracer + Volume Absorption (Stage A) ==========
+//
+// Identical to traceSimple, but applies Beer-Lambert volume attenuation to
+// `throughput` between each pair of events (camera → surface, or surface →
+// next surface). No scattering — the medium can only absorb, never redirect.
+//
+// Educational copy: keeping it parallel to traceSimple makes the "what does
+// volume rendering add?" delta obvious in diff. Once you understand the
+// pattern, we'll merge with traceSimple (or just replace it).
+inline render::RadianceRGB traceVolumeSimple(const Scene& scene, const Ray& ray, int maxDepth) {
+    render::RadianceRGB result = render::zero_radiance_rgb();
+    render::ThroughputRGB throughput = render::unit_throughput_rgb();
+    Ray currentRay = ray;
+    render::Length tMin = render::metres(0.0f);
+
+    for (int depth = 0; depth < maxDepth; ++depth) {
+        Hit hit;
+        LightHit lightHit;
+        intersect_skipping_volume_boundaries(scene, currentRay, tMin, depth, hit, lightHit);
+
+        // ------------------------------------------------------------------
+        // Volume absorption along the segment from currentRay.origin to the
+        // closer of {hit.t, lightHit.t}. On env miss neither hits, so a large
+        // fallback works — the volume bbox clips the integral naturally.
+        // T = exp(-∫σ_t ds) per channel; throughput *= T.
+        // ------------------------------------------------------------------
+        render::Length t_seg = render::metres(1e6f);
+        if (hit.hit)      t_seg = std::min(t_seg, hit.t);
+        if (lightHit.hit) t_seg = std::min(t_seg, lightHit.t);
+        const auto T_seg = transmittance_along_segment(scene, currentRay, t_seg);
+        throughput = throughput * T_seg;
+
+        // Check if we hit a native light closer than any mesh
+        if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
+            result += throughput * lightHit.emission;
+            break;
+        }
+
+        if (!hit.hit) {
+            result += throughput * render::to_radiance(getEnvironmentColor(currentRay, scene.environment));
+            break;
+        }
+
+        MaterialParams mat = getMaterialParams(hit);
+        render::RadianceRGB emission = getEmission(hit);
+
+        result += throughput * emission;
+
+        render::Direction n = hit.normal.as_direction();
+        render::Direction wo = -currentRay.direction;
+        bool frontFace = render::dot(wo, n) > 0;
+
+        render::Direction shadingNormal = n;
+        if (mat.transmission < 0.5f && !frontFace) {
+            shadingNormal = -n;
+        }
+
+        render::Direction sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
+        BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
+        if (!bsdfSample.isValid()) {
+            break;
+        }
+
+        auto weightOpt = compute_throughput_update(bsdfSample, sampleNormal);
+        if (!weightOpt) break;
+        throughput = throughput * *weightOpt;
+
+        if (depth >= 3) {
+            float maxThroughput = render::throughput_max_component(throughput);
+            float rrProb = std::min(maxThroughput, 0.95f);
+            if (randf() > rrProb) break;
+            throughput = throughput * (1.0f / rrProb);
+        }
+
+        if (!render::throughput_is_valid(throughput)) {
+            break;
+        }
+
+        currentRay = Ray(hit.point, bsdfSample.wi);
+        tMin = geometry::RAY_T_MIN_TYPED;
+    }
+
+    return result;
+}
+
 // ========== NEE Path Tracer ==========
 
 /**
@@ -154,40 +289,41 @@ inline render::RadianceRGB traceSimple(const Scene& scene, const Ray& ray, int m
  * Uses light sampling for direct illumination
  * Returns RadianceRGB - caller applies camera sensitivity for final pixel value
  */
-inline render::RadianceRGB traceNEE(const Scene& scene, const SceneLights& sceneLights, 
+inline render::RadianceRGB traceNEE(const Scene& scene, const SceneLights& sceneLights,
                      const Ray& ray, int maxDepth) {
     render::RadianceRGB result = render::zero_radiance_rgb();
     render::ThroughputRGB throughput = render::unit_throughput_rgb();
     Ray currentRay = ray;
     render::Length tMin = render::metres(0.0f);  // First ray starts from camera
-    
+
     for (int depth = 0; depth < maxDepth; ++depth) {
-        Hit hit = intersectScene(scene, currentRay, tMin);
-        LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
-        
+        Hit hit;
+        LightHit lightHit;
+        intersect_skipping_volume_boundaries(scene, currentRay, tMin, depth, hit, lightHit);
+
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
             result += throughput * lightHit.emission;
             break;
         }
-        
+
         if (!hit.hit) {
             result += throughput * render::to_radiance(getEnvironmentColor(currentRay, scene.environment));
             break;
         }
-        
+
         MaterialParams mat = getMaterialParams(hit);
         render::RadianceRGB emission = getEmission(hit);
-        
+
         // Setup normals
         render::Direction n = hit.normal.as_direction();
         render::Direction wo = -currentRay.direction;
         bool frontFace = render::dot(wo, n) > 0;
-        
+
         render::Direction shadingNormal = n;
         if (mat.transmission < 0.5f && !frontFace) {
             shadingNormal = -n;
         }
-        
+
         // Add emission only on first hit
         // Use is_emissive for checking emission strength (unit-typed)
         bool hasEmission = render::is_emissive(emission);
@@ -210,10 +346,8 @@ inline render::RadianceRGB traceNEE(const Scene& scene, const SceneLights& scene
                     
                     if (NdotL > 1e-6f) {
                         Ray shadowRay(hit.point, ls.direction);
-                        Hit shadowHit = intersectScene(scene, shadowRay, geometry::RAY_T_MIN_TYPED, ls.distance);
-                        
-                        bool inShadow = shadowHit.hit;
-                        
+                        bool inShadow = is_shadowed_skipping_volume_boundaries(scene, shadowRay, ls.distance);
+
                         if (!inShadow) {
                             render::BSDFRGB f = evalBSDF(mat, wo, ls.direction, shadingNormal);
                             render::PdfW pdfLight = ls.pdf * lightSelectProb;
@@ -269,7 +403,7 @@ inline render::RadianceRGB traceNEE(const Scene& scene, const SceneLights& scene
  * Combines BSDF and light sampling with proper MIS weights
  * Returns RadianceRGB - caller applies camera sensitivity for final pixel value
  */
-inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& sceneLights, 
+inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& sceneLights,
                      const Ray& ray, int maxDepth) {
     render::RadianceRGB result = render::zero_radiance_rgb();
     render::ThroughputRGB throughput = render::unit_throughput_rgb();
@@ -286,11 +420,12 @@ inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& scene
         }
         return -1;
     };
-    
+
     for (int depth = 0; depth < maxDepth; ++depth) {
-        Hit hit = intersectScene(scene, currentRay, tMin);
-        LightHit lightHit = intersectNativeLights(scene, currentRay, depth);
-        
+        Hit hit;
+        LightHit lightHit;
+        intersect_skipping_volume_boundaries(scene, currentRay, tMin, depth, hit, lightHit);
+
         if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
             render::PdfW lightPdf = render::zero_pdf_w();
             if (sceneLights.hasLights() && lightHit.lightIndex >= 0) {
@@ -372,10 +507,8 @@ inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& scene
                     
                     if (NdotL > 1e-6f) {
                         Ray shadowRay(hit.point, ls.direction);
-                        Hit shadowHit = intersectScene(scene, shadowRay, geometry::RAY_T_MIN_TYPED, ls.distance);
-                        
-                        bool inShadow = shadowHit.hit;
-                        
+                        bool inShadow = is_shadowed_skipping_volume_boundaries(scene, shadowRay, ls.distance);
+
                         if (!inShadow) {
                             render::BSDFRGB f = evalBSDF(mat, wo, ls.direction, shadingNormal);
                             
@@ -434,6 +567,271 @@ inline render::RadianceRGB traceMIS(const Scene& scene, const SceneLights& scene
     }
     
     return result;  // Return RadianceRGB, let caller apply camera sensitivity
+}
+
+// ========== MIS Path Tracer + Volume Scattering ==========
+//
+// `traceVolumeMIS` is the full volume path tracer. Same MIS structure as
+// `traceMIS`, but each bounce starts with a delta-tracking distance sample
+// inside the medium. If a scatter event is drawn before the next surface,
+// we redirect via the Henyey-Greenstein phase function (using the
+// material's `anisotropy` field) and do in-medium NEE with MIS between
+// the light sampler and the phase function. Otherwise we apply
+// extinction-transmittance along the surface segment and shade the surface
+// exactly like `traceMIS`.
+//
+// `lastBsdfPdf` is overloaded: it carries the PDF of whichever sampler
+// chose the last direction — BSDF on surface bounces, HG phase pdf on
+// volume bounces. The MIS weight at the next emission hit uses it as `pf`.
+inline render::RadianceRGB traceVolumeMIS(const Scene& scene, const SceneLights& sceneLights,
+                          const Ray& ray, int maxDepth) {
+    render::RadianceRGB result = render::zero_radiance_rgb();
+    render::ThroughputRGB throughput = render::unit_throughput_rgb();
+    Ray currentRay = ray;
+    render::PdfW lastBsdfPdf = render::zero_pdf_w();
+    render::Length tMin = render::metres(0.0f);
+
+    auto findLightIndex = [&](int meshIdx, int triIdx) -> int {
+        for (size_t i = 0; i < sceneLights.lights.size(); ++i) {
+            const Light& l = sceneLights.lights[i];
+            if (l.meshIndex == meshIdx && l.triangleIndex == triIdx) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    };
+
+    for (int depth = 0; depth < maxDepth; ++depth) {
+        Hit hit;
+        LightHit lightHit;
+        intersect_skipping_volume_boundaries(scene, currentRay, tMin, depth, hit, lightHit);
+
+        // Segment end: next surface or native light (or "far away" if neither).
+        render::Length t_surface = render::metres(1e6f);
+        if (hit.hit)      t_surface = std::min(t_surface, hit.t);
+        if (lightHit.hit) t_surface = std::min(t_surface, lightHit.t);
+
+        // ---- 1. Distance sample inside the volumes along [0, t_surface] ----
+        VolumeScatterEvent vs = sample_volume_distance(scene, currentRay, t_surface);
+
+        if (vs.happened && vs.vol != nullptr) {
+            // ===== 2a. Volume scatter event =====
+            // Per-channel single-scattering albedo (Cycles convention):
+            //   sigma_total = density * grid_sample
+            //   sigma_s,c   = sigma_total * color_c
+            //   sigma_t,c   = sigma_total * (1 + absorption_color_c)
+            //   albedo_c    = sigma_s,c / sigma_t,c = color_c / (1 + absorption_color_c)
+            // With abs=0 this reduces to throughput *= color, so the medium's
+            // Color directly tints the scattered light. The Beer-Lambert factor
+            // along [0, vs.t] is already implicit in the delta-tracking
+            // sampling pdf; do NOT multiply by an explicit transmittance here.
+            {
+                const auto& v = *vs.vol;
+                const float a_r = v.color.r / (1.0f + v.absorption_color.r);
+                const float a_g = v.color.g / (1.0f + v.absorption_color.g);
+                const float a_b = v.color.b / (1.0f + v.absorption_color.b);
+                throughput = throughput * render::make_attenuation_rgb(a_r, a_g, a_b);
+            }
+
+            const render::Position x = currentRay.at(vs.t);
+            const render::Direction wo = -currentRay.direction;
+            const float g = vs.vol->anisotropy;
+
+            // ---- 2a.i. In-medium NEE with MIS (phase vs light) ----
+            if (sceneLights.hasLights()) {
+                float lightSelectProb;
+                int lightIdx = sceneLights.selectLight(randf(), lightSelectProb);
+
+                if (lightIdx >= 0 && lightSelectProb > 1e-6f) {
+                    const Light& light = sceneLights.lights[lightIdx];
+                    LightSample ls = sampleLight(light, x, randf(), randf());
+
+                    if (ls.pdf > render::MIN_PDF) {
+                        Ray shadowRay(x, ls.direction);
+                        bool inShadow = is_shadowed_skipping_volume_boundaries(scene, shadowRay, ls.distance);
+
+                        if (!inShadow) {
+                            // Attenuate light through any intervening media.
+                            const auto T_shadow = extinction_transmittance_along_segment(scene, shadowRay, ls.distance);
+
+                            const float cos_theta = render::dot(wo, ls.direction);
+                            const float phase_eval = volume::hg_eval(g, cos_theta);
+                            const float phase_pdf  = volume::hg_pdf (g, cos_theta);
+                            // Wrap as PdfW for the typed mis_power_heuristic.
+                            const render::PdfW phase_pdf_w = phase_pdf * render::per_sr;
+                            const render::PdfW pdfLight_typed = ls.pdf * lightSelectProb;
+
+                            const render::Dimensionless misWeight =
+                                render::mis_power_heuristic(pdfLight_typed, phase_pdf_w);
+
+                            // f/pdf as a dimensionless weight; phase function has no cos
+                            // factor (it's already normalized over the sphere, not the
+                            // hemisphere) so we pass abs_cos_theta=1.
+                            const render::BSDFRGB phase_f = render::make_bsdf_rgb(phase_eval, phase_eval, phase_eval);
+                            const render::ThroughputRGB phase_weight =
+                                render::bsdf_sample_weight(phase_f, 1.0f, pdfLight_typed);
+
+                            const render::RadianceRGB contrib =
+                                (phase_weight * misWeight) * (T_shadow * ls.emission);
+                            result += throughput * contrib;
+                        }
+                    }
+                }
+            }
+
+            // ---- 2a.ii. Sample phase function for next bounce ----
+            auto [wi, phase_pdf] = volume::hg_sample(g, wo, randf(), randf());
+            // HG: phase_eval / phase_pdf == 1, so throughput already updated above.
+            lastBsdfPdf = phase_pdf * render::per_sr;
+            currentRay  = Ray(x, wi);
+            // Inside the medium, no geometry offset; epsilon-step out so we
+            // don't pin-prick at exactly vs.t (matches surface convention).
+            tMin = geometry::RAY_T_MIN_TYPED;
+
+            // Russian Roulette (treat scatter as a bounce)
+            if (depth >= 3) {
+                float maxThroughput = render::throughput_max_component(throughput);
+                float rrProb = std::min(maxThroughput, 0.95f);
+                if (randf() > rrProb) break;
+                throughput = throughput * (1.0f / rrProb);
+            }
+            if (!render::throughput_is_valid(throughput)) break;
+            continue;
+        }
+
+        // ===== 2b. Surface event =====
+        // No scatter happened in [0, t_surface]. With delta tracking, the
+        // probability of "no real collision before t_surface" is exactly
+        // T(t_surface), so the estimator's T/pdf ratio cancels to 1.
+        // Do NOT multiply by extinction transmittance here.
+
+        // ---- Native light hit (BSDF strategy hit a light directly) ----
+        if (lightHit.hit && (!hit.hit || lightHit.t < hit.t)) {
+            render::PdfW lightPdf = render::zero_pdf_w();
+            if (sceneLights.hasLights() && lightHit.lightIndex >= 0) {
+                int sceneLightIdx = sceneLights.findNativeLightIndex(lightHit.lightIndex);
+                if (sceneLightIdx >= 0) {
+                    float selectProb = sceneLights.getPdfForLight(sceneLightIdx);
+                    if (selectProb > 0.0f) {
+                        const Light& l = sceneLights.lights[sceneLightIdx];
+                        lightPdf = pdfLightSample(l, currentRay.origin, lightHit.point, lightHit.normal) * selectProb;
+                    }
+                }
+            }
+            render::PdfW bsdfPdf = lastBsdfPdf;
+            render::Dimensionless misWeight = (bsdfPdf > render::MIN_PDF && lightPdf > render::MIN_PDF)
+                                ? render::mis_power_heuristic(bsdfPdf, lightPdf)
+                                : render::Dimensionless{1.0f};
+            result += throughput * lightHit.emission * misWeight;
+            break;
+        }
+
+        if (!hit.hit) {
+            result += throughput * render::to_radiance(getEnvironmentColor(currentRay, scene.environment));
+            break;
+        }
+
+        MaterialParams mat = getMaterialParams(hit);
+        render::RadianceRGB emission = getEmission(hit);
+
+        render::Direction n = hit.normal.as_direction();
+        render::Direction wo = -currentRay.direction;
+        bool frontFace = render::dot(wo, n) > 0;
+
+        render::Direction shadingNormal = n;
+        if (mat.transmission < 0.5f && !frontFace) {
+            shadingNormal = -n;
+        }
+
+        // ---- Emissive surface w/ MIS weight ----
+        bool hasEmission = render::is_emissive(emission);
+        if (hasEmission) {
+            render::Dimensionless misWeight{1.0f};
+            if (sceneLights.hasLights() && lastBsdfPdf > render::MIN_PDF) {
+                int lightIdx = findLightIndex(hit.meshIdx, hit.triIdx);
+                if (lightIdx >= 0) {
+                    float selectProb = sceneLights.getPdfForLight(lightIdx);
+                    if (selectProb > 0.0f) {
+                        const Light& l = sceneLights.lights[lightIdx];
+                        render::PdfW lightPdf = pdfLightSample(l, currentRay.origin, hit.point, hit.normal) * selectProb;
+                        if (lightPdf > render::MIN_PDF) {
+                            misWeight = render::mis_power_heuristic(lastBsdfPdf, lightPdf);
+                        }
+                    }
+                }
+            }
+            result += throughput * emission * misWeight;
+        }
+
+        // ---- Surface NEE with MIS (same as traceMIS) ----
+        bool isTransmissive = mat.transmission > 0.5f;
+        if (sceneLights.hasLights() && !hasEmission && !isTransmissive) {
+            float lightSelectProb;
+            int lightIdx = sceneLights.selectLight(randf(), lightSelectProb);
+
+            if (lightIdx >= 0 && lightSelectProb > 1e-6f) {
+                const Light& light = sceneLights.lights[lightIdx];
+                LightSample ls = sampleLight(light, hit.point, randf(), randf());
+
+                if (ls.pdf > render::MIN_PDF) {
+                    float NdotL = render::dot(shadingNormal, ls.direction);
+
+                    if (NdotL > 1e-6f) {
+                        Ray shadowRay(hit.point, ls.direction);
+                        bool inShadow = is_shadowed_skipping_volume_boundaries(scene, shadowRay, ls.distance);
+
+                        if (!inShadow) {
+                            // Attenuate through volumes between surface and light.
+                            const auto T_shadow = extinction_transmittance_along_segment(scene, shadowRay, ls.distance);
+
+                            render::BSDFRGB f = evalBSDF(mat, wo, ls.direction, shadingNormal);
+
+                            render::PdfW pdfLight_typed = ls.pdf * lightSelectProb;
+                            render::PdfW pdfBsdf_typed  = pdfBSDF(mat, wo, ls.direction, shadingNormal);
+
+                            render::Dimensionless misWeight =
+                                render::mis_power_heuristic(pdfLight_typed, pdfBsdf_typed);
+
+                            render::ThroughputRGB bsdf_weight = render::bsdf_sample_weight(f, NdotL, pdfLight_typed);
+                            render::RadianceRGB contrib = (bsdf_weight * misWeight) * (T_shadow * ls.emission);
+                            result += throughput * contrib;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- BSDF sampling for next bounce ----
+        render::Direction sampleNormal = (mat.transmission > 0.5f) ? n : shadingNormal;
+        BSDFSample bsdfSample = sampleBSDF(mat, wo, sampleNormal, randf(), randf(), randf());
+
+        if (!bsdfSample.isValid()) {
+            break;
+        }
+
+        auto weightOpt = compute_throughput_update(bsdfSample, sampleNormal);
+        if (!weightOpt) break;
+        throughput = throughput * *weightOpt;
+
+        lastBsdfPdf = mis_pdf_for_next_bounce(bsdfSample);
+
+        // Russian Roulette
+        if (depth >= 3) {
+            float maxThroughput = render::throughput_max_component(throughput);
+            float rrProb = std::min(maxThroughput, 0.95f);
+            if (randf() > rrProb) break;
+            throughput = throughput * (1.0f / rrProb);
+        }
+
+        if (!render::throughput_is_valid(throughput)) {
+            break;
+        }
+
+        currentRay = Ray(hit.point, bsdfSample.wi);
+        tMin = geometry::RAY_T_MIN_TYPED;
+    }
+
+    return result;
 }
 
 // ========== Diagnostic Path Tracer Variants ==========

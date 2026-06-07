@@ -166,6 +166,17 @@ target_link_libraries(test_random PRIVATE
 target_compile_options(test_random PRIVATE -O2)
 gtest_discover_tests(test_random)
 
+# --- test_volume_phase: Henyey-Greenstein phase function tests ---
+add_executable(test_volume_phase test/test_volume_phase.cpp)
+target_include_directories(test_volume_phase PRIVATE include)
+target_link_libraries(test_volume_phase PRIVATE
+    mp-units::mp-units
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_options(test_volume_phase PRIVATE -O2)
+gtest_discover_tests(test_volume_phase)
+
 # --- test_integrator: MIS and path tracer tests ---
 add_executable(test_integrator test/test_integrator.cpp)
 target_include_directories(test_integrator PRIVATE include)
