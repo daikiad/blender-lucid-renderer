@@ -991,9 +991,14 @@ fn ray_aabb_segment(orig: vec3<f32>, dir: vec3<f32>, t_max: f32,
     return *t_exit > *t_enter;
 }
 
-// Dense float grid sample. World pos must be inside [bbox_min, bbox_max];
-// returns 0 if out-of-range (so the woodcock sampler can step past empty
-// voxels safely). Mirrors `sample_grid_trilinear` in
+// Dense float grid sample. World pos must be inside [bbox_min, bbox_max],
+// which is the CELL bbox (corner-to-corner, nx*voxel_size wide). Voxel
+// data lives at the cell centres, so map u in [0,1] to `fx = u*nx - 0.5`
+// and clamp to [0, nx-1] for the half-voxel margins. Without the half-voxel
+// offset the renderer treats the bbox edges as voxel-CENTER positions and
+// stretches the smoke by nx/(nx-1).
+// Returns 0 if out-of-range so the woodcock sampler can step past empty
+// voxels safely. Mirrors `sample_grid_trilinear` in
 // `include/volume/transmittance.hpp`.
 fn sample_grid_trilinear(wx: f32, wy: f32, wz: f32) -> f32 {
     let ex = max(1e-12, volume.bbox_max.x - volume.bbox_min.x);
@@ -1008,9 +1013,18 @@ fn sample_grid_trilinear(wx: f32, wy: f32, wz: f32) -> f32 {
     let nx = i32(volume.dims.x);
     let ny = i32(volume.dims.y);
     let nz = i32(volume.dims.z);
-    let fx = u * f32(nx - 1);
-    let fy = v * f32(ny - 1);
-    let fz = w * f32(nz - 1);
+    let fx_raw = u * f32(nx) - 0.5;
+    let fy_raw = v * f32(ny) - 0.5;
+    let fz_raw = w * f32(nz) - 0.5;
+    // Half-voxel margins outside data: return 0 (clean cutoff).
+    if (fx_raw < 0.0 || fx_raw > f32(nx - 1)
+        || fy_raw < 0.0 || fy_raw > f32(ny - 1)
+        || fz_raw < 0.0 || fz_raw > f32(nz - 1)) {
+        return 0.0;
+    }
+    let fx = fx_raw;
+    let fy = fy_raw;
+    let fz = fz_raw;
     let ix = clamp(i32(fx), 0, nx - 2);
     let iy = clamp(i32(fy), 0, ny - 2);
     let iz = clamp(i32(fz), 0, nz - 2);
@@ -1475,7 +1489,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                                            ls.distance - 2e-3)) {
                                 let f = eval_bsdf(mat, wo, ls.direction, shading_n);
                                 let pdf_l_combined = ls.pdf * select_prob;
-                                var contribution = f * ls.emission * cos_theta
+                                // For ALGO_VOLUME_MIS, attenuate the shadow
+                                // ray through any participating medium it
+                                // crosses on the way to the light. Without
+                                // this, the smoke casts no shadow on surfaces
+                                // behind it. Other algorithms render with
+                                // smoke as a non-occluder, so no attenuation.
+                                var emission_attn = ls.emission;
+                                if (params.algorithm == ALGO_VOLUME_MIS) {
+                                    let T_sh = extinction_transmittance(
+                                        shadow_orig, ls.direction, ls.distance);
+                                    emission_attn = T_sh * emission_attn;
+                                }
+                                var contribution = f * emission_attn * cos_theta
                                                    / pdf_l_combined;
                                 if (surface_uses_mis(params.algorithm) && ls.delta == 0u) {
                                     let pdf_b = pdf_bsdf(mat, wo, ls.direction, shading_n);

@@ -405,13 +405,49 @@ def extract_smoke_domain_grid(obj, frame, sidecar_path):
         m = obj.matrix_world
         mesh_corners_world = [m @ Vector(c) for c in obj.bound_box]
         mesh_world_min = [min(c[i] for c in mesh_corners_world) for i in range(3)]
+        mesh_world_max = [max(c[i] for c in mesh_corners_world) for i in range(3)]
+        mesh_extent = [mesh_world_max[i] - mesh_world_min[i] for i in range(3)]
 
         tx = density_grid.transform
+        # OpenVDB / Mantaflow convention: integer index = voxel CORNER, voxel
+        # data lives at the voxel CENTER (i.e. half-integer index). The bbox
+        # we export to the C++ side is the *cell* bbox — corner-to-corner of
+        # the active voxel region, `nx * voxel_size` wide. The C++ sampler
+        # maps the bbox into half-voxel-inset voxel-center coordinates
+        # internally so that voxel data ends up at the correct world position.
         vdb_min = tx.indexToWorld(ijk_min)
         vdb_max = tx.indexToWorld(
             (ijk_max[0] + 1, ijk_max[1] + 1, ijk_max[2] + 1))
-        ws_min = [mesh_world_min[i] + vdb_min[i] for i in range(3)]
-        ws_max = [mesh_world_min[i] + vdb_max[i] for i in range(3)]
+        # Mantaflow sizes the simulation grid by giving the user-set Resolution
+        # Divisions to the LONGEST axis, then rounding the other axes to
+        # `round(extent_axis / voxel_size)`. When this rounding produces a
+        # smaller grid than the mesh (typical for non-square domains), the
+        # grid is CENTERED inside the mesh, leaving a `slack/2` margin on
+        # each side. Without compensating for that here, the smoke renders
+        # slightly offset along the rounded axes (most visible as a "shifted
+        # left/down" smoke on non-cubic Quick Smoke domains).
+        voxel_size_world = [
+            (vdb_max[i] - vdb_min[i]) / float(dims[i])
+            for i in range(3)
+        ]
+        full_grid_voxels = [
+            max(1, int(round(mesh_extent[i] / voxel_size_world[i])))
+            for i in range(3)
+        ]
+        full_grid_extent = [
+            full_grid_voxels[i] * voxel_size_world[i] for i in range(3)
+        ]
+        center_offset = [
+            0.5 * (mesh_extent[i] - full_grid_extent[i]) for i in range(3)
+        ]
+        ws_min = [
+            mesh_world_min[i] + center_offset[i] + vdb_min[i] for i in range(3)
+        ]
+        ws_max = [
+            mesh_world_min[i] + center_offset[i] + vdb_max[i] for i in range(3)
+        ]
+        print(f"[smoke] full_grid_voxels={tuple(full_grid_voxels)}, "
+              f"center_offset={tuple(round(o, 4) for o in center_offset)}")
 
         print(f"[smoke] obj '{obj.name}' location={list(obj.location)} "
               f"mesh_world_min={mesh_world_min}")

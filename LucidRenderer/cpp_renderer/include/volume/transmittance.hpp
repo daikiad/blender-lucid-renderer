@@ -289,7 +289,12 @@ inline VolumeScatterEvent sample_volume_distance(
 }
 
 // Trilinear sample of a dense float grid stored x-fastest.
-// world_pos must be inside [grid_world_min, grid_world_max].
+// world_pos must be inside [grid_world_min, grid_world_max], which is the
+// CELL bbox (corner-to-corner, `nx * voxel_size` wide). Voxel data lives at
+// the cell centres, half a voxel inside each edge, so we map u in [0,1] to
+// `fx = u*nx - 0.5` and clamp to [0, nx-1] for the half-voxel margins.
+// Without this offset the renderer treats bbox edges as voxel-CENTER
+// positions, which stretches the smoke by nx/(nx-1).
 inline float sample_grid_trilinear(const VolumeProperties& vol,
                                     float wx, float wy, float wz) {
     const float u = (wx - vol.grid_world_min[0])
@@ -304,9 +309,18 @@ inline float sample_grid_trilinear(const VolumeProperties& vol,
     const int nx = vol.grid_dims[0];
     const int ny = vol.grid_dims[1];
     const int nz = vol.grid_dims[2];
-    const float fx = u * static_cast<float>(nx - 1);
-    const float fy = v * static_cast<float>(ny - 1);
-    const float fz = w * static_cast<float>(nz - 1);
+    const float fx_raw = u * static_cast<float>(nx) - 0.5f;
+    const float fy_raw = v * static_cast<float>(ny) - 0.5f;
+    const float fz_raw = w * static_cast<float>(nz) - 0.5f;
+    // Half-voxel margins outside data: return 0 (clean cutoff).
+    if (fx_raw < 0.0f || fx_raw > static_cast<float>(nx - 1) ||
+        fy_raw < 0.0f || fy_raw > static_cast<float>(ny - 1) ||
+        fz_raw < 0.0f || fz_raw > static_cast<float>(nz - 1)) {
+        return 0.0f;
+    }
+    const float fx = fx_raw;
+    const float fy = fy_raw;
+    const float fz = fz_raw;
     const int ix = std::clamp(static_cast<int>(fx), 0, nx - 2);
     const int iy = std::clamp(static_cast<int>(fy), 0, ny - 2);
     const int iz = std::clamp(static_cast<int>(fz), 0, nz - 2);
