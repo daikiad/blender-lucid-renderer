@@ -281,9 +281,16 @@ class ViewportRenderer:
                 scene_file = get_scene_cache(session_id).get_cached_file_fast()
                 if scene_file is None or content_changed:
                     scene_file = export_scene_to_file(depsgraph, session_id=session_id)
-                # Skip the disk read + JSON parse when the cached file is
-                # already loaded into the renderer. ~30 ms saved per restart.
-                if scene_file and scene_file != state.last_async_scene_hash:
+                # Force reload whenever the scene actually changed — the export
+                # file path is reused across edits (it's session-specific), so
+                # path-equality alone misses content changes. RenderSession's
+                # load_scene_if_changed hashes the JSON and no-ops if truly
+                # unchanged, so the only extra cost on a path-stable edit is
+                # one disk read + parse.
+                needs_reload = (scene_file
+                                and (scene_file != state.last_async_scene_hash
+                                     or content_changed))
+                if needs_reload:
                     session.load_scene_file(scene_file)
                     state.last_async_scene_hash = scene_file
             except Exception as e:
