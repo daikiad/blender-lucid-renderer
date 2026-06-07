@@ -399,6 +399,138 @@ TEST(PathTracerTest, AsyncAccumulator_SmokeTest) {
     EXPECT_FALSE(pt->is_async_running());
 }
 
+// ============================================================================
+// Phase 2-Vol-GPU: smoke-domain pass-through + volume MIS dispatch tests.
+// Mirrors the CPU `traceVolumeMIS` work shipped as fab46e2; scope here is the
+// single-volume GPU port.
+// ============================================================================
+
+// 1) volume_boundary_only flag pack: every triangle of a boundary mesh must
+//    carry 1.0 in the reserved slot; non-boundary meshes carry 0.0. This
+//    guards the BVH leaf filter that makes the smoke-domain cube transparent.
+TEST(PathTracerTest, Volume_BoundaryOnlyFlagPacks) {
+    Scene scene;
+    // Mesh #0: regular emissive triangle (volume_boundary_only = false).
+    scene.meshes.push_back(make_emissive_z_triangle(1.0f, 0.0f, 0.0f));
+    // Mesh #1: bigger quad acting as the smoke-domain boundary.
+    Mesh boundary = make_principled_quad(-3.0f,
+                                          0.5f, 0.5f, 0.5f,
+                                          0.0f, 1.0f, 0.0f, 1.0f);
+    boundary.material.volume_boundary_only = true;
+    // Give it a minimal heterogeneous volume so the packer's volume-present
+    // path also runs without crashing on grid_max == 0.
+    boundary.material.volume.color    = {0.5f, 0.5f, 0.5f};
+    boundary.material.volume.density  = 1.0f;
+    boundary.material.volume.grid_max = 0.5f;
+    boundary.material.volume.grid_dims[0] = 2;
+    boundary.material.volume.grid_dims[1] = 2;
+    boundary.material.volume.grid_dims[2] = 2;
+    boundary.material.volume.grid_density.assign(8, 0.5f);
+    for (int i = 0; i < 3; ++i) {
+        boundary.material.volume.grid_world_min[i] = -1.5f;
+        boundary.material.volume.grid_world_max[i] = +1.5f;
+    }
+    scene.meshes.push_back(std::move(boundary));
+
+    auto packed = pack_scene_for_path_tracer(scene);
+    ASSERT_EQ(packed.triangle_count, 3u);  // 1 emissive tri + 2 quad tris
+    EXPECT_EQ(packed.volume.present, 1u);
+    // The triangles are reordered by BVH; check that the two flags (0.0 and 1.0)
+    // each appear the expected number of times in slot[37] (= 36 + 1 within
+    // the 40-float stride; slot[36] is light_idx_f, slot[37] is volume flag).
+    int boundary_count = 0;
+    int normal_count   = 0;
+    for (uint32_t i = 0; i < packed.triangle_count; ++i) {
+        const float flag = packed.triangles[i * 40 + 37];
+        if (flag > 0.5f) { ++boundary_count; } else { ++normal_count; }
+    }
+    EXPECT_EQ(boundary_count, 2);  // 2 quad triangles
+    EXPECT_EQ(normal_count,   1);  // 1 emissive triangle
+}
+
+// 2) Volume MIS dispatch path runs and stays finite even when the scene has
+//    no participating medium. The shader's `volume.present == 0` early-out
+//    should keep ALGO_VOLUME_MIS behaving like ALGO_MIS at the surface; we
+//    don't bit-exact compare (RNG sequences differ once the volume block is
+//    in the loop), only that the result is finite and non-zero where MIS is.
+TEST(PathTracerTest, Volume_NoVolumeRendersFinite) {
+    auto ctx = DawnContext::create();
+    ASSERT_TRUE(ctx.has_value());
+    auto pt = PathTracer::create(*ctx);
+    ASSERT_TRUE(pt.has_value());
+
+    Scene scene;
+    scene.meshes.push_back(make_emissive_z_triangle(2.0f, 2.0f, 2.0f));
+    auto packed = pack_scene_for_path_tracer(scene);
+    ASSERT_EQ(packed.volume.present, 0u);
+
+    const uint32_t W = 32, H = 32;
+    auto params = default_camera_params(W, H,
+                                        /*samples=*/4, /*offset=*/0, /*max_bounces=*/4);
+    params.bvh_node_count = packed.bvh_node_count;
+    params.algorithm      = 3u;   // ALGO_VOLUME_MIS
+    auto out = pt->render(*ctx, packed, params);
+    ASSERT_EQ(out.size(), static_cast<size_t>(W) * H * 4);
+
+    for (size_t i = 0; i < out.size(); ++i) {
+        EXPECT_TRUE(std::isfinite(out[i])) << "non-finite at " << i;
+        EXPECT_GE(out[i], 0.0f) << "negative at " << i;
+    }
+    // Center pixel must catch the emissive triangle.
+    const size_t cidx = ((H / 2) * W + (W / 2)) * 4;
+    EXPECT_GT(out[cidx + 0], 1.0f) << "center r should see emission";
+}
+
+// 3) Boundary triangles must not occlude the camera ray. Place a boundary
+//    quad between the camera and an emissive triangle: with the BVH leaf
+//    filter the emissive triangle should still light the center pixel.
+TEST(PathTracerTest, Volume_BoundaryPassThrough) {
+    auto ctx = DawnContext::create();
+    ASSERT_TRUE(ctx.has_value());
+    auto pt = PathTracer::create(*ctx);
+    ASSERT_TRUE(pt.has_value());
+
+    Scene scene;
+    // Emissive triangle far behind (z = -5).
+    Mesh emiss;
+    emiss.vertices = {
+        render::make_position(-1.5f, -1.5f, -5.0f),
+        render::make_position(+1.5f, -1.5f, -5.0f),
+        render::make_position( 0.0f, +2.0f, -5.0f),
+    };
+    Triangle te;
+    te.i0 = 0; te.i1 = 1; te.i2 = 2;
+    const auto n = render::normal_from_unit_vector({0.0f, 0.0f, 1.0f});
+    te.faceNormal = n; te.n0 = n; te.n1 = n; te.n2 = n;
+    te.smooth = false; te.hasUV = false;
+    emiss.triangles.push_back(te);
+    emiss.material.emission = render::make_radiance_rgb(4.0f, 0.0f, 0.0f);
+    scene.meshes.push_back(std::move(emiss));
+
+    // Boundary quad in front of it (z = -2). Without the leaf filter this
+    // would shadow the emissive triangle entirely.
+    Mesh boundary = make_principled_quad(-2.0f,
+                                          0.5f, 0.5f, 0.5f,
+                                          0.0f, 1.0f, 0.0f, 1.0f);
+    boundary.material.volume_boundary_only = true;
+    scene.meshes.push_back(std::move(boundary));
+
+    auto packed = pack_scene_for_path_tracer(scene);
+
+    const uint32_t W = 32, H = 32;
+    auto params = default_camera_params(W, H,
+                                        /*samples=*/4, /*offset=*/0, /*max_bounces=*/2);
+    params.bvh_node_count = packed.bvh_node_count;
+    auto out = pt->render(*ctx, packed, params);
+
+    // Center pixel must see red emission through the (transparent) boundary.
+    const size_t cidx = ((H / 2) * W + (W / 2)) * 4;
+    EXPECT_GT(out[cidx + 0], 1.0f)
+        << "center red should see emission through volume boundary mesh";
+    EXPECT_NEAR(out[cidx + 1], 0.0f, 1e-3f);
+    EXPECT_NEAR(out[cidx + 2], 0.0f, 1e-3f);
+}
+
 #else  // LUCID_HAS_DAWN
 
 #include <gtest/gtest.h>

@@ -93,6 +93,28 @@ struct GpuBvhNode {
 };
 static_assert(sizeof(GpuBvhNode) == 32, "GpuBvhNode must be 32 bytes for std430");
 
+// Per-scene volume metadata (5 vec4s / 80 B, std140-friendly). When no
+// participating medium is present in the scene, `present == 0` and the shader
+// short-circuits the woodcock / NEE / phase work; the grid buffer is still
+// uploaded (1-float placeholder) so the bind group is always valid.
+//
+// Cycles Principled Volume convention (mirrors the CPU side):
+//   sigma_s_c = density * grid_sample(x) * color_c
+//   sigma_t_c = density * grid_sample(x) * (1 + absorption_c)
+//   albedo_c  = color_c / (1 + absorption_c)
+// `grid_max` is `max(grid_sample(x))` over the whole grid; multiplied by
+// `density * max(1 + absorption_c)` it forms the scalar majorant for
+// delta tracking.
+struct GpuVolume {
+    float    bbox_min[3];    float    grid_max;      // 16 B
+    float    bbox_max[3];    float    density;       // 16 B
+    float    color[3];       float    anisotropy;    // 16 B
+    float    absorption[3];  float    _pad0;         // 16 B
+    uint32_t dims[3];        uint32_t present;       // 16 B
+};
+static_assert(sizeof(GpuVolume) == 80,
+              "GpuVolume must be 80 bytes / 5 vec4s for std140");
+
 struct PackedPathScene {
     std::vector<float> triangles;
     uint32_t triangle_count = 0;
@@ -107,8 +129,15 @@ struct PackedPathScene {
     std::vector<float> light_cdf;
     std::vector<GpuBvhNode> bvh_nodes;
     uint32_t bvh_node_count = 0;
+    // Volume metadata + concatenated dense float grid (x fastest, then y, then z;
+    // matches CPU's `sample_grid_trilinear` ordering). Initial GPU scope is one
+    // volume per scene — when the scene has none, `volume.present == 0` and
+    // `volume_grid` is a 1-float placeholder. When the scene has more than one,
+    // the packer logs a warning and only the first reaches the GPU.
+    GpuVolume volume{};
+    std::vector<float> volume_grid;
     // Monotonic id assigned at pack time. PathTracer compares against the id
-    // it last uploaded so the static buffers (tri / lights / bvh) skip
+    // it last uploaded so the static buffers (tri / lights / bvh / volume) skip
     // WriteBuffer on subsequent dispatches with the same scene. 0 = unset
     // (always re-upload, e.g. for tests that construct PackedPathScene by hand).
     uint64_t cache_id = 0;
@@ -148,7 +177,8 @@ struct PathTracerParamsGpu {
     uint32_t bvh_node_count;    // 0 → shader skips traversal (empty scene)
     // Integrator selection: 0=simple (BSDF + POINT delta-NEE only; Phase 2a),
     //                       1=nee    (NEE for all light types, no MIS),
-    //                       2=mis    (NEE + MIS power heuristic, default).
+    //                       2=mis    (NEE + MIS power heuristic, default),
+    //                       3=volume_mis (MIS + in-medium Woodcock+HG scatter).
     uint32_t algorithm;
     uint32_t _pad6;
 };
@@ -265,6 +295,8 @@ private:
     wgpu::Buffer lights_buf_;       uint64_t lights_buf_capacity_ = 0;
     wgpu::Buffer light_cdf_buf_;    uint64_t light_cdf_buf_capacity_ = 0;
     wgpu::Buffer bvh_buf_;          uint64_t bvh_buf_capacity_ = 0;
+    wgpu::Buffer volume_buf_;       // uniform GpuVolume (always 80 B)
+    wgpu::Buffer volume_grid_buf_;  uint64_t volume_grid_buf_capacity_ = 0;
     wgpu::Buffer out_buf_;          uint64_t out_buf_capacity_ = 0;
     wgpu::Buffer stage_buf_;        uint64_t stage_buf_capacity_ = 0;
 

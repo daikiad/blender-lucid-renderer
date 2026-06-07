@@ -58,16 +58,18 @@ const LT_AREA_ELLIPSE:  u32 = 5u;
 const LT_EMISSIVE_MESH: u32 = 6u;
 
 // Integrator algorithm discriminants
-const ALGO_SIMPLE: u32 = 0u;
-const ALGO_NEE:    u32 = 1u;
-const ALGO_MIS:    u32 = 2u;
+const ALGO_SIMPLE:     u32 = 0u;
+const ALGO_NEE:        u32 = 1u;
+const ALGO_MIS:        u32 = 2u;
+const ALGO_VOLUME_MIS: u32 = 3u;  // surface MIS + Woodcock/HG in-medium scatter
 
 // Triangle (10 vec4s / 160 B). Material fields cover the full Principled BSDF
 // socket set (albedo / metallic / roughness / transmission / ior / emission)
-// constant-folded at uv=(0,0). The reserved vec4's first slot now carries
+// constant-folded at uv=(0,0). The reserved vec4's first slot carries
 // `light_idx` (bit-cast from i32) — index into `lights` buffer when this
-// triangle is an EMISSIVE_MESH light, -1 otherwise. Used to compute
-// pdf_light in MIS when a BSDF sample hits the emissive surface.
+// triangle is an EMISSIVE_MESH light, -1 otherwise. The second slot carries
+// `volume_boundary_only` (0.0 or 1.0) — the BVH traversal skips leaves with
+// this flag set so smoke-domain bounding meshes don't occlude rays.
 struct Triangle {
     v0:           vec3<f32>, _p0: f32,
     v1:           vec3<f32>, _p1: f32,
@@ -78,10 +80,10 @@ struct Triangle {
     albedo:       vec3<f32>, metallic:    f32,
     emission:     vec3<f32>, roughness:   f32,
     transmission: f32, ior: f32, _p5: f32, _p6: f32,
-    light_idx_f:  f32,   // bitcast<i32> for the light index, -1 if none
-    _reserved2:   f32,
-    _reserved3:   f32,
-    _reserved4:   f32,
+    light_idx_f:        f32,   // bitcast<i32> for the light index, -1 if none
+    volume_boundary_only: f32, // 1.0 if pass-through volume boundary mesh
+    _reserved3:         f32,
+    _reserved4:         f32,
 };
 
 // BVH node layout (32 bytes / 2 vec4s, std430). Encoding matches GpuBvhNode:
@@ -93,12 +95,26 @@ struct BvhNode {
     bmax: vec3<f32>, right_or_count: i32,
 };
 
+// Per-scene volume metadata. 5 vec4s / 80 B, mirror of `GpuVolume` in
+// `include/gpu/path_tracer.hpp`. Single-volume scope; `present == 0` means
+// the scene has no participating medium (woodcock / phase / in-medium NEE
+// are short-circuited).
+struct GpuVolume {
+    bbox_min:    vec3<f32>, grid_max:    f32,
+    bbox_max:    vec3<f32>, density:     f32,
+    color:       vec3<f32>, anisotropy:  f32,
+    absorption:  vec3<f32>, _pad0:       f32,
+    dims:        vec3<u32>, present:     u32,
+};
+
 @group(0) @binding(0) var<uniform>             params       : PathParams;
 @group(0) @binding(1) var<storage, read>       tris         : array<Triangle>;
 @group(0) @binding(2) var<storage, read_write> out_pixels   : array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read>       lights       : array<Light>;
 @group(0) @binding(4) var<storage, read>       bvh_nodes    : array<BvhNode>;
 @group(0) @binding(5) var<storage, read>       light_cdf    : array<f32>;
+@group(0) @binding(6) var<uniform>             volume       : GpuVolume;
+@group(0) @binding(7) var<storage, read>       volume_grid  : array<f32>;
 
 // ----------------------------------------------------------------------------
 // PCG random helpers
@@ -930,6 +946,186 @@ fn intersect_native_lights(orig: vec3<f32>, dir: vec3<f32>,
 }
 
 // ----------------------------------------------------------------------------
+// Participating-medium helpers (mirrors include/volume/transmittance.hpp and
+// include/volume/phase.hpp on the CPU side). Cycles Principled Volume
+// convention: sigma_s,c = density*sample*color_c, sigma_t,c =
+// density*sample*(1+absorption_c), albedo_c = color_c / (1+absorption_c).
+// ----------------------------------------------------------------------------
+
+// Slab clip [0, t_max] against an axis-aligned bbox. Returns true if there's
+// a non-empty interval inside; writes t_enter / t_exit (both clamped to
+// [0, t_max]).
+fn ray_aabb_segment(orig: vec3<f32>, dir: vec3<f32>, t_max: f32,
+                     bmin: vec3<f32>, bmax: vec3<f32>,
+                     t_enter: ptr<function, f32>,
+                     t_exit:  ptr<function, f32>) -> bool {
+    var t0 = 0.0;
+    var t1 = t_max;
+    for (var axis: i32 = 0; axis < 3; axis = axis + 1) {
+        let r_o = orig[axis];
+        let r_d = dir[axis];
+        if (abs(r_d) < 1e-12) {
+            if (r_o < bmin[axis] || r_o > bmax[axis]) { return false; }
+            continue;
+        }
+        let inv = 1.0 / r_d;
+        var ta = (bmin[axis] - r_o) * inv;
+        var tb = (bmax[axis] - r_o) * inv;
+        if (ta > tb) { let tmp = ta; ta = tb; tb = tmp; }
+        if (ta > t0) { t0 = ta; }
+        if (tb < t1) { t1 = tb; }
+        if (t0 > t1) { return false; }
+    }
+    *t_enter = max(0.0, t0);
+    *t_exit  = t1;
+    return *t_exit > *t_enter;
+}
+
+// Dense float grid sample. World pos must be inside [bbox_min, bbox_max];
+// returns 0 if out-of-range (so the woodcock sampler can step past empty
+// voxels safely). Mirrors `sample_grid_trilinear` in
+// `include/volume/transmittance.hpp`.
+fn sample_grid_trilinear(wx: f32, wy: f32, wz: f32) -> f32 {
+    let ex = max(1e-12, volume.bbox_max.x - volume.bbox_min.x);
+    let ey = max(1e-12, volume.bbox_max.y - volume.bbox_min.y);
+    let ez = max(1e-12, volume.bbox_max.z - volume.bbox_min.z);
+    let u = (wx - volume.bbox_min.x) / ex;
+    let v = (wy - volume.bbox_min.y) / ey;
+    let w = (wz - volume.bbox_min.z) / ez;
+    if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0 || w < 0.0 || w > 1.0) {
+        return 0.0;
+    }
+    let nx = i32(volume.dims.x);
+    let ny = i32(volume.dims.y);
+    let nz = i32(volume.dims.z);
+    let fx = u * f32(nx - 1);
+    let fy = v * f32(ny - 1);
+    let fz = w * f32(nz - 1);
+    let ix = clamp(i32(fx), 0, nx - 2);
+    let iy = clamp(i32(fy), 0, ny - 2);
+    let iz = clamp(i32(fz), 0, nz - 2);
+    let tx = fx - f32(ix);
+    let ty = fy - f32(iy);
+    let tz = fz - f32(iz);
+    let row = nx;
+    let slab = nx * ny;
+    let i000 = u32(ix      + iy      * row + iz      * slab);
+    let i100 = u32(ix + 1  + iy      * row + iz      * slab);
+    let i010 = u32(ix      + (iy + 1)* row + iz      * slab);
+    let i110 = u32(ix + 1  + (iy + 1)* row + iz      * slab);
+    let i001 = u32(ix      + iy      * row + (iz + 1)* slab);
+    let i101 = u32(ix + 1  + iy      * row + (iz + 1)* slab);
+    let i011 = u32(ix      + (iy + 1)* row + (iz + 1)* slab);
+    let i111 = u32(ix + 1  + (iy + 1)* row + (iz + 1)* slab);
+    let c000 = volume_grid[i000]; let c100 = volume_grid[i100];
+    let c010 = volume_grid[i010]; let c110 = volume_grid[i110];
+    let c001 = volume_grid[i001]; let c101 = volume_grid[i101];
+    let c011 = volume_grid[i011]; let c111 = volume_grid[i111];
+    let c00 = c000 * (1.0 - tx) + c100 * tx;
+    let c10 = c010 * (1.0 - tx) + c110 * tx;
+    let c01 = c001 * (1.0 - tx) + c101 * tx;
+    let c11 = c011 * (1.0 - tx) + c111 * tx;
+    let c0  = c00  * (1.0 - ty) + c10  * ty;
+    let c1  = c01  * (1.0 - ty) + c11  * ty;
+    return c0 * (1.0 - tz) + c1 * tz;
+}
+
+// Per-channel Beer-Lambert transmittance over [0, t_max]. Used for in-medium
+// NEE shadow attenuation and for the surface-NEE shadow when volume MIS is
+// active. Returns (1,1,1) when the volume isn't crossed.
+fn extinction_transmittance(orig: vec3<f32>, dir: vec3<f32>, t_max: f32) -> vec3<f32> {
+    if (volume.present == 0u) { return vec3<f32>(1.0, 1.0, 1.0); }
+    var t_in = 0.0; var t_out = 0.0;
+    if (!ray_aabb_segment(orig, dir, t_max,
+                          volume.bbox_min, volume.bbox_max,
+                          &t_in, &t_out)) {
+        return vec3<f32>(1.0, 1.0, 1.0);
+    }
+    let seg_len = t_out - t_in;
+    if (seg_len <= 0.0) { return vec3<f32>(1.0, 1.0, 1.0); }
+    let extent = max(max(volume.bbox_max.x - volume.bbox_min.x,
+                          volume.bbox_max.y - volume.bbox_min.y),
+                      volume.bbox_max.z - volume.bbox_min.z);
+    let max_dim = max(max(volume.dims.x, volume.dims.y), volume.dims.z);
+    let voxel_size = extent / f32(max(1u, max_dim));
+    let step = max(1e-4, voxel_size * 0.5);
+    let n_steps = min(2048, i32(seg_len / step) + 1);
+    let ext = vec3<f32>(1.0 + volume.absorption.r,
+                        1.0 + volume.absorption.g,
+                        1.0 + volume.absorption.b);
+    var tau = vec3<f32>(0.0, 0.0, 0.0);
+    for (var i: i32 = 0; i < n_steps; i = i + 1) {
+        let t = t_in + (f32(i) + 0.5) * step;
+        if (t > t_out) { break; }
+        let p = orig + dir * t;
+        let d = sample_grid_trilinear(p.x, p.y, p.z);
+        if (d <= 0.0) { continue; }
+        let base = volume.density * d * step;
+        tau = tau + base * ext;
+    }
+    return exp(-tau);
+}
+
+// Delta-tracking distance sampler. Returns t < 0 when no scatter happens
+// before t_max; otherwise returns the scatter distance.
+fn sample_volume_distance(orig: vec3<f32>, dir: vec3<f32>, t_max: f32,
+                          rng: ptr<function, u32>) -> f32 {
+    if (volume.present == 0u) { return -1.0; }
+    var t_in = 0.0; var t_out = 0.0;
+    if (!ray_aabb_segment(orig, dir, t_max,
+                          volume.bbox_min, volume.bbox_max,
+                          &t_in, &t_out)) { return -1.0; }
+    let ext_max = max(max(1.0 + volume.absorption.r,
+                          1.0 + volume.absorption.g),
+                      1.0 + volume.absorption.b);
+    let sigma_max = volume.density * volume.grid_max * ext_max;
+    if (sigma_max <= 0.0) { return -1.0; }
+    var t = t_in;
+    for (var iter: u32 = 0u; iter < 4096u; iter = iter + 1u) {
+        let u = max(1e-12, 1.0 - rand_f32(rng));
+        t = t + (-log(u)) / sigma_max;
+        if (t >= t_out) { return -1.0; }
+        let p = orig + dir * t;
+        let d = sample_grid_trilinear(p.x, p.y, p.z);
+        let sigma_t_scalar = volume.density * d * ext_max;
+        if (rand_f32(rng) * sigma_max < sigma_t_scalar) {
+            return t;
+        }
+    }
+    return -1.0;
+}
+
+// Henyey-Greenstein phase function (eval == pdf since normalized over sphere).
+fn hg_eval(g: f32, cos_theta: f32) -> f32 {
+    let gg = g * g;
+    let denom = max(1.0 + gg - 2.0 * g * cos_theta, 1e-8);
+    let inv_4pi = 0.07957747154594767;
+    return inv_4pi * (1.0 - gg) / (denom * sqrt(denom));
+}
+
+fn hg_sample(g: f32, wo: vec3<f32>, u1: f32, u2: f32,
+             wi_out: ptr<function, vec3<f32>>,
+             pdf_out: ptr<function, f32>) {
+    var cos_theta: f32;
+    if (abs(g) < 1e-3) {
+        cos_theta = 1.0 - 2.0 * u1;
+    } else {
+        let gg  = g * g;
+        let sqr = (1.0 - gg) / (1.0 - g + 2.0 * g * u1);
+        cos_theta = clamp((1.0 + gg - sqr * sqr) / (2.0 * g), -1.0, 1.0);
+    }
+    let sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
+    let phi = 6.2831853 * u2;
+    let t  = build_ortho_basis_t(wo);
+    let bt = build_ortho_basis_b(wo);
+    let local = vec3<f32>(sin_theta * cos(phi),
+                          sin_theta * sin(phi),
+                          cos_theta);
+    *wi_out  = normalize(local.x * t + local.y * bt + local.z * wo);
+    *pdf_out = hg_eval(g, cos_theta);
+}
+
+// ----------------------------------------------------------------------------
 // BVH closest-hit traversal — stack-based, prunes by best_t.
 // Writes hit info via pointer args.
 // ----------------------------------------------------------------------------
@@ -978,6 +1174,9 @@ fn trace_closest(orig: vec3<f32>, dir: vec3<f32>) -> ClosestHit {
             let count = node.right_or_count;
             for (var i: i32 = 0; i < count; i = i + 1) {
                 let tri = tris[u32(start + i)];
+                // Skip pass-through volume-domain meshes — they exist only to
+                // define the volume bbox and must not occlude the ray.
+                if (tri.volume_boundary_only > 0.5) { continue; }
                 var t: f32; var u: f32; var v: f32;
                 if (intersect_tri(orig, dir, tri.v0, tri.v1, tri.v2,
                                    &t, &u, &v) && t < result.best_t) {
@@ -1032,6 +1231,7 @@ fn trace_any(orig: vec3<f32>, dir: vec3<f32>, max_t: f32) -> bool {
             let count = node.right_or_count;
             for (var i: i32 = 0; i < count; i = i + 1) {
                 let tri = tris[u32(start + i)];
+                if (tri.volume_boundary_only > 0.5) { continue; }
                 var t: f32; var u: f32; var v: f32;
                 if (intersect_tri(orig, dir, tri.v0, tri.v1, tri.v2,
                                    &t, &u, &v) && t < max_t) {
@@ -1100,6 +1300,71 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (b > 0u && params.light_count > 0u
                 && params.algorithm != ALGO_SIMPLE) {
                 lh = intersect_native_lights(orig, dir, tri_t);
+            }
+
+            // --- ALGO_VOLUME_MIS: try a Woodcock scatter inside the medium
+            // along [0, t_surface]. If it fires we apply per-channel scatter
+            // albedo, in-medium NEE, phase-sample the next direction, and
+            // continue. If not, we fall through to the surface MIS body.
+            if (params.algorithm == ALGO_VOLUME_MIS && volume.present == 1u) {
+                let t_surface = min(tri_t, lh.t);
+                let vs_t = sample_volume_distance(orig, dir, t_surface, &rng);
+                if (vs_t >= 0.0) {
+                    let ext_v = vec3<f32>(1.0 + volume.absorption.r,
+                                          1.0 + volume.absorption.g,
+                                          1.0 + volume.absorption.b);
+                    let albedo = volume.color / ext_v;
+                    throughput = throughput * albedo;
+
+                    let x   = orig + dir * vs_t;
+                    let wov = -dir;
+                    let gv  = volume.anisotropy;
+
+                    // In-medium NEE with MIS
+                    if (params.light_count > 0u) {
+                        let su  = rand_f32(&rng);
+                        let lu1 = rand_f32(&rng);
+                        let lu2 = rand_f32(&rng);
+                        let liv_idx = select_light(su);
+                        let liv     = lights[liv_idx];
+                        let ls      = sample_light(liv, x, lu1, lu2);
+                        let sp_v    = liv.selection_pdf;
+                        if (ls.pdf > 1e-6 && sp_v > 1e-6) {
+                            if (!trace_any(x, ls.direction, ls.distance - 2e-3)) {
+                                let T_sh  = extinction_transmittance(x, ls.direction, ls.distance);
+                                let cos_t = dot(wov, ls.direction);
+                                let pe    = hg_eval(gv, cos_t);
+                                let pdf_l_comb = ls.pdf * sp_v;
+                                var contrib   = (pe / pdf_l_comb) * T_sh * ls.emission;
+                                if (ls.delta == 0u) {
+                                    contrib = contrib * mis_power_heuristic(pdf_l_comb, pe);
+                                }
+                                radiance = radiance + throughput * contrib;
+                            }
+                        }
+                    }
+
+                    // RR
+                    if (b >= 3u) {
+                        let p = min(max(throughput.r,
+                                        max(throughput.g, throughput.b)), 0.95);
+                        if (rand_f32(&rng) > p) { break; }
+                        throughput = throughput / p;
+                    }
+
+                    // Phase-sample next direction; carry phase pdf in last_bsdf_pdf
+                    // (same "PDF of whichever sampler picked this direction" overload
+                    //  used by CPU traceVolumeMIS).
+                    let pu1 = rand_f32(&rng);
+                    let pu2 = rand_f32(&rng);
+                    var wi: vec3<f32>;
+                    var pdf_phase: f32;
+                    hg_sample(gv, wov, pu1, pu2, &wi, &pdf_phase);
+                    last_bsdf_pdf = pdf_phase;
+                    orig = x;
+                    dir  = wi;
+                    continue;
+                }
             }
 
             // Case 1: native light hit before any triangle.

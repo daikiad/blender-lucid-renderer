@@ -628,7 +628,7 @@ public:
             env_color, env_strength,
             packed_pt_cache_->light_count,
             packed_pt_cache_->bvh_node_count,
-            /*algorithm=*/2u);
+            /*algorithm=*/gpu_algorithm_u32());
 
         std::vector<float> raw;
         try {
@@ -738,7 +738,7 @@ public:
             env_color, env_strength,
             packed_pt_cache_->light_count,
             packed_pt_cache_->bvh_node_count,
-            /*algorithm=*/2u);
+            /*algorithm=*/gpu_algorithm_u32());
 
         try {
             gpu_path_tracer_->start_async(*gpu_ctx_, *packed_pt_cache_, params);
@@ -821,7 +821,7 @@ public:
             env_color, env_strength,
             packed_pt_cache_->light_count,
             packed_pt_cache_->bvh_node_count,
-            /*algorithm=*/2u);
+            /*algorithm=*/gpu_algorithm_u32());
 
         try {
             gpu_path_tracer_->reset_async(params);
@@ -862,6 +862,21 @@ public:
     bool is_scene_loaded() const { return scene_loaded_; }
     bool is_camera_set() const { return camera_set_; }
     std::string get_algorithm() const { return algorithm_; }
+
+#ifdef LUCID_HAS_DAWN
+    // Map the CPU-side algorithm_ string to the WGSL `ALGO_*` discriminant.
+    // The shader currently implements simple / nee / mis / volume_mis.
+    // `volume_simple` has no GPU equivalent (Stage A absorption-only); it
+    // falls back to surface MIS, so smoke just won't render — Backend=CPU
+    // still handles it correctly.
+    uint32_t gpu_algorithm_u32() const {
+        if (algorithm_ == "simple")     return 0u;
+        if (algorithm_ == "nee")        return 1u;
+        if (algorithm_ == "mis")        return 2u;
+        if (algorithm_ == "volume_mis") return 3u;
+        return 2u;  // default
+    }
+#endif
     
     int get_mesh_count() const {
         return scene_loaded_ ? static_cast<int>(scene_.meshes.size()) : 0;

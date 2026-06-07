@@ -289,6 +289,10 @@ PackedPathScene pack_scene_for_path_tracer(const Scene& scene) {
         // BSDF sample lands on the surface.
         const bool mesh_is_emissive =
             emission_r > 1e-6f || emission_g > 1e-6f || emission_b > 1e-6f;
+        // Smoke-domain bounding meshes: the BVH traversal skips these so the
+        // ray passes through to whatever real surface is behind them.
+        const float volume_boundary_only_f =
+            mesh.material.volume_boundary_only ? 1.0f : 0.0f;
 
         for (const auto& tri : mesh.triangles) {
             const auto v0 = position_to_vec3(mesh.vertices[tri.i0]);
@@ -350,7 +354,7 @@ PackedPathScene pack_scene_for_path_tracer(const Scene& scene) {
                 }
             }
             tmp_triangles.push_back(std::bit_cast<float>(light_idx));
-            tmp_triangles.push_back(0.0f);
+            tmp_triangles.push_back(volume_boundary_only_f);
             tmp_triangles.push_back(0.0f);
             tmp_triangles.push_back(0.0f);
 
@@ -386,6 +390,52 @@ PackedPathScene pack_scene_for_path_tracer(const Scene& scene) {
     // for importance sampling. SUN/SPOT have area=1 (symbolic) so they get
     // their fair share; emissive triangles and area lights weight by physical
     // surface area.
+    // ---- Volume metadata + dense grid (single-volume scope) ----
+    // Find the first mesh with a heterogeneous medium and populate GpuVolume.
+    // Multi-volume scenes log a warning and only the first reaches the GPU;
+    // CPU still handles all of them when Backend=CPU.
+    int volume_count = 0;
+    const Mesh* picked = nullptr;
+    for (const auto& mesh : scene.meshes) {
+        const auto& vol = mesh.material.volume;
+        if (vol.present() && vol.has_grid()) {
+            ++volume_count;
+            if (picked == nullptr) picked = &mesh;
+        }
+    }
+    if (picked != nullptr) {
+        const auto& vol = picked->material.volume;
+        out.volume.bbox_min[0] = vol.grid_world_min[0];
+        out.volume.bbox_min[1] = vol.grid_world_min[1];
+        out.volume.bbox_min[2] = vol.grid_world_min[2];
+        out.volume.grid_max    = vol.grid_max;
+        out.volume.bbox_max[0] = vol.grid_world_max[0];
+        out.volume.bbox_max[1] = vol.grid_world_max[1];
+        out.volume.bbox_max[2] = vol.grid_world_max[2];
+        out.volume.density     = vol.density;
+        out.volume.color[0]    = vol.color.r;
+        out.volume.color[1]    = vol.color.g;
+        out.volume.color[2]    = vol.color.b;
+        out.volume.anisotropy  = vol.anisotropy;
+        out.volume.absorption[0] = vol.absorption_color.r;
+        out.volume.absorption[1] = vol.absorption_color.g;
+        out.volume.absorption[2] = vol.absorption_color.b;
+        out.volume._pad0       = 0.0f;
+        out.volume.dims[0]     = static_cast<uint32_t>(vol.grid_dims[0]);
+        out.volume.dims[1]     = static_cast<uint32_t>(vol.grid_dims[1]);
+        out.volume.dims[2]     = static_cast<uint32_t>(vol.grid_dims[2]);
+        out.volume.present     = 1u;
+        out.volume_grid        = vol.grid_density;  // dense float copy
+    } else {
+        out.volume.present = 0u;
+        out.volume_grid.assign(1, 0.0f);  // placeholder; shader never reads it
+    }
+    if (volume_count > 1) {
+        std::cerr << "[GPU PathTracer] Scene has " << volume_count
+                  << " volumes; multi-volume not implemented on GPU yet, "
+                     "only the first will render (Backend=CPU handles all)\n";
+    }
+
     out.light_count = static_cast<uint32_t>(out.lights.size());
     out.light_cdf.resize(out.light_count);
     (void)native_light_count;  // silence "unused" — useful for debugging
@@ -480,7 +530,7 @@ std::optional<PathTracer> PathTracer::create(DawnContext& ctx) {
         return std::nullopt;
     }
 
-    wgpu::BindGroupLayoutEntry entries[6] = {};
+    wgpu::BindGroupLayoutEntry entries[8] = {};
     entries[0].binding = 0;
     entries[0].visibility = wgpu::ShaderStage::Compute;
     entries[0].buffer.type = wgpu::BufferBindingType::Uniform;
@@ -508,8 +558,19 @@ std::optional<PathTracer> PathTracer::create(DawnContext& ctx) {
     entries[5].visibility = wgpu::ShaderStage::Compute;
     entries[5].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
 
+    // Binding 6: per-scene volume metadata (GpuVolume uniform, 80 B).
+    entries[6].binding = 6;
+    entries[6].visibility = wgpu::ShaderStage::Compute;
+    entries[6].buffer.type = wgpu::BufferBindingType::Uniform;
+    entries[6].buffer.minBindingSize = sizeof(GpuVolume);
+
+    // Binding 7: dense volume density grid (f32 per voxel, x fastest).
+    entries[7].binding = 7;
+    entries[7].visibility = wgpu::ShaderStage::Compute;
+    entries[7].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+
     wgpu::BindGroupLayoutDescriptor bgl{};
-    bgl.entryCount = 6;
+    bgl.entryCount = 8;
     bgl.entries    = entries;
     wgpu::BindGroupLayout layout = ctx.device().CreateBindGroupLayout(&bgl);
 
@@ -621,7 +682,32 @@ std::vector<float> PathTracer::render(DawnContext& ctx,
         ctx.queue().WriteBuffer(bvh_buf_, 0, scene.bvh_nodes.data(), bvh_bytes);
     }
 
-    // All three uploads (or skips) succeeded — remember the id so we can skip
+    // ---- Volume uniform (fixed-size 80 B) + dense grid storage ----
+    if (!volume_buf_) {
+        wgpu::BufferDescriptor d{};
+        d.size  = sizeof(GpuVolume);
+        d.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+        volume_buf_ = ctx.device().CreateBuffer(&d);
+    }
+    ctx.queue().WriteBuffer(volume_buf_, 0, &scene.volume, sizeof(GpuVolume));
+    const uint64_t vol_grid_bytes = static_cast<uint64_t>(scene.volume_grid.size())
+                                  * sizeof(float);
+    const uint64_t vol_grid_alloc = std::max(vol_grid_bytes, kMinStorageBytes);
+    bool vol_grid_buf_new = false;
+    if (vol_grid_alloc > volume_grid_buf_capacity_ || !volume_grid_buf_) {
+        wgpu::BufferDescriptor d{};
+        d.size  = vol_grid_alloc;
+        d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+        volume_grid_buf_          = ctx.device().CreateBuffer(&d);
+        volume_grid_buf_capacity_ = vol_grid_alloc;
+        vol_grid_buf_new          = true;
+    }
+    if (vol_grid_bytes > 0 && (vol_grid_buf_new || !scene_id_matches)) {
+        ctx.queue().WriteBuffer(volume_grid_buf_, 0,
+                                scene.volume_grid.data(), vol_grid_bytes);
+    }
+
+    // All uploads (or skips) succeeded — remember the id so we can skip
     // next time. Setting it to 0 is the canonical "stale" marker if the test
     // happened to pass a cache_id == 0 scene.
     last_scene_cache_id_ = scene.cache_id;
@@ -650,7 +736,7 @@ std::vector<float> PathTracer::render(DawnContext& ctx,
     }
 
     // ---- Bind group (rebuilt per call) ----
-    wgpu::BindGroupEntry bg_entries[6] = {};
+    wgpu::BindGroupEntry bg_entries[8] = {};
     bg_entries[0].binding = 0;
     bg_entries[0].buffer  = params_buf_;
     bg_entries[0].offset  = 0;
@@ -675,10 +761,18 @@ std::vector<float> PathTracer::render(DawnContext& ctx,
     bg_entries[5].buffer  = light_cdf_buf_;
     bg_entries[5].offset  = 0;
     bg_entries[5].size    = light_cdf_buf_capacity_;
+    bg_entries[6].binding = 6;
+    bg_entries[6].buffer  = volume_buf_;
+    bg_entries[6].offset  = 0;
+    bg_entries[6].size    = sizeof(GpuVolume);
+    bg_entries[7].binding = 7;
+    bg_entries[7].buffer  = volume_grid_buf_;
+    bg_entries[7].offset  = 0;
+    bg_entries[7].size    = volume_grid_buf_capacity_;
 
     wgpu::BindGroupDescriptor bg{};
     bg.layout     = layout_;
-    bg.entryCount = 6;
+    bg.entryCount = 8;
     bg.entries    = bg_entries;
     wgpu::BindGroup bind_group = ctx.device().CreateBindGroup(&bg);
 
@@ -750,6 +844,8 @@ struct PathTracer::AsyncState {
     wgpu::Buffer          lights_buf;       uint64_t lights_buf_size = 0;
     wgpu::Buffer          light_cdf_buf;    uint64_t light_cdf_buf_size = 0;
     wgpu::Buffer          bvh_buf;          uint64_t bvh_buf_size = 0;
+    wgpu::Buffer          volume_buf;       // uniform, always 80 B
+    wgpu::Buffer          volume_grid_buf;  uint64_t volume_grid_buf_size = 0;
 
     // ---- Owned by this session ----
     wgpu::Buffer          accum_buf;        uint64_t accum_buf_capacity = 0;
@@ -795,7 +891,7 @@ void PathTracer::AsyncState::worker_loop() {
     {
         wgpu::BindGroupLayoutEntry dummy{};
         (void)dummy;
-        wgpu::BindGroupEntry bg_entries[6] = {};
+        wgpu::BindGroupEntry bg_entries[8] = {};
         bg_entries[0].binding = 0;
         bg_entries[0].buffer  = params_buf;
         bg_entries[0].offset  = 0;
@@ -820,10 +916,18 @@ void PathTracer::AsyncState::worker_loop() {
         bg_entries[5].buffer  = light_cdf_buf;
         bg_entries[5].offset  = 0;
         bg_entries[5].size    = light_cdf_buf_size;
+        bg_entries[6].binding = 6;
+        bg_entries[6].buffer  = volume_buf;
+        bg_entries[6].offset  = 0;
+        bg_entries[6].size    = sizeof(GpuVolume);
+        bg_entries[7].binding = 7;
+        bg_entries[7].buffer  = volume_grid_buf;
+        bg_entries[7].offset  = 0;
+        bg_entries[7].size    = volume_grid_buf_size;
 
         wgpu::BindGroupDescriptor bg{};
         bg.layout     = layout;
-        bg.entryCount = 6;
+        bg.entryCount = 8;
         bg.entries    = bg_entries;
         bind_group    = ctx->device().CreateBindGroup(&bg);
     }
@@ -1066,6 +1170,27 @@ void PathTracer::start_async(DawnContext& ctx,
     if (bvh_bytes > 0) {
         ctx.queue().WriteBuffer(bvh_buf_, 0, scene.bvh_nodes.data(), bvh_bytes);
     }
+    if (!volume_buf_) {
+        wgpu::BufferDescriptor d{};
+        d.size  = sizeof(GpuVolume);
+        d.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+        volume_buf_ = ctx.device().CreateBuffer(&d);
+    }
+    ctx.queue().WriteBuffer(volume_buf_, 0, &scene.volume, sizeof(GpuVolume));
+    const uint64_t vol_grid_bytes = static_cast<uint64_t>(scene.volume_grid.size())
+                                  * sizeof(float);
+    const uint64_t vol_grid_alloc = std::max(vol_grid_bytes, kMinStorageBytes);
+    if (vol_grid_alloc > volume_grid_buf_capacity_ || !volume_grid_buf_) {
+        wgpu::BufferDescriptor d{};
+        d.size  = vol_grid_alloc;
+        d.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+        volume_grid_buf_          = ctx.device().CreateBuffer(&d);
+        volume_grid_buf_capacity_ = vol_grid_alloc;
+    }
+    if (vol_grid_bytes > 0) {
+        ctx.queue().WriteBuffer(volume_grid_buf_, 0,
+                                scene.volume_grid.data(), vol_grid_bytes);
+    }
     last_scene_cache_id_ = scene.cache_id;
 
     auto st = std::make_unique<AsyncState>();
@@ -1081,6 +1206,9 @@ void PathTracer::start_async(DawnContext& ctx,
     st->light_cdf_buf_size = light_cdf_buf_capacity_;
     st->bvh_buf          = bvh_buf_;
     st->bvh_buf_size     = bvh_buf_capacity_;
+    st->volume_buf       = volume_buf_;
+    st->volume_grid_buf  = volume_grid_buf_;
+    st->volume_grid_buf_size = volume_grid_buf_capacity_;
     st->base_params      = base_params;
     st->width            = base_params.tile_w;
     st->height           = base_params.tile_h;

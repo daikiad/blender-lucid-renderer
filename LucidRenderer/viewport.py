@@ -303,6 +303,17 @@ class ViewportRenderer:
                 except Exception as e:
                     print(f"[ViewportRenderer] set_camera failed: {e}")
 
+            # Propagate the user's Sampling Algorithm choice into the C++
+            # renderer's cached `algorithm_` member. The GPU async dispatch
+            # path reads it via `gpu_algorithm_u32()` when building dispatch
+            # params, so without this call the viewport always renders with
+            # whatever algorithm was last set (default "nee") regardless of
+            # the user's selection.
+            try:
+                session.set_algorithm(lucid.sampling_algorithm)
+            except Exception as e:
+                print(f"[ViewportRenderer] set_algorithm failed: {e}")
+
             if resolution_changed:
                 # Keep state.texture so draw_texture_2d stretches the previous
                 # frame for one tick instead of flashing the gray placeholder.
